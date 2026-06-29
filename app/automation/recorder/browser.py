@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import re
 import shutil
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -101,6 +102,11 @@ _LAUNCH_ARGS = [
     "--autoplay-policy=no-user-gesture-required",
     "--disable-blink-features=AutomationControlled",
 ]
+# In a Linux container Chromium must run without the sandbox (esp. as root) and
+# not rely on the tiny default /dev/shm. Audio just follows the default Pulse
+# sink ("meet"), so no extra flag is needed for capture.
+if sys.platform.startswith("linux"):
+    _LAUNCH_ARGS += ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
 
 
 def playwright_available() -> bool:

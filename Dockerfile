@@ -1,37 +1,55 @@
-# Voice Transcriber — Linux core (recognition + protocol + Weeek + cloud).
-# CPU-only; no GPU needed. The meeting-recorder bot is NOT in this image.
+# Voice Transcriber — Linux, with the Telemost recorder bot.
+# Recognition + protocol + Weeek + cloud, PLUS a headed Chromium bot that joins
+# a Telemost call inside a virtual display (Xvfb) and records screen + audio
+# (x11grab + PulseAudio). CPU-only; no GPU needed.
 FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONUTF8=1 \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
 # System deps:
-#   ffmpeg            — audio/video decoding for transcription
-#   tesseract-ocr(+rus) — on-screen text OCR
-#   tzdata            — correct local meeting times
-#   curl, ca-certificates — health checks / outbound HTTPS to LLM APIs
+#   ffmpeg                       — decode for transcription + x11grab/pulse capture
+#   tesseract-ocr(+rus)          — on-screen text OCR
+#   xvfb, x11-utils              — virtual display for the headed bot browser
+#   pulseaudio                   — audio server + null-sink (meeting loopback)
+#   dbus-x11, fonts, procps      — Chromium runtime niceties / debugging
+#   gosu                         — drop root to the app user at start
+#   tzdata, ca-certificates, curl
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg \
-        tesseract-ocr \
-        tesseract-ocr-rus \
-        tzdata \
-        ca-certificates \
-        curl \
+        tesseract-ocr tesseract-ocr-rus \
+        xvfb x11-utils \
+        pulseaudio \
+        dbus-x11 \
+        fonts-liberation fonts-noto-color-emoji \
+        procps gosu \
+        tzdata ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Install Python deps first for better layer caching.
+# Python deps first (better layer caching).
 COPY requirements.txt ./
 RUN pip install --upgrade pip wheel && pip install -r requirements.txt
 
-# App code.
+# Chromium for the bot, installed to a world-readable path so the non-root app
+# user can use it. playwright (the pip pkg) is already in requirements.txt;
+# --with-deps pulls the browser's own OS libraries.
+RUN playwright install --with-deps chromium \
+    && chmod -R a+rX /ms-playwright
+
+# App code + entrypoint.
 COPY app/ ./app/
 COPY Modelfile ./Modelfile
+COPY docker/ ./docker/
+RUN chmod +x docker/*.sh
 
-# Defaults tuned for a small CPU VM; override in docker-compose / .env.
+# Non-root user to run Xvfb/PulseAudio/Chromium/uvicorn (Pulse dislikes root).
+RUN useradd -m -u 1000 app && mkdir -p /data && chown -R app:app /data
+
 ENV VTX_DATA_DIR=/data \
     VTX_MODEL=small \
     VTX_COMPUTE_TYPE=int8 \
@@ -39,6 +57,9 @@ ENV VTX_DATA_DIR=/data \
     VTX_BEAM_SIZE=5 \
     VTX_DIARIZATION=0 \
     VTX_RECORDER_ENABLED=0 \
+    VTX_SCREEN_RES=1920x1080x24 \
+    VTX_PULSE_MONITOR=meet.monitor \
+    DISPLAY=:99 \
     OLLAMA_URL=http://ollama:11434 \
     TZ=Europe/Moscow
 
@@ -48,4 +69,6 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
     CMD curl -fsS http://localhost:8000/healthz || exit 1
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Entry starts as root (fixes /data ownership) then drops to `app` and brings up
+# Xvfb + PulseAudio (only if VTX_RECORDER_ENABLED=1) before launching uvicorn.
+ENTRYPOINT ["/app/docker/entrypoint.sh"]

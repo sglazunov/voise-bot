@@ -22,6 +22,8 @@ services:
       OLLAMA_URL: "http://ollama:11434"
     volumes:
       - ./data:/data
+    # Chromium needs more shared memory than the 64 MB default.
+    shm_size: "1gb"
     # Ollama is optional; the app degrades gracefully if it's not up.
 
   # Optional local LLM for offline protocol generation. Enable with:
