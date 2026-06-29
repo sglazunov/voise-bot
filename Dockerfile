@@ -2,7 +2,10 @@
 # Recognition + protocol + Weeek + cloud, PLUS a headed Chromium bot that joins
 # a Telemost call inside a virtual display (Xvfb) and records screen + audio
 # (x11grab + PulseAudio). CPU-only; no GPU needed.
-FROM python:3.12-slim
+# Pin to Debian bookworm: the default slim tag moved to trixie, whose loader
+# rejects ctranslate2 4.4.0's executable-stack flag ("cannot enable executable
+# stack as shared object requires").
+FROM python:3.12-slim-bookworm
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONUTF8=1 \

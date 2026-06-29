@@ -10,6 +10,9 @@ data/
 # Local env (secrets)
 .env
 
+# Build / test logs
+build*.log
+
 # OS / editor
 .DS_Store
 Thumbs.db
