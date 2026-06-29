@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .. import config
+from .. import config, security
 from . import clouds, settings as auto_settings, weeek
 
 # How late after start we'll still auto-join (avoids joining long-finished
@@ -35,6 +35,7 @@ class MeetingState:
     title: str
     url: str
     start: datetime | None
+    owner: str = ""                   # which login this meeting belongs to
     state: str = "scheduled"          # scheduled|no_time|missed|recording|uploading|transcribing|done|error
     detail: str = ""
     job_id: str | None = None
@@ -56,7 +57,7 @@ class Scheduler:
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._stop_recording = threading.Event()  # manual "stop current recording"
-        self._last_poll = 0.0
+        self._last_poll: dict[str, float] = {}  # per-user last Weeek poll
         self._boot_time = 0.0  # session start; meetings older than this are missed
 
     # -- lifecycle ----------------------------------------------------------
@@ -69,11 +70,11 @@ class Scheduler:
                                         name="vtx-scheduler")
         self._thread.start()
 
-    def status(self) -> dict:
-        cfg = auto_settings.load()
+    def status(self, user: str) -> dict:
+        cfg = auto_settings.load(user)
         with self._lock:
             meetings = [s.public() for s in sorted(
-                self._states.values(),
+                (s for s in self._states.values() if s.owner == user),
                 key=lambda s: (s.start is None, s.start or datetime.max.replace(
                     tzinfo=timezone.utc)))]
         # Don't let old "missed" meetings pile up: keep only the single most
@@ -86,19 +87,26 @@ class Scheduler:
         return {"running": bool(self._thread and self._thread.is_alive()),
                 "enabled": bool(cfg.get("enabled")),
                 "recording": self._recording.locked(),
-                "last_poll": self._last_poll, "meetings": meetings}
+                "last_poll": self._last_poll.get(user, 0.0), "meetings": meetings}
 
     # -- main loop ----------------------------------------------------------
     def _loop(self) -> None:
         while not self._stop.is_set():
             try:
-                cfg = auto_settings.load()
-                if cfg.get("enabled") and cfg.get("weeek_token"):
-                    interval = max(30, int(cfg.get("poll_interval_sec", 120)))
-                    if time.time() - self._last_poll >= interval:
-                        self._poll(cfg)
-                        self._last_poll = time.time()
-                    self._maybe_trigger(cfg)
+                # Run automation independently for each registered user, under
+                # their own (decrypted) tokens and settings — full isolation.
+                for user in security.list_users():
+                    try:
+                        cfg = auto_settings.load(user)
+                        if not (cfg.get("enabled") and cfg.get("weeek_token")):
+                            continue
+                        interval = max(30, int(cfg.get("poll_interval_sec", 120)))
+                        if time.time() - self._last_poll.get(user, 0.0) >= interval:
+                            self._poll(user, cfg)
+                            self._last_poll[user] = time.time()
+                        self._maybe_trigger(user, cfg)
+                    except Exception:  # one user's failure must not stop others
+                        pass
             except Exception:  # never let the loop die
                 pass
             self._stop.wait(_TICK_SEC)
@@ -110,16 +118,16 @@ class Scheduler:
         except Exception:
             return timezone.utc
 
-    def _poll(self, cfg: dict) -> None:
+    def _poll(self, user: str, cfg: dict) -> None:
         meetings = weeek.upcoming_meetings(
             cfg.get("weeek_token"), cfg.get("weeek_project_id"), self._tz(cfg))
         with self._lock:
             for m in meetings:
-                key = f"{m.task_id}:{m.start.isoformat() if m.start else 'no-time'}"
+                key = f"{user}:{m.task_id}:{m.start.isoformat() if m.start else 'no-time'}"
                 st = self._states.get(key)
                 if st is None:
                     st = MeetingState(key=key, task_id=m.task_id, title=m.title,
-                                      url=m.url, start=m.start)
+                                      url=m.url, start=m.start, owner=user)
                     if m.start is None:
                         st.state, st.detail = "no_time", "В задаче не указано время встречи."
                     self._states[key] = st
@@ -165,9 +173,8 @@ class Scheduler:
                     return False, f"время {hm} вне окна {frm or '00:00'}–{to or '23:59'}"
         return True, ""
 
-    def _maybe_trigger(self, cfg: dict) -> None:
-        # The recorder bot isn't part of this Linux core build — don't try to
-        # auto-record (Weeek polling and the rest of the page still work).
+    def _maybe_trigger(self, user: str, cfg: dict) -> None:
+        # Auto-record only when the bot is enabled in this build.
         if os.getenv("VTX_RECORDER_ENABLED", "0") != "1":
             return
         if self._recording.locked():
@@ -177,6 +184,8 @@ class Scheduler:
         candidates = []
         with self._lock:
             for st in self._states.values():
+                if st.owner != user:
+                    continue
                 if st.state != "scheduled" or st.start is None:
                     continue
                 start = st.start.timestamp()
@@ -217,7 +226,8 @@ class Scheduler:
             return
         try:
             from . import recorder
-            cfg = auto_settings.load()
+            user = st.owner
+            cfg = auto_settings.load(user)
             self._stop_recording.clear()  # fresh manual-stop flag per recording
 
             def log(msg: str) -> None:
@@ -231,7 +241,7 @@ class Scheduler:
             self._set(st, "recording", "Бот заходит на встречу…")
             stamp = time.strftime("%Y%m%d-%H%M%S")
             safe = "".join(c for c in str(st.title) if c.isalnum() or c in " -_")[:40].strip()
-            rec_dir = config.DATA_DIR / "recordings"
+            rec_dir = security.user_dir(user) / "recordings"  # private per-user
             rec_dir.mkdir(parents=True, exist_ok=True)
             out = str(rec_dir / f"{stamp}-{safe or st.task_id}.mp4")
 
@@ -239,7 +249,7 @@ class Scheduler:
                 st.url, out, cfg, on_log=log,
                 should_stop=lambda: (self._stop.is_set()
                                      or self._stop_recording.is_set()
-                                     or not auto_settings.get("enabled")))
+                                     or not auto_settings.get(user, "enabled")))
             if not res.get("ok"):
                 self._set(st, "error", res.get("error") or "Запись не удалась.")
                 return
@@ -285,7 +295,8 @@ class Scheduler:
                     analyze=do_protocol,
                     provider=cfg.get("analyze_provider") or "auto",
                     capture_screen=bool(cfg.get("ocr_screen", True)),
-                    delete_audio_when_done=delivered_elsewhere)
+                    delete_audio_when_done=delivered_elsewhere,
+                    owner=user)
                 st.job_id = job.id
             elif delivered_elsewhere:
                 # No transcription — nothing else needs the file; drop it now.
@@ -328,29 +339,29 @@ class Scheduler:
         self._stop_recording.set()
         return {"ok": True, "detail": "Останавливаю запись…"}
 
-    def set_decision(self, task_id: str, record) -> dict:
-        """Record/skip a specific meeting. `record` is True, False, or None
-        (clear the override → fall back to the default mode)."""
-        cfg = auto_settings.load()
+    def set_decision(self, user: str, task_id: str, record) -> dict:
+        """Record/skip a specific meeting for `user` (override the filters)."""
+        cfg = auto_settings.load(user)
         decisions = dict(cfg.get("rec_decisions") or {})
         if record is None:
             decisions.pop(str(task_id), None)
         else:
             decisions[str(task_id)] = bool(record)
-        auto_settings.save({"rec_decisions": decisions})
+        auto_settings.save(user, {"rec_decisions": decisions})
         # If we'd already skipped it, allow a re-evaluation on the next tick.
         with self._lock:
             for st in self._states.values():
-                if str(st.task_id) == str(task_id) and st.state in ("skipped", "missed"):
+                if (st.owner == user and str(st.task_id) == str(task_id)
+                        and st.state in ("skipped", "missed")):
                     if st.start is not None and st.start.timestamp() >= self._boot_time:
                         st.state, st.detail = "scheduled", ""
         return {"ok": True, "task_id": str(task_id), "record": record}
 
-    def run_now(self, task_id: str) -> dict:
-        """Manually trigger recording for a known meeting task (for testing)."""
+    def run_now(self, user: str, task_id: str) -> dict:
+        """Manually trigger recording for one of `user`'s meetings."""
         with self._lock:
             st = next((s for s in self._states.values()
-                       if str(s.task_id) == str(task_id)), None)
+                       if s.owner == user and str(s.task_id) == str(task_id)), None)
         if not st:
             return {"ok": False, "error": "Встреча не найдена (сначала опрос Weeek)."}
         if self._recording.locked():

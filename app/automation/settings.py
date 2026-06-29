@@ -13,12 +13,40 @@ from __future__ import annotations
 import json
 import os
 import threading
+from pathlib import Path
 from typing import Any
 
-from .. import config
+from .. import config, security
 
-_PATH = config.DATA_DIR / "automation.json"
 _LOCK = threading.Lock()
+
+# Secret fields are stored ENCRYPTED on disk (per-user key) and decrypted only in
+# memory. Dotted paths reach into the nested cloud sub-dicts.
+_SECRET_PATHS = ("weeek_token", "yandex_disk.token",
+                 "gdrive.client_secret", "gdrive.refresh_token")
+
+
+def _path(user: str) -> Path:
+    """Per-user settings file. Each login keeps its own tokens, isolated."""
+    return security.user_dir(user) / "automation.json"
+
+
+def _get_path(d: dict, dotted: str):
+    cur = d
+    parts = dotted.split(".")
+    for p in parts[:-1]:
+        cur = cur.get(p) if isinstance(cur, dict) else None
+        if not isinstance(cur, dict):
+            return None, None, None
+    return cur, parts[-1], (cur.get(parts[-1]) if isinstance(cur, dict) else None)
+
+
+def _transform_secrets(user: str, data: dict, fn) -> None:
+    """Apply `fn(user, value)` in place to every secret path that holds a str."""
+    for dotted in _SECRET_PATHS:
+        parent, key, val = _get_path(data, dotted)
+        if parent is not None and isinstance(val, str) and val:
+            parent[key] = fn(user, val)
 
 # Default shape. Anything missing from the on-disk file falls back to these.
 _DEFAULTS: dict[str, Any] = {
@@ -72,30 +100,49 @@ _DEFAULTS: dict[str, Any] = {
 }
 
 
-def _atomic_write(data: dict[str, Any]) -> None:
-    tmp = _PATH.with_suffix(".tmp")
+def _atomic_write(user: str, data: dict[str, Any]) -> None:
+    path = _path(user)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     try:
-        os.replace(tmp, _PATH)
+        os.replace(tmp, path)
     finally:
         try:
-            os.chmod(_PATH, 0o600)
+            os.chmod(path, 0o600)
         except OSError:
             pass  # Windows / unsupported FS — best effort only
 
 
-def load() -> dict[str, Any]:
-    """Return the full settings dict (defaults merged with the on-disk file)."""
+def _read_raw(user: str) -> dict[str, Any]:
+    """On-disk dict (secrets still ENCRYPTED), merged onto defaults."""
+    import copy
+    data = copy.deepcopy(_DEFAULTS)
+    path = _path(user)
+    if path.exists():
+        try:
+            stored = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(stored, dict):
+                _deep_update(data, stored)
+        except (ValueError, OSError):
+            pass  # corrupt file -> fall back to defaults
+    return data
+
+
+def _deep_update(base: dict, extra: dict) -> None:
+    for k, v in extra.items():
+        if k in _NESTED_KEYS and isinstance(v, dict) and isinstance(base.get(k), dict):
+            base[k].update(v)
+        else:
+            base[k] = v
+
+
+def load(user: str) -> dict[str, Any]:
+    """Return `user`'s settings with secrets DECRYPTED in memory."""
     with _LOCK:
-        data = dict(_DEFAULTS)
-        if _PATH.exists():
-            try:
-                stored = json.loads(_PATH.read_text(encoding="utf-8"))
-                if isinstance(stored, dict):
-                    data.update(stored)
-            except (ValueError, OSError):
-                pass  # corrupt file -> fall back to defaults
-        return data
+        data = _read_raw(user)
+    _transform_secrets(user, data, security.decrypt_secret)
+    return data
 
 
 # Keys whose values are sub-dicts that should be MERGED, not replaced, so a
@@ -103,17 +150,13 @@ def load() -> dict[str, Any]:
 _NESTED_KEYS = ("yandex_disk", "gdrive")
 
 
-def save(values: dict[str, Any]) -> dict[str, Any]:
-    """Merge `values` into the stored settings and persist. Returns new state."""
+def save(user: str, values: dict[str, Any]) -> dict[str, Any]:
+    """Merge `values` (plaintext) into `user`'s settings and persist, with
+    secrets ENCRYPTED at rest. Returns the new decrypted state."""
     with _LOCK:
-        data = dict(_DEFAULTS)
-        if _PATH.exists():
-            try:
-                stored = json.loads(_PATH.read_text(encoding="utf-8"))
-                if isinstance(stored, dict):
-                    data.update(stored)
-            except (ValueError, OSError):
-                pass
+        # Work in plaintext: decrypt current, apply update, then re-encrypt to disk.
+        data = _read_raw(user)
+        _transform_secrets(user, data, security.decrypt_secret)
         for k, v in values.items():
             if k in _NESTED_KEYS and isinstance(v, dict):
                 base = dict(data.get(k) or {})
@@ -121,17 +164,19 @@ def save(values: dict[str, Any]) -> dict[str, Any]:
                 data[k] = base
             else:
                 data[k] = v
-        _atomic_write(data)
+        on_disk = json.loads(json.dumps(data))  # deep copy
+        _transform_secrets(user, on_disk, security.encrypt_secret)
+        _atomic_write(user, on_disk)
         return data
 
 
-def get(key: str, default: Any = None) -> Any:
-    return load().get(key, default)
+def get(user: str, key: str, default: Any = None) -> Any:
+    return load(user).get(key, default)
 
 
-def redacted() -> dict[str, Any]:
+def redacted(user: str) -> dict[str, Any]:
     """Settings safe to send to the UI — secrets replaced with a presence flag."""
-    data = load()
+    data = load(user)
     out = dict(data)
     out["weeek_token"] = bool(data.get("weeek_token"))
     yd = dict(data.get("yandex_disk") or {})

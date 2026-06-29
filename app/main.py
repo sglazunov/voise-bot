@@ -5,12 +5,14 @@ import os
 import shutil
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import HTMLResponse, PlainTextResponse, FileResponse, JSONResponse
+from fastapi import (Depends, FastAPI, File, Form, HTTPException, Request,
+                     Response, UploadFile)
+from fastapi.responses import (HTMLResponse, PlainTextResponse, FileResponse,
+                               JSONResponse, RedirectResponse)
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
-from . import config, llm, analyze
+from . import config, llm, analyze, security
 from .jobs import store, STATUS_DONE, STATUS_ANALYZING, STATUS_CANCELLED
 
 
@@ -71,6 +73,101 @@ app = FastAPI(title="Voice Transcriber", version="1.0")
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
 
+# ===========================================================================
+# Authentication gate
+# ===========================================================================
+# Paths reachable WITHOUT a session. Everything else requires login.
+_PUBLIC_PATHS = {"/login", "/register", "/healthz",
+                 "/api/auth/login", "/api/auth/register"}
+_SECURE_COOKIE = os.getenv("VTX_HTTPS", "0") == "1"
+
+
+@app.middleware("http")
+async def _auth_gate(request: Request, call_next):
+    """Resolve the session into request.state.user; block everything else.
+
+    HTML routes redirect to /login; API routes get a 401. This is the single
+    choke point that makes the whole site private on a public domain."""
+    user = security.session_user(request.cookies.get(security.SESSION_COOKIE))
+    request.state.user = user
+    path = request.url.path
+    if user or path in _PUBLIC_PATHS:
+        return await call_next(request)
+    if path.startswith("/api/"):
+        return JSONResponse({"detail": "Требуется вход."}, status_code=401)
+    return RedirectResponse("/login", status_code=303)
+
+
+def current_user(request: Request) -> str:
+    """Dependency: the authenticated login (the gate guarantees it is set)."""
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(401, "Требуется вход.")
+    return user
+
+
+def _set_session_cookie(resp: Response, token: str) -> None:
+    resp.set_cookie(security.SESSION_COOKIE, token, httponly=True,
+                    samesite="lax", secure=_SECURE_COOKIE,
+                    max_age=security.SESSION_TTL, path="/")
+
+
+class Credentials(BaseModel):
+    username: str
+    password: str
+    code: str = ""
+
+
+@app.get("/login", response_class=HTMLResponse)
+def login_page(request: Request):
+    if getattr(request.state, "user", None):
+        return RedirectResponse("/", status_code=303)
+    return templates.TemplateResponse(
+        "login.html", {"request": request, "mode": "login",
+                       "first_run": not security.list_users()})
+
+
+@app.get("/register", response_class=HTMLResponse)
+def register_page(request: Request):
+    return templates.TemplateResponse(
+        "login.html", {"request": request, "mode": "register",
+                       "first_run": not security.list_users()})
+
+
+@app.post("/api/auth/register")
+def auth_register(body: Credentials):
+    res = security.create_user(body.username, body.password, body.code)
+    if not res.get("ok"):
+        raise HTTPException(400, res.get("error") or "Не удалось зарегистрироваться.")
+    token = security.create_session(res["username"])
+    resp = JSONResponse({"ok": True, "username": res["username"]})
+    _set_session_cookie(resp, token)
+    return resp
+
+
+@app.post("/api/auth/login")
+def auth_login(body: Credentials):
+    if not security.verify_user(body.username, body.password):
+        raise HTTPException(401, "Неверный логин или пароль.")
+    token = security.create_session(body.username)
+    resp = JSONResponse({"ok": True, "username": security.normalize_username(body.username)})
+    _set_session_cookie(resp, token)
+    return resp
+
+
+@app.post("/api/auth/logout")
+def auth_logout(request: Request):
+    security.destroy_session(request.cookies.get(security.SESSION_COOKIE))
+    resp = JSONResponse({"ok": True})
+    resp.delete_cookie(security.SESSION_COOKIE, path="/")
+    return resp
+
+
+@app.get("/api/auth/me")
+def auth_me(user: str = Depends(current_user)):
+    return {"username": user}
+
+
 @app.on_event("startup")
 def _start_scheduler() -> None:
     """Start the meeting-automation scheduler. It self-gates on the `enabled`
@@ -96,12 +193,13 @@ def automation_page(request: Request):
 
 
 @app.get("/", response_class=HTMLResponse)
-def index(request: Request):
+def index(request: Request, user: str = Depends(current_user)):
     return templates.TemplateResponse(
         "index.html",
         {
             "request": request,
-            "jobs": [j.to_public() for j in store.list()],
+            "username": user,
+            "jobs": [j.to_public() for j in store.list(owner=user)],
             "diarization_enabled": config.DIARIZATION_ENABLED,
             "analysis_enabled": bool(config.available_providers()),
             "providers": _provider_list(),
@@ -126,6 +224,7 @@ async def create_job(
     instructions: str = Form(""),
     custom_prompt: str = Form(""),
     capture_screen: bool = Form(False),
+    user: str = Depends(current_user),
 ):
     ext = Path(file.filename or "").suffix.lower()
     if ext not in ALLOWED_EXT:
@@ -151,13 +250,14 @@ async def create_job(
                        analyze=want_analyze, provider=provider,
                        analysis_instructions=instructions.strip(),
                        analysis_prompt=custom_prompt.strip(),
-                       capture_screen=capture_screen, model=model_sel)
+                       capture_screen=capture_screen, model=model_sel,
+                       owner=user)
     return JSONResponse({"job_id": job.id, **job.to_public()}, status_code=201)
 
 
 @app.get("/api/jobs")
-def list_jobs():
-    return [j.to_public() for j in store.list()]
+def list_jobs(user: str = Depends(current_user)):
+    return [j.to_public() for j in store.list(owner=user)]
 
 
 # ---- LLM providers (protocol engine) --------------------------------------
@@ -218,27 +318,31 @@ def connect_provider(body: ProviderKey):
     return {"ok": True, "connected": provider, "providers": _provider_list()}
 
 
-@app.get("/api/jobs/{job_id}")
-def get_job(job_id: str):
-    job = store.get(job_id)
+def _require_owned(job_id: str, user: str):
+    job = store.get_owned(job_id, user)
     if not job:
         raise HTTPException(404, "Задача не найдена")
-    return job.to_public()
+    return job
+
+
+@app.get("/api/jobs/{job_id}")
+def get_job(job_id: str, user: str = Depends(current_user)):
+    return _require_owned(job_id, user).to_public()
 
 
 @app.post("/api/jobs/{job_id}/pause")
-def pause_job(job_id: str):
-    return _control(job_id, "pause")
+def pause_job(job_id: str, user: str = Depends(current_user)):
+    return _control(job_id, "pause", user)
 
 
 @app.post("/api/jobs/{job_id}/resume")
-def resume_job(job_id: str):
-    return _control(job_id, "resume")
+def resume_job(job_id: str, user: str = Depends(current_user)):
+    return _control(job_id, "resume", user)
 
 
 @app.post("/api/jobs/{job_id}/cancel")
-def cancel_job(job_id: str):
-    return _control(job_id, "cancel")
+def cancel_job(job_id: str, user: str = Depends(current_user)):
+    return _control(job_id, "cancel", user)
 
 
 class ReanalyzeBody(BaseModel):
@@ -248,7 +352,8 @@ class ReanalyzeBody(BaseModel):
 
 
 @app.post("/api/jobs/{job_id}/reanalyze")
-def reanalyze_job(job_id: str, body: ReanalyzeBody):
+def reanalyze_job(job_id: str, body: ReanalyzeBody, user: str = Depends(current_user)):
+    _require_owned(job_id, user)
     try:
         job = store.reanalyze(job_id, provider=body.provider,
                               instructions=body.instructions,
@@ -266,7 +371,8 @@ def prompt_default():
     return {"prompt": analyze.EXPERT_PROMPT_DEFAULT}
 
 
-def _control(job_id: str, action: str):
+def _control(job_id: str, action: str, user: str):
+    _require_owned(job_id, user)
     fn = {"pause": store.pause, "resume": store.resume, "cancel": store.cancel}[action]
     try:
         job = fn(job_id)
@@ -278,11 +384,9 @@ def _control(job_id: str, action: str):
 
 
 @app.get("/api/jobs/{job_id}/partial")
-def get_partial(job_id: str):
+def get_partial(job_id: str, user: str = Depends(current_user)):
     """Live transcript-so-far for the streaming UI."""
-    job = store.get(job_id)
-    if not job:
-        raise HTTPException(404, "Задача не найдена")
+    job = _require_owned(job_id, user)
     return {
         "status": job.status,
         "progress": job.progress,
@@ -292,10 +396,9 @@ def get_partial(job_id: str):
 
 
 @app.get("/api/jobs/{job_id}/result")
-def get_result(job_id: str, format: str = "txt", provider: str = ""):
-    job = store.get(job_id)
-    if not job:
-        raise HTTPException(404, "Задача не найдена")
+def get_result(job_id: str, format: str = "txt", provider: str = "",
+               user: str = Depends(current_user)):
+    job = _require_owned(job_id, user)
     if format not in {"txt", "srt", "json", "docx", "screen"}:
         raise HTTPException(400, "format должен быть txt | srt | json | docx | screen")
 
@@ -422,10 +525,10 @@ def model_download(name: str = ""):
 # Meeting automation (Weeek → record → cloud → protocol). See app/automation.
 # --------------------------------------------------------------------------- #
 @app.get("/api/automation/settings")
-def automation_settings():
+def automation_settings(user: str = Depends(current_user)):
     """Current automation settings (secrets redacted to presence flags)."""
     from .automation import settings as auto_settings
-    return auto_settings.redacted()
+    return auto_settings.redacted(user)
 
 
 class AutomationSettings(BaseModel):
@@ -468,20 +571,20 @@ class AutomationSettings(BaseModel):
 
 
 @app.post("/api/automation/settings")
-def automation_save(body: AutomationSettings):
+def automation_save(body: AutomationSettings, user: str = Depends(current_user)):
     """Persist automation settings. Only non-null fields are updated."""
     from .automation import settings as auto_settings
     values = {k: v for k, v in body.model_dump().items() if v is not None}
-    auto_settings.save(values)
-    return auto_settings.redacted()
+    auto_settings.save(user, values)
+    return auto_settings.redacted(user)
 
 
 @app.get("/api/automation/meetings")
-def automation_meetings():
+def automation_meetings(user: str = Depends(current_user)):
     """Upcoming meeting tasks from Weeek that carry a Telemost link."""
     from .automation import settings as auto_settings, weeek
     from datetime import timezone
-    cfg = auto_settings.load()
+    cfg = auto_settings.load(user)
     token = cfg.get("weeek_token")
     if not token:
         raise HTTPException(400, "Сначала задайте токен Weeek в настройках.")
@@ -510,26 +613,28 @@ class MeetingDecision(BaseModel):
 
 
 @app.post("/api/automation/meetings/{task_id}/decision")
-def automation_meeting_decision(task_id: str, body: MeetingDecision):
+def automation_meeting_decision(task_id: str, body: MeetingDecision,
+                                user: str = Depends(current_user)):
     """Choose whether the bot records this specific meeting (overrides filters)."""
     from .automation.scheduler import scheduler
-    return scheduler.set_decision(task_id, body.record)
+    return scheduler.set_decision(user, task_id, body.record)
 
 
 @app.get("/api/automation/clouds/status")
-def automation_clouds_status():
+def automation_clouds_status(user: str = Depends(current_user)):
     """Per-backend cloud readiness + which one is selected (for the UI)."""
     from .automation import settings as auto_settings, clouds
-    return clouds.readiness(auto_settings.load())
+    return clouds.readiness(auto_settings.load(user))
 
 
 @app.post("/api/automation/clouds/test")
-def automation_clouds_test(backend: str | None = None):
+def automation_clouds_test(backend: str | None = None,
+                           user: str = Depends(current_user)):
     """Upload a tiny test file to the selected (or given) cloud to verify creds."""
     import tempfile
     from datetime import datetime, timezone
     from .automation import settings as auto_settings, clouds
-    cfg = auto_settings.load()
+    cfg = auto_settings.load(user)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
                                      encoding="utf-8") as f:
@@ -548,18 +653,18 @@ def automation_clouds_test(backend: str | None = None):
 
 
 @app.get("/api/automation/scheduler/status")
-def automation_scheduler_status():
+def automation_scheduler_status(user: str = Depends(current_user)):
     """Scheduler state + the meetings it's tracking and their pipeline status."""
     from .automation.scheduler import scheduler
     scheduler.start()  # idempotent — ensures it's running even if startup was skipped
-    return scheduler.status()
+    return scheduler.status(user)
 
 
 @app.post("/api/automation/scheduler/run-now")
-def automation_scheduler_run_now(task_id: str):
+def automation_scheduler_run_now(task_id: str, user: str = Depends(current_user)):
     """Manually record a known meeting right now (poll Weeek first to populate)."""
     from .automation.scheduler import scheduler
-    res = scheduler.run_now(task_id)
+    res = scheduler.run_now(user, task_id)
     if not res.get("ok"):
         raise HTTPException(400, res.get("error"))
     return res
@@ -576,42 +681,42 @@ def automation_scheduler_stop_recording():
 
 
 @app.get("/api/automation/recorder/status")
-def automation_recorder_status():
+def automation_recorder_status(user: str = Depends(current_user)):
     """What the Telemost recorder needs (Playwright/ffmpeg/audio) — for the UI."""
     from .automation import settings as auto_settings, recorder
-    return recorder.readiness(auto_settings.load())
+    return recorder.readiness(auto_settings.load(user))
 
 
 @app.get("/api/automation/recorder/audio-devices")
-def automation_recorder_audio_devices():
-    """List dshow audio devices ffmpeg can capture (Windows)."""
+def automation_recorder_audio_devices(user: str = Depends(current_user)):
+    """List audio capture sources ffmpeg can use (pulse on Linux / dshow on Win)."""
     from .automation import settings as auto_settings
     from .automation.recorder import capture
-    cfg = auto_settings.load()
+    cfg = auto_settings.load(user)
     return {"devices": capture.list_audio_devices(cfg.get("ffmpeg_path") or "ffmpeg")}
 
 
 @app.get("/api/automation/recorder/login-status")
-def automation_recorder_login_status():
+def automation_recorder_login_status(user: str = Depends(current_user)):
     """Whether the recorder profile is logged into Yandex (for the UI hint)."""
     from .automation import settings as auto_settings
     from .automation.recorder import browser
-    return browser.login_status(auto_settings.load())
+    return browser.login_status(auto_settings.load(user))
 
 
 @app.get("/api/automation/recorder/audio-test")
-def automation_recorder_audio_test():
+def automation_recorder_audio_test(user: str = Depends(current_user)):
     """Record a few seconds from the chosen audio device and report its level —
     so the user can verify the meeting's sound actually reaches it."""
     from .automation import settings as auto_settings
     from .automation.recorder import capture
-    cfg = auto_settings.load()
+    cfg = auto_settings.load(user)
     return capture.test_audio_level(cfg.get("ffmpeg_path") or "ffmpeg",
                                     (cfg.get("audio_device") or "").strip())
 
 
 @app.post("/api/automation/recorder/login")
-def automation_recorder_login():
+def automation_recorder_login(user: str = Depends(current_user)):
     """Open a headed browser so the user logs into Yandex once (profile mode)."""
     import threading
     from .automation import settings as auto_settings
@@ -619,7 +724,7 @@ def automation_recorder_login():
     if not browser.playwright_available():
         raise HTTPException(400, "Playwright не установлен: pip install playwright "
                                  "&& playwright install chromium")
-    cfg = auto_settings.load()
+    cfg = auto_settings.load(user)
     threading.Thread(target=browser.login, args=(cfg,), daemon=True).start()
     return {"started": True,
             "detail": "Открывается окно браузера — войдите в Яндекс и закройте его."}
@@ -631,13 +736,13 @@ class RecorderTest(BaseModel):
 
 
 @app.post("/api/automation/recorder/test")
-def automation_recorder_test(body: RecorderTest):
+def automation_recorder_test(body: RecorderTest, user: str = Depends(current_user)):
     """Manually join a Telemost link and record for a few seconds, to verify
     the bot + capture work on this machine before automating."""
     import time
     from .automation import settings as auto_settings, recorder
-    cfg = auto_settings.load()
-    out = str(config.DATA_DIR / "recordings" /
+    cfg = auto_settings.load(user)
+    out = str(security.user_dir(user) / "recordings" /
               f"test-{time.strftime('%Y%m%d-%H%M%S')}.mp4")
     Path(out).parent.mkdir(parents=True, exist_ok=True)
     deadline = time.time() + max(5, min(int(body.seconds), 300))
@@ -651,11 +756,11 @@ def automation_recorder_test(body: RecorderTest):
 
 
 @app.get("/api/automation/weeek/projects")
-def automation_weeek_projects():
+def automation_weeek_projects(user: str = Depends(current_user)):
     """List the workspace's projects (id + name) so the user can pick which one
     to record. The token sees all projects; `projectId` is what scopes it."""
     from .automation import settings as auto_settings, weeek
-    token = auto_settings.get("weeek_token")
+    token = auto_settings.get(user, "weeek_token")
     if not token:
         raise HTTPException(400, "Сначала задайте токен Weeek и нажмите «Сохранить».")
     try:
@@ -665,10 +770,10 @@ def automation_weeek_projects():
 
 
 @app.get("/api/automation/weeek/probe")
-def automation_weeek_probe(task_id: str):
+def automation_weeek_probe(task_id: str, user: str = Depends(current_user)):
     """Return the raw JSON of one Weeek task — used to pin date/link field names."""
     from .automation import settings as auto_settings, weeek
-    token = auto_settings.get("weeek_token")
+    token = auto_settings.get(user, "weeek_token")
     if not token:
         raise HTTPException(400, "Сначала задайте токен Weeek в настройках.")
     try:

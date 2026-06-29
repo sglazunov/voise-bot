@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ "Регистрация" if mode == "register" else "Вход" }} · Voice Transcriber</title>
+  <style>
+    :root { --bg:#0b1220; --card:#121a2b; --line:#22304a; --fg:#e6edf6; --muted:#8aa0bd;
+            --accent:#3aa0ff; --bad:#fecaca; --badbg:#3a1620; }
+    * { box-sizing:border-box; }
+    body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
+           background:radial-gradient(1200px 600px at 50% -10%, #16233d 0%, var(--bg) 60%);
+           color:var(--fg); font:15px/1.5 system-ui,Segoe UI,Roboto,sans-serif; }
+    .card { width:min(92vw,380px); background:var(--card); border:1px solid var(--line);
+            border-radius:16px; padding:28px 26px; box-shadow:0 20px 60px rgba(0,0,0,.4); }
+    h1 { margin:0 0 4px; font-size:20px; }
+    .sub { color:var(--muted); margin:0 0 18px; font-size:13px; }
+    label { display:block; font-size:13px; color:var(--muted); margin:12px 0 4px; }
+    input { width:100%; padding:11px 12px; background:#0d1525; border:1px solid var(--line);
+            border-radius:10px; color:var(--fg); font-size:15px; outline:none; }
+    input:focus { border-color:var(--accent); }
+    button { width:100%; margin-top:18px; padding:12px; border:0; border-radius:10px;
+             background:var(--accent); color:#04101f; font-weight:600; font-size:15px; cursor:pointer; }
+    button:disabled { opacity:.6; cursor:default; }
+    .alt { text-align:center; margin-top:14px; font-size:13px; color:var(--muted); }
+    .alt a { color:var(--accent); text-decoration:none; }
+    .err { display:none; margin-top:12px; padding:9px 11px; border-radius:9px;
+           background:var(--badbg); color:var(--bad); font-size:13px; }
+    .note { margin-top:12px; font-size:12px; color:var(--muted); }
+  </style>
+</head>
+<body>
+  <div class="card">
+    {% if mode == "register" %}
+      <h1>Создать аккаунт</h1>
+      <p class="sub">{% if first_run %}Первый аккаунт станет администратором.{% else %}Регистрация нового пользователя.{% endif %}</p>
+    {% else %}
+      <h1>Вход</h1>
+      <p class="sub">Личный кабинет — ваши данные и токены доступны только вам.</p>
+    {% endif %}
+
+    <form id="f" autocomplete="on">
+      <label for="username">Логин</label>
+      <input id="username" name="username" autocomplete="username" autofocus
+             placeholder="например, sergey">
+      <label for="password">Пароль</label>
+      <input id="password" name="password" type="password"
+             autocomplete="{{ 'new-password' if mode == 'register' else 'current-password' }}"
+             placeholder="{{ 'не короче 8 символов' if mode == 'register' else 'ваш пароль' }}">
+      {% if mode == "register" and not first_run %}
+      <label for="code">Код регистрации</label>
+      <input id="code" name="code" placeholder="выдаётся администратором">
+      {% endif %}
+      <button id="btn" type="submit">{{ "Зарегистрироваться" if mode == "register" else "Войти" }}</button>
+      <div id="err" class="err"></div>
+    </form>
+
+    {% if mode == "register" %}
+      <div class="alt">Уже есть аккаунт? <a href="/login">Войти</a></div>
+    {% else %}
+      <div class="alt">Нет аккаунта? <a href="/register">Регистрация</a></div>
+    {% endif %}
+    <div class="note">🔒 Пароли хранятся как PBKDF2-хеши, токены — зашифрованы под вашим логином.</div>
+  </div>
+
+  <script>
+    const MODE = {{ 'true' if mode == 'register' else 'false' }} ? "register" : "login";
+    const f = document.getElementById('f');
+    const err = document.getElementById('err');
+    const btn = document.getElementById('btn');
+    f.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      err.style.display = 'none'; btn.disabled = true;
+      const body = {
+        username: document.getElementById('username').value.trim(),
+        password: document.getElementById('password').value,
+        code: (document.getElementById('code')||{}).value || ""
+      };
+      try {
+        const r = await fetch('/api/auth/' + MODE, {
+          method: 'POST', headers: {'Content-Type':'application/json'},
+          body: JSON.stringify(body)
+        });
+        const data = await r.json().catch(()=>({}));
+        if (!r.ok) throw new Error(data.detail || 'Ошибка');
+        window.location.href = '/';
+      } catch (ex) {
+        err.textContent = ex.message; err.style.display = 'block'; btn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

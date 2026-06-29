@@ -18,3 +18,7 @@ build*.log
 Thumbs.db
 .idea/
 .vscode/
+
+# pytest / temp
+.pytest_cache/
+_td/

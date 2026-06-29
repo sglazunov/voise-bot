@@ -73,6 +73,10 @@
   </style>
 </head>
 <body>
+<div style="position:fixed;top:10px;right:14px;z-index:50;font:13px system-ui;color:#8aa0bd">
+  <a href="#" onclick="fetch('/api/auth/logout',{method:'POST'}).then(()=>location='/login');return false"
+     style="color:#3aa0ff;text-decoration:none">Выйти</a>
+</div>
 <div class="wrap">
   <h1>🤖 Автоматизация встреч</h1>
   <div class="sub">Weeek → запись Телемоста ботом → облако → распознавание и протокол.

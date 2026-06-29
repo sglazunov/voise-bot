@@ -52,6 +52,7 @@ class Job:
     capture_screen: bool = False     # OCR on-screen text from the video
     delete_audio_when_done: bool = False  # delete the source media after processing
                                           # (recordings already sent to the UI's cloud)
+    owner: str = ""                  # the login that owns this job (isolation)
     status: str = STATUS_QUEUED
     progress: float = 0.0          # 0..1
     created_at: float = field(default_factory=time.time)
@@ -127,7 +128,7 @@ class JobStore:
                analyze: bool = False, provider: str = "auto",
                analysis_instructions: str = "", analysis_prompt: str = "",
                capture_screen: bool = False, model: str = "",
-               delete_audio_when_done: bool = False) -> Job:
+               delete_audio_when_done: bool = False, owner: str = "") -> Job:
         job = Job(
             id=uuid.uuid4().hex[:12],
             filename=filename,
@@ -143,6 +144,7 @@ class JobStore:
             analysis_prompt=analysis_prompt,
             capture_screen=capture_screen,
             delete_audio_when_done=delete_audio_when_done,
+            owner=owner,
         )
         with self._lock:
             self._jobs[job.id] = job
@@ -152,6 +154,14 @@ class JobStore:
 
     def get(self, job_id: str) -> Optional[Job]:
         return self._jobs.get(job_id)
+
+    def get_owned(self, job_id: str, owner: str) -> Optional[Job]:
+        """Return the job only if it belongs to `owner` — the isolation check
+        every per-job endpoint must use so one login can't touch another's jobs."""
+        job = self._jobs.get(job_id)
+        if job is None or job.owner != owner:
+            return None
+        return job
 
     def partial(self, job_id: str) -> list:
         """Segments transcribed so far (live), for the streaming UI."""
@@ -168,8 +178,11 @@ class JobStore:
                                       "chars": len(text)}
         return cb
 
-    def list(self) -> list[Job]:
-        return sorted(self._jobs.values(), key=lambda j: j.created_at, reverse=True)
+    def list(self, owner: str | None = None) -> list[Job]:
+        jobs = self._jobs.values()
+        if owner is not None:
+            jobs = [j for j in jobs if j.owner == owner]
+        return sorted(jobs, key=lambda j: j.created_at, reverse=True)
 
     def result_path(self, job_id: str, fmt: str) -> Path:
         return config.RESULT_DIR / f"{job_id}.{fmt}"
