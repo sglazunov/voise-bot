@@ -1,0 +1,1206 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Распознавание речи</title>
+  <style>
+    :root{--bg:#0a0f1c;--card:#151f33;--card2:#0f1830;--accent:#5ec6ff;--accent2:#22d3ee;
+          --txt:#eaf1fb;--muted:#93a6c4;--line:rgba(120,150,200,.18);--ok:#16a34a;--err:#dc2626;
+          --warn:#d97706;}
+    *{box-sizing:border-box}
+    body{margin:0;background:linear-gradient(180deg,#0b1220,#0a1020);color:var(--txt);
+         font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;}
+    .wrap{max-width:920px;margin:0 auto;padding:22px 16px 80px}
+    h1{font-size:22px;margin:4px 0}
+    .sub{color:var(--muted);font-size:13px;margin-bottom:18px}
+    .card{background:var(--card);border:1px solid var(--line);border-radius:16px;
+          padding:18px;margin-bottom:18px}
+    .card h2{font-size:15px;margin:0 0 12px;font-weight:600}
+
+    /* mode toggle */
+    .mode-toggle{display:flex;gap:0;border:1px solid var(--line);border-radius:12px;
+                 overflow:hidden;margin-bottom:16px;width:fit-content}
+    .mode-toggle button{background:transparent;border:none;color:var(--muted);
+                        padding:9px 18px;font-size:13px;cursor:pointer;font-weight:500;
+                        transition:.15s}
+    .mode-toggle button.active{background:var(--accent);color:#04212f;font-weight:700}
+    .mode-toggle button:disabled{opacity:.4;cursor:not-allowed}
+
+    /* dropzone */
+    #drop{border:2px dashed var(--line);border-radius:14px;padding:26px;text-align:center;
+          cursor:pointer;transition:.2s;background:var(--card2)}
+    #drop.drag{border-color:var(--accent);background:#0d1c33}
+    #drop .big{font-size:15px}#drop .hint{color:var(--muted);font-size:12px;margin-top:6px}
+    .file{display:flex;justify-content:space-between;align-items:center;gap:10px;
+          margin-top:12px;font-size:13px;color:var(--muted)}
+    .row{display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-top:12px}
+    select{padding:9px 10px;border-radius:10px;border:1px solid var(--line);
+           background:#0b1220;color:var(--txt)}
+    textarea{width:100%;padding:10px;border-radius:10px;border:1px solid var(--line);
+             background:#0b1220;color:var(--txt);font-family:inherit;font-size:13px;resize:vertical;margin-bottom:8px}
+    details.adv{margin-top:12px;border:1px solid var(--line);border-radius:10px;
+                padding:8px 12px;background:var(--card2)}
+    details.adv summary{cursor:pointer;font-size:13px;color:var(--muted);user-select:none}
+    .chk{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--muted)}
+    button.go{background:linear-gradient(90deg,var(--accent),var(--accent2));color:#04212f;
+           border:0;font-weight:700;padding:11px 20px;border-radius:11px;cursor:pointer;font-size:14px}
+    button.ghost{background:#1b2740;color:var(--txt);border:1px solid var(--line);
+                 font-weight:600;padding:9px 16px;border-radius:10px;cursor:pointer;font-size:13px}
+    button:disabled{opacity:.5;cursor:not-allowed}
+    .bar{height:10px;background:#0b1220;border-radius:8px;overflow:hidden;border:1px solid var(--line)}
+    .bar>i{display:block;height:100%;width:0;border-radius:8px;
+           background:linear-gradient(90deg,var(--accent),var(--accent2));transition:width .35s}
+    .meta{display:flex;gap:16px;flex-wrap:wrap;color:var(--muted);font-size:12px;margin:10px 0}
+    .meta b{color:var(--txt)}
+    .badge{font-size:11px;padding:3px 9px;border-radius:999px;font-weight:600}
+    .queued{background:#334155}.running{background:#0369a1}.analyzing{background:#7c3aed}
+    .paused{background:#a16207}.cancelled{background:#6b7280}
+    .done{background:#15803d}.error{background:#7f1d1d}
+    .live{margin-top:14px;background:var(--card2);border:1px solid var(--line);border-radius:12px;
+          padding:12px;max-height:300px;overflow:auto;font-size:14px;line-height:1.6}
+    .seg{margin:0 0 6px}.seg .t{color:var(--accent);font-variant-numeric:tabular-nums;
+                                 font-size:12px;margin-right:8px}
+    .spk{color:var(--accent2);font-weight:700;margin-top:10px}
+    .empty{color:var(--muted);font-size:13px}
+
+    /* analysis block */
+    .analysis{margin-top:18px}
+    .analysis-section{background:var(--card2);border:1px solid var(--line);
+                       border-radius:12px;padding:14px;margin-bottom:12px}
+    .analysis-section h3{font-size:13px;color:var(--accent);margin:0 0 8px;
+                          text-transform:uppercase;letter-spacing:.05em;font-weight:700}
+    .analysis-section p{margin:0;font-size:14px;line-height:1.6}
+    .analysis-section ul,.analysis-section ol{margin:0;padding-left:20px;font-size:14px;line-height:1.8}
+    .analysis-section li{margin-bottom:2px}
+    .detail-topic{color:var(--accent2);font-weight:700;font-size:14px;margin:12px 0 4px}
+    .detail-topic:first-child{margin-top:0}
+    .detail-text{margin:0 0 6px!important;font-size:14px;line-height:1.6;color:var(--txt)}
+    .analysis-err{color:var(--warn);font-size:13px;padding:10px;background:#1c1208;
+                  border:1px solid #4a3200;border-radius:10px;margin-top:10px}
+    .spinner{display:inline-block;width:14px;height:14px;border:2px solid var(--line);
+             border-top-color:var(--accent);border-radius:50%;
+             animation:spin .7s linear infinite;margin-right:6px;vertical-align:middle}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    /* indeterminate sweeping progress bar (during LLM analysis) */
+    .bar.indet>i{width:40%!important;border-radius:8px;
+                 animation:indet 1.2s ease-in-out infinite;}
+    @keyframes indet{0%{margin-left:-42%}100%{margin-left:102%}}
+    /* live "generation" view while the protocol is being written */
+    .gen-stage{font-size:15px;font-weight:600;color:var(--txt);margin-bottom:4px}
+    .gen-meta{font-size:12px;color:var(--muted);margin-bottom:10px}
+    .gen-text{font-family:ui-monospace,Consolas,monospace;font-size:12px;line-height:1.5;
+              color:var(--muted);background:#0b1220;border:1px solid var(--line);
+              border-radius:10px;padding:10px;max-height:200px;overflow:auto;
+              white-space:pre-wrap;word-break:break-word}
+
+    table{width:100%;border-collapse:collapse;font-size:13px}
+    th,td{text-align:left;padding:9px 6px;border-bottom:1px solid var(--line);vertical-align:middle}
+    th{color:var(--muted);font-weight:500}
+    a.dl{color:var(--accent);text-decoration:none;margin-right:10px;cursor:pointer}
+    .muted{color:var(--muted);font-size:12px}
+    .toolbar{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px;align-items:center}
+    .hidden{display:none}
+    .api-notice{background:#0d1624;border:1px solid var(--line);border-radius:10px;
+                padding:10px 14px;font-size:12px;color:var(--muted);margin-top:10px}
+    .api-notice code{color:var(--accent);font-family:monospace}
+
+    /* ============ polish & motion ============ */
+    @keyframes fadeInUp{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
+    @keyframes bgdrift{from{transform:translate3d(0,0,0)}to{transform:translate3d(0,-20px,0)}}
+    @keyframes barflow{0%{background-position:0 0}100%{background-position:200% 0}}
+    @keyframes pulseGlow{0%,100%{box-shadow:0 0 0 0 rgba(56,189,248,0)}
+                         50%{box-shadow:0 0 0 4px rgba(56,189,248,.14)}}
+
+    h1{letter-spacing:.2px}
+    /* smooth interactions everywhere */
+    button{transition:transform .12s ease, box-shadow .2s ease, filter .2s ease,
+            background-position .35s ease, color .2s ease, border-color .2s ease}
+    select,textarea,input{transition:border-color .2s ease, box-shadow .2s ease}
+    select:focus,textarea:focus,input:focus{outline:none;border-color:var(--accent);
+            box-shadow:0 0 0 3px rgba(56,189,248,.15)}
+    a.dl{transition:color .15s ease, opacity .15s ease}
+    a.dl:hover{filter:brightness(1.12)}
+
+    /* primary button: gradient sheen + lift */
+    button.go{background:linear-gradient(90deg,var(--accent),var(--accent2),var(--accent));
+            background-size:200% 100%;box-shadow:0 8px 20px -10px rgba(56,189,248,.6)}
+    button.go:hover{filter:brightness(1.06);transform:translateY(-1px);background-position:100% 0}
+    button.go:active{transform:translateY(0) scale(.98)}
+    button.ghost:hover{border-color:var(--accent);color:var(--accent);transform:translateY(-1px)}
+    button:active{transform:scale(.97)}
+
+    .mode-toggle button{transition:background .2s ease,color .2s ease}
+    .mode-toggle button.active{box-shadow:inset 0 0 18px -6px rgba(4,33,47,.5)}
+
+    /* progress bar feels alive */
+    .bar>i{background:linear-gradient(90deg,var(--accent),var(--accent2),var(--accent));
+            background-size:200% 100%}
+    .badge.running,.badge.analyzing{animation:pulseGlow 1.6s ease-in-out infinite}
+
+    @media (prefers-reduced-motion:no-preference){
+      /* living, layered background glow */
+      body::before{content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;
+        background:radial-gradient(900px 520px at 82% -12%, rgba(56,189,248,.13), transparent 60%),
+                   radial-gradient(820px 480px at -12% 112%, rgba(34,211,238,.10), transparent 60%);
+        animation:bgdrift 18s ease-in-out infinite alternate}
+      /* cards glide in and lift on hover */
+      .card{animation:fadeInUp .45s cubic-bezier(.2,.7,.2,1) both;
+        transition:transform .25s ease, box-shadow .25s ease, border-color .25s ease;
+        box-shadow:0 1px 0 rgba(255,255,255,.03) inset, 0 14px 34px -24px rgba(0,0,0,.65)}
+      .card:hover{transform:translateY(-2px);border-color:#31486e;
+        box-shadow:0 1px 0 rgba(255,255,255,.05) inset, 0 20px 44px -24px rgba(0,0,0,.8)}
+      .analysis-section{animation:fadeInUp .4s ease both}
+      #jobs tbody tr{transition:background .15s ease}
+      #jobs tbody tr:hover{background:rgba(56,189,248,.06)}
+      #drop{transition:border-color .25s ease, background .25s ease, transform .15s ease, box-shadow .25s ease}
+      #drop:hover{border-color:#3a5a86}
+      #drop.drag{animation:pulseGlow 1.2s ease-in-out infinite;transform:scale(1.005)}
+      .bar>i{animation:barflow 2.4s linear infinite}
+      .livecard,.live{animation:fadeInUp .4s ease both}
+    }
+
+    /* ============ richer "glass + aurora" theme ============ */
+    :root{--accent:#38bdf8;--accent2:#a78bfa;--accent3:#22d3ee;
+          --glass:rgba(20,30,52,.55);--glassline:rgba(125,160,210,.16)}
+    body{background:#070b16}
+    .wrap{max-width:980px}
+    @keyframes aurora{0%{transform:translate3d(-2%,-1%,0) rotate(0deg)}
+                      100%{transform:translate3d(3%,2%,0) rotate(5deg)}}
+    @media (prefers-reduced-motion:no-preference){
+      body::after{content:"";position:fixed;inset:-25%;z-index:-2;pointer-events:none;
+        background:
+         radial-gradient(40% 50% at 15% 18%, rgba(56,189,248,.20), transparent 60%),
+         radial-gradient(42% 55% at 86% 14%, rgba(167,139,250,.20), transparent 60%),
+         radial-gradient(48% 60% at 72% 92%, rgba(34,211,238,.15), transparent 60%);
+        filter:blur(28px);animation:aurora 24s ease-in-out infinite alternate}
+    }
+
+    /* gradient hero title */
+    h1{font-size:30px;font-weight:800;letter-spacing:-.4px;display:flex;align-items:center;gap:12px}
+    h1 .emoji{filter:drop-shadow(0 4px 14px rgba(56,189,248,.5))}
+    h1 .grad{background:linear-gradient(90deg,#e6edf6 8%,#7dd3fc 48%,#c4b5fd 92%);
+             -webkit-background-clip:text;background-clip:text;color:transparent}
+    .sub{font-size:13px}
+
+    /* glass cards */
+    .card{background:var(--glass);border:1px solid var(--glassline);border-radius:18px;
+          backdrop-filter:blur(16px) saturate(140%);-webkit-backdrop-filter:blur(16px) saturate(140%);
+          box-shadow:0 1px 0 rgba(255,255,255,.05) inset, 0 28px 64px -34px rgba(0,0,0,.85)}
+    .card h2{display:flex;align-items:center;gap:9px;font-size:16px}
+    .card h2::before{content:"";width:4px;height:17px;border-radius:3px;
+          background:linear-gradient(180deg,var(--accent),var(--accent2))}
+
+    /* segmented pill toggle */
+    .mode-toggle{background:rgba(10,16,30,.6);border:1px solid var(--glassline);
+          border-radius:14px;padding:4px;width:fit-content}
+    .mode-toggle button{border-radius:11px;padding:10px 20px;font-weight:600}
+    .mode-toggle button.active{background:linear-gradient(90deg,var(--accent),var(--accent2));
+          color:#07101e;box-shadow:0 10px 24px -10px rgba(99,102,241,.7)}
+
+    /* inputs */
+    select,textarea,input{background:rgba(8,14,28,.7);border-color:var(--glassline)}
+
+    /* primary button: tri-color sheen */
+    button.go{background:linear-gradient(90deg,var(--accent),var(--accent2),var(--accent3),var(--accent));
+          background-size:300% 100%;box-shadow:0 12px 28px -12px rgba(99,102,241,.65)}
+
+    /* glassy analysis cards with accented headers */
+    .analysis-section{background:rgba(15,24,48,.5);border:1px solid var(--glassline);border-radius:14px;
+          backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
+    .analysis-section h3{display:flex;align-items:center;gap:8px;color:#a9cbff}
+    .analysis-section h3::before{content:"";width:6px;height:6px;border-radius:50%;
+          background:linear-gradient(90deg,var(--accent),var(--accent2));
+          box-shadow:0 0 10px 1px rgba(56,189,248,.6)}
+
+    /* live + generation panels a touch glassier */
+    .live,.gen-text{background:rgba(8,14,28,.6)}
+    /* prettier scrollbars */
+    .live::-webkit-scrollbar,.gen-text::-webkit-scrollbar,textarea::-webkit-scrollbar{width:10px;height:10px}
+    .live::-webkit-scrollbar-thumb,.gen-text::-webkit-scrollbar-thumb,textarea::-webkit-scrollbar-thumb{
+          background:linear-gradient(180deg,var(--accent),var(--accent2));border-radius:8px;
+          border:2px solid transparent;background-clip:content-box}
+    /* gradient badges */
+    .badge.running{background:linear-gradient(90deg,#0369a1,#0ea5e9)}
+    .badge.analyzing{background:linear-gradient(90deg,#6d28d9,#a78bfa)}
+    .badge.done{background:linear-gradient(90deg,#15803d,#22c55e)}
+
+    /* ============ dashboard: fit one screen, no page scroll (wide) ============ */
+    .dash{margin-top:6px}
+    @media (min-width:900px) and (min-height:560px){
+      html,body{height:100%;overflow:hidden}
+      .wrap{max-width:1280px;height:100vh;display:flex;flex-direction:column;
+            padding-top:16px;padding-bottom:14px}
+      h1{font-size:24px}
+      .dash{flex:1;min-height:0;display:grid;gap:18px;margin-top:10px;
+            grid-template-columns:minmax(360px,420px) 1fr}
+      .dcol{min-height:0;overflow-y:auto;padding-right:8px}
+      .dcol .card{margin-bottom:14px}
+      .dcol-right .card:last-child{margin-bottom:0}
+      /* let the live transcript use the column's height instead of a fixed cap */
+      #livecard .live{max-height:46vh}
+      /* slimmer column scrollbars */
+      .dcol::-webkit-scrollbar{width:8px}
+      .dcol::-webkit-scrollbar-thumb{background:rgba(125,160,210,.25);border-radius:8px}
+      .dcol::-webkit-scrollbar-track{background:transparent}
+    }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <h1><span class="emoji">🎙️</span><span class="grad">Распознавание речи</span></h1>
+  <div class="sub">Модель <b>{{ model }}</b> · faster-whisper · аудио и видео · до {{ (max_upload_mb/1024)|round(1) }} ГБ
+    · <a href="/automation" style="color:var(--accent)">🤖 Автоматизация встреч</a></div>
+
+  <div class="dash">
+  <div class="dcol dcol-left">
+  <!-- Upload card -->
+  <div class="card">
+    <h2>Новый файл</h2>
+
+    <!-- Mode toggle -->
+    <div class="mode-toggle">
+      <button id="modeTranscribe" class="active" onclick="setMode('transcribe')">
+        🎙 Только распознавание
+      </button>
+      <button id="modeProtocol" onclick="setMode('protocol')">
+        📄 Протокол встречи
+      </button>
+    </div>
+
+    <!-- Protocol engine + paid-API key panel (shown only in protocol mode) -->
+    <div id="providerWrap" class="hidden" style="margin-top:12px">
+      <label class="muted">Движок протокола
+        <select id="provider" onchange="onEngineChange()"></select>
+      </label>
+      <div class="muted hidden" id="noEngine" style="margin-top:8px">
+        Нет подключённого движка. Выберите локальный (Ollama) и установите его,
+        либо подключите облачный API по ключу ниже.
+      </div>
+
+      <!-- On-demand local engine (Ollama) install prompt -->
+      <div id="ollamaSetup" class="hidden" style="margin-top:10px;background:#0d1c33;
+           border:1px solid var(--line);border-radius:10px;padding:12px 14px;font-size:13px">
+        <div id="ollamaSetupText"></div>
+        <div class="row" id="ollamaSetupBtns" style="margin-top:10px">
+          <button class="go" type="button" onclick="installOllama()">Да, установить локально</button>
+          <button class="ghost" type="button" onclick="useApiInstead()">Нет, через API</button>
+        </div>
+        <div id="ollamaSetupProg" class="hidden" style="margin-top:10px">
+          <div class="muted" id="ollamaSetupMsg"><span class="spinner"></span>Устанавливаю…</div>
+          <div class="bar hidden" id="ollamaSetupBarWrap" style="margin-top:6px">
+            <i id="ollamaSetupBar"></i></div>
+          <div style="margin-top:8px">
+            <button class="ghost" type="button" onclick="cancelOllamaInstall()">✖ Отменить установку</button>
+          </div>
+        </div>
+      </div>
+
+      <details class="adv" id="apiKeyBox" style="margin-top:10px">
+        <summary>🔑 Подключить API по ключу</summary>
+        <div class="row" style="margin-top:10px">
+          <label class="muted">Провайдер
+            <select id="apiProvider" onchange="onApiProviderChange()">
+              <option value="groq">Groq · Llama — бесплатно</option>
+              <option value="gemini">Google Gemini — по ключу</option>
+              <option value="yandex">YandexGPT — ключ + folder id</option>
+              <option value="gigachat">GigaChat (Sber) — Authorization key</option>
+              <option value="anthropic">Claude — платно, по токенам</option>
+            </select>
+          </label>
+        </div>
+        <input id="apiKey" type="password" autocomplete="off" spellcheck="false"
+               placeholder="sk-ant-..." style="width:100%;padding:10px;border-radius:10px;
+               border:1px solid var(--line);background:#0b1220;color:var(--txt);margin-top:8px">
+        <input id="apiExtra" class="hidden" type="text" autocomplete="off" spellcheck="false"
+               placeholder="folder id" style="width:100%;padding:10px;border-radius:10px;
+               border:1px solid var(--line);background:#0b1220;color:var(--txt);margin-top:8px">
+        <div class="row" style="margin-top:8px">
+          <button class="go" id="connectKey" type="button" onclick="connectKey()">Подключить</button>
+          <span class="muted" id="connectMsg"></span>
+        </div>
+        <div class="muted" style="margin-top:8px;font-size:11px;line-height:1.5">
+          Ключ хранится только в памяти сервера и пропадёт после перезапуска.
+          Где взять: Groq — <code>console.groq.com</code>,
+          Gemini — <code>aistudio.google.com/apikey</code>,
+          YandexGPT — <code>console.cloud.yandex.ru</code> (нужен API-ключ + folder id),
+          GigaChat — <code>developers.sber.ru/studio</code> (Authorization key),
+          Claude — <code>console.anthropic.com</code>.
+          Для постоянной работы добавьте ключ в <b>run.bat</b>.
+        </div>
+      </details>
+
+      <details class="adv" style="margin-top:10px">
+        <summary>✏️ Инструкция для ИИ (промпт, необязательно)</summary>
+        <label class="muted" style="margin-top:8px;display:block">Свои требования к разбору — добавятся к запросу. Структура документа (разбор/выводы/задачи) остаётся прежней.</label>
+        <textarea id="instructions" rows="3" placeholder="Напр.: выдели риски и блокеры; задачи опиши максимально подробно; добавь раздел «следующие шаги»; пиши деловым языком"></textarea>
+      </details>
+
+      <details class="adv" style="margin-top:10px">
+        <summary>🧪 Режим эксперта — полный промпт</summary>
+        <div class="muted" style="margin:8px 0;font-size:12px;line-height:1.5">
+          Полный контроль над запросом к ИИ. <b>Внимание:</b> если убрать из промпта
+          нужные поля JSON (summary, detailed, tasks и т.д.), Word-документ может
+          получиться пустым. Оставьте поле пустым — будет использован стандартный промпт.
+        </div>
+        <div class="row" style="margin-bottom:6px">
+          <button class="ghost" type="button" onclick="loadDefaultPrompt()">📥 Загрузить стандартный</button>
+          <button class="ghost" type="button" onclick="clearExpertPrompt()">🧹 Очистить</button>
+        </div>
+        <textarea id="expertPrompt" rows="12" spellcheck="false"
+                  placeholder="Пусто = стандартный промпт. Нажмите «Загрузить стандартный», чтобы отредактировать его."></textarea>
+      </details>
+    </div>
+
+    <div id="drop" style="margin-top:14px">
+      <div class="big">📁 Перетащи сюда аудио или видео — или нажми, чтобы выбрать</div>
+      <div class="hint">mp3, wav, m4a, ogg, opus · mp4, mkv, webm, mov — до {{ (max_upload_mb/1024)|round(1) }} ГБ</div>
+    </div>
+    <input type="file" id="file" class="hidden"
+           accept="audio/*,video/*,.mp3,.wav,.m4a,.ogg,.opus,.flac,.mp4,.mkv,.webm,.mov">
+    <div class="file" id="fileinfo"></div>
+
+    <div class="row">
+      <label class="muted">Язык
+        <select id="language">
+          <option value="ru" selected>Русский</option>
+          <option value="en">English</option>
+          <option value="uk">Українська</option>
+          <option value="">Авто</option>
+        </select>
+      </label>
+      <label class="muted">Качество
+        <select id="model" onchange="onModelChange()"
+                title="Чем крупнее модель, тем чётче распознавание, но медленнее и больше RAM. large-v3 — максимум для русского.">
+          <option value="">По умолчанию ({{ model }})</option>
+          <option value="small">small — быстро (~1 ГБ ОЗУ)</option>
+          <option value="medium">medium — точнее (~2 ГБ ОЗУ)</option>
+          <option value="large-v3">large-v3 — максимум (~3–4 ГБ ОЗУ)</option>
+          <option value="large-v3-turbo">large-v3-turbo — точно и быстрее (~2 ГБ ОЗУ)</option>
+        </select>
+      </label>
+      <label class="chk">
+        <input type="checkbox" id="diarize" onchange="onDiarizeToggle()">
+        Кто говорил (разбивка по спикерам)
+      </label>
+      <label class="chk">
+        <input type="checkbox" id="capture_screen" onchange="onScreenToggle()">
+        Фиксировать показ экрана (видео, OCR)
+      </label>
+      <button class="go" id="go" disabled>Распознать</button>
+    </div>
+    <div id="modelHint" class="muted" style="margin-top:6px;font-size:12px;line-height:1.5"></div>
+    <div id="modelDownload" style="margin-top:6px"></div>
+    <div id="diarHints" class="hidden" style="margin-top:8px;background:#1c1208;
+         border:1px solid #4a3200;border-radius:10px;padding:10px 12px;
+         font-size:12px;color:var(--muted);line-height:1.5"></div>
+    <div id="screenHints" class="hidden" style="margin-top:8px;background:#1c1208;
+         border:1px solid #4a3200;border-radius:10px;padding:10px 12px;
+         font-size:12px;color:var(--muted);line-height:1.5"></div>
+
+    <details class="adv">
+      <summary>🎯 Точность: имена и термины (необязательно)</summary>
+      <label>Известные имена и термины — через запятую</label>
+      <textarea id="hint" rows="2" placeholder="Сергей Коновалов, дизайнер Петрова, gRPC, Kafka"></textarea>
+      <label>Замены «как слышится → правильно» — по одной на строку</label>
+      <textarea id="glossary" rows="3" placeholder="Конид = Коновалов&#10;джиэрписи = gRPC&#10;кафка = Kafka"></textarea>
+    </details>
+
+    <div id="upwrap" class="hidden" style="margin-top:14px">
+      <div class="muted" id="upmsg">Загрузка…</div>
+      <div class="bar" style="margin-top:6px"><i id="upbar"></i></div>
+    </div>
+  </div>
+
+  </div><!-- /dcol-left -->
+  <div class="dcol dcol-right">
+  <!-- Active / selected job -->
+  <div class="card hidden" id="livecard">
+    <h2 id="livetitle">Распознавание</h2>
+    <div class="meta">
+      <span>Статус: <span class="badge" id="lstatus">—</span></span>
+      <span>Прогресс: <b id="lpct">0%</b></span>
+      <span>Время: <b id="lelapsed">00:00</b></span>
+      <span id="ldurwrap" class="hidden">Длительность: <b id="ldur">—</b></span>
+      <span id="lspkwrap" class="hidden">Говорящих: <b id="lspk">—</b></span>
+      <span id="ldiarwarn" class="hidden" style="color:var(--warn)"></span>
+      <span id="lscreenwrap" class="hidden">С экрана: <b id="lscreen">—</b></span>
+      <span id="lscreenwarn" class="hidden" style="color:var(--warn)"></span>
+    </div>
+    <div class="bar"><i id="lbar"></i></div>
+    <div class="live" id="live"><div class="empty">Ожидание текста…</div></div>
+
+    <!-- Analysis result block -->
+    <div class="analysis hidden" id="analysisBlock"></div>
+
+    <div class="toolbar" id="ltools"></div>
+  </div>
+
+  <!-- History -->
+  <div class="card">
+    <h2>История</h2>
+    <table>
+      <thead><tr><th>Файл</th><th>Статус</th><th>Прогресс</th><th>Действия</th></tr></thead>
+      <tbody id="jobs"></tbody>
+    </table>
+  </div>
+  </div><!-- /dcol-right -->
+  </div><!-- /dash -->
+</div>
+
+<script>
+const STATUS={queued:"в очереди",running:"распознаётся",paused:"на паузе",analyzing:"анализируется",done:"готово",error:"ошибка",cancelled:"отменено"};
+const $=id=>document.getElementById(id);
+let curMode='transcribe';
+let selected=null, activeId=null, viewId=null, startTs=null, elapsedTimer=null;
+let jobInProgress=false;  // true while a job is queued/running/analyzing
+
+/* ---------- mode toggle ---------- */
+function setMode(m){
+  curMode=m;
+  $('modeTranscribe').classList.toggle('active',m==='transcribe');
+  $('modeProtocol').classList.toggle('active',m==='protocol');
+  const pw=$('providerWrap');
+  if(pw)pw.classList.toggle('hidden',m!=='protocol');
+  if(m==='protocol')loadProviders();
+}
+
+/* ---------- LLM providers: engine list + paid-API key connect ---------- */
+const PROV_LABELS={ollama:"Локально · Ollama (бесплатно)",
+                   groq:"Groq · Llama (бесплатно)",
+                   gemini:"Google Gemini",
+                   yandex:"YandexGPT",
+                   gigachat:"GigaChat (Sber)",
+                   anthropic:"Claude (платно)"};
+const PROV_SHORT={ollama:"Ollama",groq:"Groq",gemini:"Gemini",
+                  yandex:"YandexGPT",gigachat:"GigaChat",anthropic:"Claude"};
+/* Friendly name for a provider value, incl. per-model Ollama ("ollama:<model>"). */
+function prettyProvider(p){
+  if(!p)return"";
+  if(p.indexOf("ollama:")===0)return "Ollama · "+p.slice(7);
+  return PROV_SHORT[p]||PROV_LABELS[p]||p;
+}
+async function loadProviders(){
+  let data;
+  try{const r=await fetch("/api/providers");if(!r.ok)return;data=await r.json();}catch{return;}
+  // engines = each installed Ollama model (value "ollama:<model>") + cloud providers
+  let engines=data.engines||[];
+  // Defensive: an older server build has no `engines` field (e.g. when the
+  // server wasn't restarted after an update). Fall back to `available` so the
+  // dropdown isn't empty — restart the server to get per-model entries.
+  if(!engines.length&&(data.available||[]).length){
+    engines=data.available.map(id=>({value:id,label:PROV_LABELS[id]||id}));
+  }
+  const sel=$('provider');
+  const prev=sel.value;
+  // If no local Ollama model is ready, offer a "install local on demand" choice
+  // so the user can always pick local (it triggers the install prompt below).
+  const hasOllama=engines.some(e=>String(e.value).startsWith("ollama"));
+  if(!hasOllama){
+    engines=[{value:"ollama-setup",label:"💻 Локально (Ollama) — установить"}].concat(engines);
+  }
+  sel.innerHTML=engines.map(e=>`<option value="${esc(e.value)}">${esc(e.label)}</option>`).join("");
+  if(prev&&engines.some(e=>e.value===prev))sel.value=prev;
+  $('noEngine').classList.add('hidden');  // always ≥1 option (local-setup) + key panel below
+  onEngineChange();
+}
+async function loadDefaultPrompt(){
+  try{const d=await(await fetch("/api/prompt/default")).json();
+    if(d.prompt)$("expertPrompt").value=d.prompt;}catch{}
+}
+function clearExpertPrompt(){$("expertPrompt").value="";}
+const MODEL_INFO={
+  "":"Память ≈ размер выбранной модели. Длина записи на ОЗУ не влияет — только на время.",
+  "small":"💾 ≈1 ГБ ОЗУ · быстро · качество для русского среднее (может коверкать слова).",
+  "medium":"💾 ≈2 ГБ ОЗУ · средняя скорость · заметно чётче для русского.",
+  "large-v3":"💾 ≈3–4 ГБ ОЗУ · самое чёткое для русского, но медленно на CPU.",
+  "large-v3-turbo":"💾 ≈2 ГБ ОЗУ · почти как large-v3, но в разы быстрее — лучший баланс.",
+};
+function onModelChange(){
+  const el=$("modelHint"); if(!el) return;
+  const v=$("model")?$("model").value:"";
+  el.textContent=MODEL_INFO[v]||MODEL_INFO[""];
+  refreshModelDownload(v);
+}
+/* Show a "download model" button when the chosen recognition model isn't cached
+   yet — so it can be fetched without attaching a file first. */
+let _modelPoll=null;
+async function refreshModelDownload(v){
+  const box=$("modelDownload"); if(!box) return;
+  clearTimeout(_modelPoll);
+  let s; try{ s=await(await fetch("/api/model/status?name="+encodeURIComponent(v||""))).json(); }catch{ box.innerHTML=""; return; }
+  const ins=s.download||{};
+  if(s.downloaded && ins.state!=="running"){
+    box.innerHTML='<span class="muted" style="font-size:12px;color:#22c55e">✓ Модель '+esc(s.name)+' скачана</span>';
+    return;
+  }
+  if(ins.state==="running"){
+    const pct=(ins.percent!=null)?(" "+ins.percent+"%"):"";
+    box.innerHTML='<div class="muted" style="font-size:12px"><span class="spinner"></span>'+esc(ins.message||("Скачивание"+pct))+'</div>';
+    _modelPoll=setTimeout(()=>refreshModelDownload(v),1500);
+    return;
+  }
+  const err=ins.state==="error"?`<div class="warn" style="font-size:12px;margin-bottom:4px">${esc(ins.message||"ошибка")}</div>`:"";
+  box.innerHTML=err+`<button class="ghost" type="button" onclick="downloadModel('${esc(s.name)}')">⤓ Скачать модель ${esc(s.name)}${s.size_hint?(" ("+esc(s.size_hint)+")"):""}</button>
+    <div class="muted" style="font-size:11px;margin-top:3px">Иначе модель скачается при первом «Распознать».</div>`;
+}
+async function downloadModel(name){
+  const v=$("model")?$("model").value:"";
+  try{ await fetch("/api/model/download?name="+encodeURIComponent(v||""),{method:"POST"}); }catch{}
+  refreshModelDownload(v);
+}
+async function onDiarizeToggle(){
+  const box=$("diarHints");
+  if(!$("diarize").checked){box.classList.add("hidden");return;}
+  box.classList.remove("hidden");
+  box.innerHTML="Проверяю готовность диаризации…";
+  try{
+    const s=await(await fetch("/api/diarization/status")).json();
+    if(s.available){
+      box.innerHTML="✓ Диаризация готова — спикеры будут размечены. На CPU это "+
+        "ощутимо медленно (отдельный этап после распознавания).";
+    }else{
+      const items=(s.checks||[]).filter(c=>!c.ok)
+        .map(c=>`<li><b>${esc(c.name)}</b>: ${esc(c.hint)}</li>`).join("");
+      const needToken=(s.checks||[]).some(c=>!c.ok && /HuggingFace|HF_TOKEN/i.test(c.name));
+      const needPkgs=(s.checks||[]).some(c=>!c.ok && /torch|pyannote/i.test(c.name));
+      let html="⚠ Для «кто говорил» не хватает:<ul style='margin:6px 0 0;padding-left:18px'>"+items+"</ul>";
+      if(needPkgs){
+        html+=`<div style="margin-top:8px"><button class="ghost" type="button" onclick="installDiar()">⤓ Установить torch + pyannote.audio (~2.5 ГБ, в .venv)</button>
+          <span class="muted" id="diarInstallMsg"></span></div>`;
+      }
+      if(needToken){
+        html+=`<div style="margin-top:8px">
+          <input id="hfToken" type="password" autocomplete="off" spellcheck="false" placeholder="HF-токен (hf_…)"
+                 style="width:100%;padding:8px;border-radius:8px;border:1px solid var(--line);background:#0b1220;color:var(--txt)">
+          <div class="row" style="margin-top:6px"><button class="ghost" type="button" onclick="saveHfToken()">Сохранить токен</button>
+          <span class="muted" id="hfTokenMsg"></span></div>
+          <div class="muted" style="margin-top:4px">Токен — на huggingface.co/settings/tokens (тип Read),
+          прими условия моделей pyannote/speaker-diarization-3.1 и pyannote/segmentation-3.0.
+          Хранится в памяти; для постоянного — пропиши <b>HF_TOKEN</b> в run.bat.</div></div>`;
+      }
+      html+="<div style='margin-top:6px'>Можно оставить галочку: распознавание всё равно пройдёт, просто без разметки спикеров.</div>";
+      box.innerHTML=html;
+    }
+  }catch{box.innerHTML="Не удалось проверить готовность диаризации.";}
+}
+async function saveHfToken(){
+  const inp=$("hfToken"); if(!inp) return;
+  const t=inp.value.trim(), msg=$("hfTokenMsg");
+  if(!t){if(msg)msg.textContent="Введите токен";return;}
+  if(msg)msg.innerHTML='<span class="spinner"></span> сохраняю…';
+  try{
+    const r=await fetch("/api/diarization/token",{method:"POST",
+      headers:{"Content-Type":"application/json"},body:JSON.stringify({token:t})});
+    const s=await r.json();
+    if(r.ok){ onDiarizeToggle(); }            // re-check; token chip becomes OK
+    else if(msg){msg.textContent="✗ "+(s.detail||"Ошибка");}
+  }catch{ if(msg)msg.textContent="✗ Сбой сети"; }
+}
+/* Install torch + pyannote.audio into the app's .venv, with progress. */
+let _diarPoll=null;
+async function installDiar(){
+  try{ await fetch("/api/setup/deps/diarization/install",{method:"POST"}); }catch{}
+  pollDiar();
+}
+async function pollDiar(){
+  const msg=$("diarInstallMsg"); if(!msg) return;
+  let st; try{ st=await(await fetch("/api/setup/deps")).json(); }catch{ return; }
+  const ins=(st.diarization||{}).install||{};
+  if((st.diarization||{}).ready){
+    clearTimeout(_diarPoll);
+    msg.innerHTML='<span style="color:#22c55e">✓ установлено</span>';
+    onDiarizeToggle();                 // re-check; packages now OK
+    return;
+  }
+  if(ins.state==="error"){ msg.innerHTML='<span style="color:#f87171">'+esc(ins.message||"ошибка")+'</span>'; return; }
+  msg.innerHTML='<span class="spinner"></span> '+esc(ins.message||"устанавливаю…");
+  _diarPoll=setTimeout(pollDiar,2500);
+}
+async function onScreenToggle(){
+  const box=$("screenHints");
+  if(!$("capture_screen").checked){box.classList.add("hidden");return;}
+  box.classList.remove("hidden");
+  box.innerHTML="Проверяю готовность распознавания экрана…";
+  try{
+    const s=await(await fetch("/api/screen/status")).json();
+    if(s.available){
+      box.innerHTML="✓ Готово — текст со слайдов/экрана будет распознан и учтён в "+
+        "протоколе. Работает только для видео; на длинном видео занимает время.";
+    }else{
+      const items=(s.checks||[]).filter(c=>!c.ok)
+        .map(c=>`<li><b>${esc(c.name)}</b>: ${esc(c.hint)}</li>`).join("");
+      box.innerHTML="⚠ Для распознавания экрана не хватает:<ul style='margin:6px 0 0;padding-left:18px'>"+
+        items+"</ul>"+
+        `<div style="margin-top:8px"><button class="ghost" type="button" onclick="installOcr()">⤓ Установить OCR (Pillow + pytesseract + Tesseract)</button>
+          <span class="muted" id="ocrInstallMsg"></span></div>`+
+        "<div style='margin-top:6px'>Можно оставить галочку: распознавание речи "+
+        "всё равно пройдёт, просто без текста с экрана.</div>";
+    }
+  }catch{box.innerHTML="Не удалось проверить готовность распознавания экрана.";}
+}
+let _ocrPoll=null;
+async function installOcr(){
+  try{ await fetch("/api/setup/deps/ocr/install",{method:"POST"}); }catch{}
+  pollOcr();
+}
+async function pollOcr(){
+  const msg=$("ocrInstallMsg"); if(!msg) return;
+  let st; try{ st=await(await fetch("/api/setup/deps")).json(); }catch{ return; }
+  const ins=(st.ocr||{}).install||{};
+  if((st.ocr||{}).ready){ clearTimeout(_ocrPoll); msg.innerHTML='<span style="color:#22c55e">✓ установлено</span>'; onScreenToggle(); return; }
+  if(ins.state==="error"){ msg.innerHTML='<span style="color:#f87171">'+esc(ins.message||"ошибка")+'</span>'; return; }
+  msg.innerHTML='<span class="spinner"></span> '+esc(ins.message||"устанавливаю…");
+  _ocrPoll=setTimeout(pollOcr,2500);
+}
+
+/* ---------- local engine (Ollama) install on demand ---------- */
+async function onEngineChange(){
+  const sel=$("provider"), box=$("ollamaSetup");
+  if(!sel||!box){return;}
+  if(sel.value!=="ollama-setup"){box.classList.add("hidden");return;}
+  try{
+    const s=await(await fetch("/api/ollama/status")).json();
+    if(s.ready){box.classList.add("hidden");await loadProviders();return;}
+    box.classList.remove("hidden");
+    $("ollamaSetupBtns").classList.remove("hidden");
+    $("ollamaSetupProg").classList.add("hidden");
+    if(!s.installed){
+      $("ollamaSetupText").innerHTML="Для локальной генерации протокола нужна программа "+
+        "<b>Ollama</b> (бесплатно, оффлайн). Установить её сейчас? Скачается ~700 МБ "+
+        "программы и модель ~4.7 ГБ (один раз).";
+    }else{
+      $("ollamaSetupText").innerHTML="Ollama установлена, но не хватает модели протокола. "+
+        "Скачать и подготовить её сейчас? (~4.7 ГБ, один раз).";
+    }
+  }catch{box.classList.add("hidden");}
+}
+async function installOllama(){
+  $("ollamaSetupBtns").classList.add("hidden");
+  $("ollamaSetupProg").classList.remove("hidden");
+  $("ollamaSetupMsg").innerHTML='<span class="spinner"></span>Запуск установки…';
+  try{await fetch("/api/ollama/install",{method:"POST"});}catch{}
+  pollOllamaInstall();
+}
+function pollOllamaInstall(){
+  const tick=async()=>{
+    let s;
+    try{s=await(await fetch("/api/ollama/status")).json();}catch{setTimeout(tick,3000);return;}
+    const inst=s.install||{};
+    if(inst.state==="done"||s.ready){
+      $("ollamaSetupMsg").textContent="✓ Готово — локальный движок установлен.";
+      await loadProviders(); $("provider").value="ollama";
+      setTimeout(()=>$("ollamaSetup").classList.add("hidden"),2500);
+      return;
+    }
+    if(inst.state==="error"){
+      $("ollamaSetupMsg").textContent="⚠ "+(inst.message||"Ошибка установки");
+      $("ollamaSetupProg").classList.add("hidden");
+      $("ollamaSetupBtns").classList.remove("hidden");
+      return;
+    }
+    if(inst.state==="cancelled"){
+      $("ollamaSetupMsg").textContent="⏹ "+(inst.message||"Установка отменена");
+      $("ollamaSetupProg").classList.add("hidden");
+      $("ollamaSetupBtns").classList.remove("hidden");
+      return;
+    }
+    $("ollamaSetupMsg").innerHTML='<span class="spinner"></span>'+esc(inst.message||"Устанавливаю…");
+    const w=$("ollamaSetupBarWrap");
+    if(typeof inst.percent==="number"){w.classList.remove("hidden");$("ollamaSetupBar").style.width=inst.percent+"%";}
+    else{w.classList.add("hidden");}
+    setTimeout(tick,2000);
+  };
+  tick();
+}
+function useApiInstead(){
+  $("ollamaSetup").classList.add("hidden");
+  const box=$("apiKeyBox"); if(box) box.open=true;
+}
+async function cancelOllamaInstall(){
+  $("ollamaSetupMsg").innerHTML='<span class="spinner"></span>Отмена…';
+  try{await fetch("/api/ollama/install/cancel",{method:"POST"});}catch{}
+}
+function onApiProviderChange(){
+  const p=$('apiProvider').value;
+  const ph={anthropic:"sk-ant-...",groq:"gsk_...",gemini:"AIza... (Google AI Studio)",
+            yandex:"AQVN... (Api-Key)",gigachat:"Authorization key (base64)"};
+  $('apiKey').placeholder=ph[p]||"ключ";
+  const ex=$('apiExtra');
+  if(p==='yandex'){ex.classList.remove('hidden');ex.placeholder="folder id (идентификатор каталога)";}
+  else if(p==='gigachat'){ex.classList.remove('hidden');ex.placeholder="scope (по умолчанию GIGACHAT_API_PERS)";}
+  else{ex.classList.add('hidden');ex.value="";}
+}
+/* After a key is connected, resume an analysis that previously failed (e.g. on
+   limits) on the newly available engine — no re-transcription. */
+async function resumeFailedAnalysis(provider){
+  let jobs=[];
+  try{jobs=await(await fetch("/api/jobs")).json();}catch{return false;}
+  const failed=j=>j.analyze&&j.status==="done"&&(j.analysis_error||!j.analysis);
+  let target=jobs.find(j=>j.id===viewId&&failed(j))||jobs.find(failed);
+  if(!target)return false;
+  viewId=target.id;
+  const body={provider:provider,
+    instructions:($("instructions")&&$("instructions").value)||"",
+    custom_prompt:($("expertPrompt")&&$("expertPrompt").value)||""};
+  try{await fetch(`/api/jobs/${target.id}/reanalyze`,{method:"POST",
+      headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});}
+  catch{return false;}
+  refresh();
+  return true;
+}
+async function connectKey(){
+  const provider=$('apiProvider').value;
+  const key=$('apiKey').value.trim();
+  const extra=$('apiExtra').value.trim();
+  const msg=$('connectMsg');
+  if(!key){msg.textContent="Введите ключ";return;}
+  if(provider==='yandex'&&!extra){msg.textContent="Для YandexGPT укажите folder id";return;}
+  $('connectKey').disabled=true;msg.textContent="Проверяю ключ…";
+  try{
+    const r=await fetch("/api/providers/connect",{
+      method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({provider,api_key:key,extra})});
+    const d=await r.json();
+    if(r.ok){
+      $('apiKey').value="";
+      await loadProviders();
+      $('provider').value=provider;          // auto-select the just-connected engine
+      // If an analysis failed (e.g. limits), resume it now on the new engine.
+      const resumed=await resumeFailedAnalysis(provider);
+      msg.innerHTML=resumed
+        ? '<span style="color:#22c55e">✓ Подключено — продолжаю анализ…</span>'
+        : '<span style="color:#22c55e">✓ Подключено</span>';
+    }else{
+      const detail=String(d.detail||"Ошибка");
+      msg.innerHTML='<span style="color:#f87171">✗ '+esc(detail)+'</span>';
+      // YandexGPT: turn common Cloud errors into actionable hints.
+      if(provider==='yandex'){
+        const m2=detail.match(/service account folder ID '([a-z0-9]+)'/i);
+        if(m2 && m2[1] && m2[1]!==extra){
+          msg.innerHTML+=`<div style="margin-top:6px"><button class="ghost" type="button"
+            onclick="$('apiExtra').value='${m2[1]}';connectKey();">Подставить folder id: ${esc(m2[1])} и подключить</button></div>`;
+        }else if(/denied|Permission|Forbidden|403/i.test(detail)){
+          msg.innerHTML+=`<div style="margin-top:6px;color:var(--muted)">Похоже, у сервисного аккаунта нет прав.
+            В консоли Yandex Cloud назначьте этому аккаунту роль <code>ai.languageModels.user</code>
+            на каталоге, подождите ~минуту и повторите.</div>`;
+        }
+      }
+      if(provider==='gigachat' && /401|credentials|match db|doesn.?t match/i.test(detail)){
+        msg.innerHTML+=`<div style="margin-top:6px;color:var(--muted)">Проверьте, что вставлен именно
+          <b>Authorization key</b> (Ключ авторизации — длинная строка base64) из проекта GigaChat API на
+          <code>developers.sber.ru/studio</code>, а не Client ID и не Client Secret по отдельности.
+          Если ключ старый — сгенерируйте новый и скопируйте целиком. Для физлиц scope = <code>GIGACHAT_API_PERS</code>
+          (по умолчанию).</div>`;
+      }
+    }
+  }catch{msg.innerHTML='<span style="color:#f87171">✗ Сбой сети</span>';}
+  $('connectKey').disabled=false;
+}
+
+/* ---------- helpers ---------- */
+function human(s){if(!s&&s!==0)return"";s=Math.round(s);const h=(s/3600|0),m=(s%3600/60|0),x=s%60;
+  return (h?String(h).padStart(2,"0")+":":"")+String(m).padStart(2,"0")+":"+String(x).padStart(2,"0");}
+function mb(b){return (b/1048576).toFixed(1)+" МБ";}
+function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+
+/* ---------- file selection ---------- */
+const drop=$("drop"), fileEl=$("file");
+drop.onclick=()=>fileEl.click();
+["dragover","dragenter"].forEach(e=>drop.addEventListener(e,ev=>{ev.preventDefault();drop.classList.add("drag");}));
+["dragleave","drop"].forEach(e=>drop.addEventListener(e,ev=>{ev.preventDefault();drop.classList.remove("drag");}));
+drop.addEventListener("drop",ev=>{if(ev.dataTransfer.files.length){fileEl.files=ev.dataTransfer.files;pickFile();}});
+fileEl.onchange=pickFile;
+function pickFile(){
+  selected=fileEl.files[0]||null;
+  if(selected){$("fileinfo").innerHTML=`<span>📄 ${esc(selected.name)}</span><span>${mb(selected.size)}</span>`;$("go").disabled=false;}
+  else{$("fileinfo").textContent="";$("go").disabled=true;}
+}
+
+/* ---------- upload (XHR for progress) ---------- */
+$("go").onclick=()=>{
+  if(!selected)return;
+  if(curMode==='protocol'&&$("provider")&&$("provider").value==='ollama-setup'){
+    onEngineChange();  // show the install prompt
+    alert("Сначала установите локальный движок (кнопка «Да, установить локально») или выберите другой движок / подключите API.");
+    return;
+  }
+  const fd=new FormData();
+  fd.append("file",selected);
+  fd.append("language",$("language").value);
+  fd.append("model",($("model")&&$("model").value)||"");
+  fd.append("diarize",$("diarize").checked?"true":"false");
+  fd.append("capture_screen",($("capture_screen")&&$("capture_screen").checked)?"true":"false");
+  fd.append("analyze",curMode==='protocol'?"true":"false");
+  fd.append("provider",($("provider")&&$("provider").value)||"auto");
+  fd.append("hint",$("hint").value);
+  fd.append("glossary",$("glossary").value);
+  fd.append("instructions",($("instructions")&&$("instructions").value)||"");
+  fd.append("custom_prompt",($("expertPrompt")&&$("expertPrompt").value)||"");
+  const xhr=new XMLHttpRequest();
+  xhr.open("POST","/api/jobs");
+  $("upwrap").classList.remove("hidden");$("go").disabled=true;
+  xhr.upload.onprogress=e=>{if(e.lengthComputable){const p=Math.round(e.loaded/e.total*100);
+    $("upbar").style.width=p+"%";$("upmsg").textContent=`Загрузка ${p}% (${mb(e.loaded)} / ${mb(e.total)})`;}};
+  xhr.onload=()=>{
+    $("go").disabled=false;
+    try{const d=JSON.parse(xhr.responseText);
+      if(xhr.status>=200&&xhr.status<300){$("upmsg").textContent="Загружено, в очереди ✓";
+        setTimeout(()=>$("upwrap").classList.add("hidden"),1500);
+        activeId=d.job_id;viewId=d.job_id;selected=null;fileEl.value="";$("fileinfo").textContent="";$("go").disabled=true;
+        refresh();}
+      else{$("upmsg").textContent="⚠ "+(d.detail||"Ошибка");}
+    }catch{$("upmsg").textContent="⚠ Ошибка загрузки";}
+  };
+  xhr.onerror=()=>{$("go").disabled=false;$("upmsg").textContent="⚠ Сбой сети";};
+  xhr.send(fd);
+};
+
+/* ---------- live segments ---------- */
+function renderSegments(el,segs){
+  if(!segs.length){el.innerHTML='<div class="empty">Ожидание текста…</div>';return;}
+  let html="",lastSpk=null;
+  for(const s of segs){
+    if(s.speaker&&s.speaker!==lastSpk){html+=`<div class="spk">${esc(s.speaker)}</div>`;lastSpk=s.speaker;}
+    html+=`<div class="seg"><span class="t">${human(s.start)}</span>${esc(s.text)}</div>`;
+  }
+  const atBottom=el.scrollHeight-el.scrollTop-el.clientHeight<60;
+  el.innerHTML=html;
+  if(atBottom)el.scrollTop=el.scrollHeight;
+}
+
+/* ---------- analysis block ---------- */
+function taskParts(t){
+  if(t&&typeof t==='object')return{text:String(t.task||''),owner:String(t.owner||'')};
+  return{text:String(t||''),owner:''};
+}
+function taskHtml(t){const p=taskParts(t);
+  return esc(p.text)+(p.owner?` — <i style="color:var(--muted)">${esc(p.owner)}</i>`:'');}
+function renderAnalysis(job){
+  const block=$('analysisBlock');
+  if(!job.analyze){block.classList.add('hidden');return;}
+
+  if(job.status==='analyzing'){
+    // The live generation view is rendered in the transcript area; keep this
+    // block hidden to avoid duplication.
+    block.classList.add('hidden');
+    return;
+  }
+  if(job.status!=='done'){block.classList.add('hidden');return;}
+
+  block.classList.remove('hidden');
+  const a=job.analysis||{};
+  const err=job.analysis_error;
+
+  let html='';
+  if(err){
+    const lines=err.split('\n').map(s=>s.trim()).filter(Boolean);
+    let msg=lines[lines.length-1]||'неизвестная ошибка';
+    if(/429|Too Many Requests/i.test(err))
+      msg='превышен лимит запросов к движку (429). Подождите ~минуту и нажмите «Повторить анализ» — или выберите другой движок (например, локальный Ollama).';
+    else if(/\b403\b|1010/.test(err))
+      msg='движок отклонил запрос (403) — возможна блокировка по региону. Попробуйте VPN или другой движок.';
+    html+=`<div class="analysis-err">⚠ Ошибка анализа: ${esc(msg)}
+      <div style="margin-top:8px"><button class="ghost" onclick="reanalyzeJob()">🔄 Повторить анализ</button></div></div>`;
+  } else if(a.summary){
+    const prov=prettyProvider(a._provider);
+    if(prov)html+=`<div class="muted" style="margin-bottom:8px">🤖 Движок: ${esc(prov)}</div>`;
+    if(a.participants&&a.participants.length){
+      const items=a.participants.map(p=>{
+        const n=(p&&typeof p==='object')?(p.name||''):String(p);
+        const r=(p&&typeof p==='object')?(p.role||''):'';
+        return `<li><b>${esc(n)}</b>${r?` — <i style="color:var(--muted)">${esc(r)}</i>`:''}</li>`;
+      }).join('');
+      html+=`<div class="analysis-section"><h3>Участники</h3><ul>${items}</ul></div>`;
+    }
+    html+=`<div class="analysis-section"><h3>О чём шёл разговор</h3><p>${esc(a.summary)}</p></div>`;
+
+    if(a.detailed&&a.detailed.length){
+      let blocks='';
+      for(const b of a.detailed){
+        const topic=(b.topic||'').trim();
+        const details=(b.details||'').trim();
+        if(topic)blocks+=`<div class="detail-topic">${esc(topic)}</div>`;
+        if(details)blocks+=`<p class="detail-text">${esc(details)}</p>`;
+      }
+      html+=`<div class="analysis-section"><h3>Подробный разбор</h3>${blocks}</div>`;
+    }
+
+    if(a.key_thoughts&&a.key_thoughts.length){
+      const items=a.key_thoughts.map(t=>`<li>${esc(t)}</li>`).join('');
+      html+=`<div class="analysis-section"><h3>Ключевые мысли</h3><ul>${items}</ul></div>`;
+    }
+    if(a.conclusions&&a.conclusions.length){
+      const items=a.conclusions.map(t=>`<li>${esc(t)}</li>`).join('');
+      html+=`<div class="analysis-section"><h3>Выводы</h3><ul>${items}</ul></div>`;
+    }
+    if(a.decisions&&a.decisions.length){
+      const items=a.decisions.map(t=>`<li>${esc(t)}</li>`).join('');
+      html+=`<div class="analysis-section"><h3>Решения и договорённости</h3><ul>${items}</ul></div>`;
+    }
+    if(a.done_tasks&&a.done_tasks.length){
+      const items=a.done_tasks.map(t=>`<li>☑ ${taskHtml(t)}</li>`).join('');
+      html+=`<div class="analysis-section"><h3>Сделано (выполненные задачи)</h3><ul>${items}</ul></div>`;
+    }
+    if(a.tasks&&a.tasks.length){
+      const rows=a.tasks.map((t,i)=>{const p=taskParts(t);
+        return `<tr><td style="width:28px;text-align:right;color:var(--muted)">${i+1}</td>`+
+               `<td>${esc(p.text)}</td>`+
+               `<td style="white-space:nowrap"><b>${p.owner?esc(p.owner):'—'}</b></td></tr>`;}).join('');
+      html+=`<div class="analysis-section"><h3>Задачи (нужно сделать)</h3>
+        <table><thead><tr><th>№</th><th>Задача</th><th>Ответственный</th></tr></thead>
+        <tbody>${rows}</tbody></table></div>`;
+    } else {
+      html+=`<div class="analysis-section"><h3>Задачи (нужно сделать)</h3><p class="empty">Задач не выявлено</p></div>`;
+    }
+    if(a.minor_tasks&&a.minor_tasks.length){
+      const items=a.minor_tasks.map(t=>`<li>☐ ${taskHtml(t)}</li>`).join('');
+      html+=`<div class="analysis-section"><h3>Мелкие задачи и доработки</h3><ul>${items}</ul></div>`;
+    }
+  }
+  block.innerHTML=html;
+}
+
+/* ---------- timer ---------- */
+function startTimer(){stopTimer();elapsedTimer=setInterval(()=>{
+  if(startTs)$("lelapsed").textContent=human((Date.now()-startTs)/1000);},1000);}
+function stopTimer(){if(elapsedTimer){clearInterval(elapsedTimer);elapsedTimer=null;}}
+
+/* ---------- live card update ---------- */
+async function updateLive(){
+  if(!viewId){$("livecard").classList.add("hidden");return;}
+  let jobs=[];
+  try{const r=await fetch("/api/jobs");if(!r.ok)return;jobs=await r.json();}catch{return;}
+  const job=jobs.find(j=>j.id===viewId);
+  if(!job){$("livecard").classList.add("hidden");return;}
+
+  $("livecard").classList.remove("hidden");
+  $("livetitle").textContent=job.filename||"Распознавание";
+  const sb=$("lstatus");sb.textContent=STATUS[job.status]||job.status;sb.className="badge "+job.status;
+  const pct=Math.round((job.progress||0)*100);
+  $("lpct").textContent=pct+"%";$("lbar").style.width=pct+"%";
+  if(job.duration){$("ldurwrap").classList.remove("hidden");$("ldur").textContent=human(job.duration);}
+  if(job.speakers){$("lspkwrap").classList.remove("hidden");$("lspk").textContent=job.speakers;}
+  if(job.diarization_error){$("ldiarwarn").classList.remove("hidden");
+    $("ldiarwarn").textContent="⚠ Разбивка по спикерам не выполнена ("+String(job.diarization_error).split("\n").pop().slice(0,80)+")";}
+  else{$("ldiarwarn").classList.add("hidden");}
+  if(job.screen_segments){$("lscreenwrap").classList.remove("hidden");$("lscreen").textContent=job.screen_segments+" экранов";}
+  else{$("lscreenwrap").classList.add("hidden");}
+  if(job.screen_error){$("lscreenwarn").classList.remove("hidden");
+    $("lscreenwarn").textContent="⚠ Текст с экрана не распознан ("+String(job.screen_error).split("\n").pop().slice(0,80)+")";}
+  else{$("lscreenwarn").classList.add("hidden");}
+  // Indeterminate sweeping bar while the LLM is analysing/generating.
+  const analyzing=job.status==="analyzing";
+  $("lbar").parentElement.classList.toggle("indet",analyzing);
+  if(analyzing)$("lpct").textContent="идёт…";
+
+  renderAnalysis(job);
+
+  if(job.status==="running"||job.status==="paused"){
+    startTs=job.started_at?job.started_at*1000:(startTs||Date.now());startTimer();
+    try{
+      const p=await(await fetch(`/api/jobs/${viewId}/partial`)).json();
+      const segs=p.segments||[];
+      if(!segs.length){
+        let msg;
+        if(job.status==="paused"){msg="На паузе";}
+        else if(pct===0){
+          const big=/large|medium/.test(job.model||"");
+          msg="⏳ Загрузка модели"+(job.model?" «"+esc(job.model)+"»":"")+"…"+
+              (big?" При первом выборе модель скачивается (large-v3 ~3 ГБ) — это может занять несколько минут. Прогресс скачивания виден в окне run.bat. Потом она кэшируется и грузится мгновенно.":"");
+        }else{msg="Анализ аудио, первые сегменты скоро появятся…";}
+        $("live").innerHTML=`<div class="empty">${msg}</div>`;
+      }else{
+        renderSegments($("live"),segs);
+      }
+    }catch{}
+    if(job.status==="paused"){
+      $("ltools").innerHTML=
+        `<button class="ghost" onclick="resumeJob()">▶ Продолжить</button>`+
+        `<button class="ghost" onclick="cancelJob()">✖ Отменить</button>`;
+    }else{
+      $("ltools").innerHTML=
+        `<button class="ghost" onclick="pauseJob()">⏸ Пауза</button>`+
+        `<button class="ghost" onclick="cancelJob()">✖ Отменить</button>`;
+    }
+
+  }else if(job.status==="analyzing"){
+    startTs=job.started_at?job.started_at*1000:(startTs||Date.now());startTimer();
+    let a={};
+    try{const p=await(await fetch(`/api/jobs/${viewId}/partial`)).json();a=p.analysis||{};}catch{}
+    const stage=a.stage||"Анализирую транскрипцию…";
+    let html=`<div class="gen-stage"><span class="spinner"></span>${esc(stage)}</div>`;
+    html+=`<div class="gen-meta">`+
+          (a.chars?`сгенерировано ~${a.chars.toLocaleString('ru')} симв.`:"модель думает, первые слова скоро появятся…")+
+          `</div>`;
+    if(a.text){
+      // Live stream of what the model is writing (raw — formatted nicely once done).
+      html+=`<div class="gen-text" id="genText">${esc(a.text)}</div>`;
+    }
+    $("live").innerHTML=html;
+    const gt=$("genText");if(gt)gt.scrollTop=gt.scrollHeight;
+    $("ltools").innerHTML=`<button class="ghost" onclick="cancelProtocol()">✖ Отменить сборку протокола</button>`;
+
+  }else if(job.status==="done"){
+    stopTimer();
+    try{
+      const txt=await(await fetch(`/api/jobs/${viewId}/result?format=txt`)).text();
+      $("live").innerHTML="";
+      const pre=document.createElement("div");pre.style.whiteSpace="pre-wrap";pre.textContent=txt;
+      $("live").appendChild(pre);
+    }catch{}
+    let tools=`<button class="ghost" onclick="copyText()">📋 Копировать</button>
+      <a class="dl" href="/api/jobs/${viewId}/result?format=txt" target="_blank">TXT</a>
+      <a class="dl" href="/api/jobs/${viewId}/result?format=srt">SRT</a>
+      <a class="dl" href="/api/jobs/${viewId}/result?format=json">JSON</a>`;
+    if(job.screen_segments){
+      tools+=`<a class="dl" href="/api/jobs/${viewId}/result?format=screen" target="_blank">📺 Текст с экрана</a>`;
+    }
+    // One Word button per engine that produced a document (compare engines).
+    (job.docx_providers||[]).forEach(p=>{
+      tools+=`<a class="dl" href="/api/jobs/${viewId}/result?format=docx&provider=${encodeURIComponent(p)}"
+               style="background:linear-gradient(90deg,#0ea5e9,#6366f1);color:#fff;
+                      padding:7px 14px;border-radius:8px;text-decoration:none;font-weight:600;
+                      font-size:13px;">📄 Word · ${esc(prettyProvider(p))}</a>`;
+    });
+    if(job.analyze){
+      tools+=`<button class="ghost" onclick="reanalyzeJob()"
+               title="Сменить «Движок протокола» в списке выше и нажать — протокол пересоберётся другим движком и сохранится отдельно"
+               >🔄 Перегенерировать (выбранным движком)</button>`;
+    }else{
+      tools+=`<button class="go" onclick="makeProtocol()"
+               title="Построить протокол встречи по уже распознанному тексту — без повторного распознавания"
+               >📄 Сделать протокол</button>`;
+    }
+    $("ltools").innerHTML=tools;
+
+  }else if(job.status==="cancelled"){
+    stopTimer();
+    let has=false;
+    try{
+      const r=await fetch(`/api/jobs/${viewId}/result?format=txt`);
+      if(r.ok){const txt=await r.text();$("live").innerHTML="";
+        const pre=document.createElement("div");pre.style.whiteSpace="pre-wrap";pre.textContent=txt;
+        $("live").appendChild(pre);has=true;}
+    }catch{}
+    if(!has)$("live").innerHTML='<div class="empty">Распознавание отменено.</div>';
+    $("ltools").innerHTML=has
+      ? `<span class="muted">Отменено — сохранена распознанная часть.</span>
+         <button class="ghost" onclick="copyText()">📋 Копировать</button>
+         <a class="dl" href="/api/jobs/${viewId}/result?format=txt" target="_blank">TXT</a>`
+      : `<span class="muted">Распознавание отменено.</span>`;
+  }else if(job.status==="error"){
+    stopTimer();
+    $("live").innerHTML=`<div class="empty">Ошибка: ${esc((job.error||"").split("\n").pop())}</div>`;
+    $("ltools").innerHTML="";
+  }else{
+    $("live").innerHTML='<div class="empty">В очереди…</div>';
+    $("ltools").innerHTML="";
+  }
+}
+
+async function copyText(){
+  try{const txt=await(await fetch(`/api/jobs/${viewId}/result?format=txt`)).text();
+  await navigator.clipboard.writeText(txt);}catch{}
+}
+
+/* ---------- pause / resume / cancel ---------- */
+async function ctrlJob(action){
+  if(!viewId) return;
+  try{ await fetch(`/api/jobs/${viewId}/${action}`,{method:"POST"}); }catch{}
+  refresh();
+}
+function pauseJob(){ ctrlJob("pause"); }
+function resumeJob(){ ctrlJob("resume"); }
+async function reanalyzeJob(){
+  if(!viewId) return;
+  // Use whichever engine is currently selected, so a rate-limited Groq job can
+  // be retried with e.g. local Ollama by just switching the dropdown first.
+  const body={
+    provider:($("provider")&&$("provider").value)||"auto",
+    instructions:($("instructions")&&$("instructions").value)||"",
+    custom_prompt:($("expertPrompt")&&$("expertPrompt").value)||"",
+  };
+  try{ const r=await fetch(`/api/jobs/${viewId}/reanalyze`,{method:"POST",
+        headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+       if(!r.ok){const d=await r.json().catch(()=>({}));alert(d.detail||"Не удалось запустить анализ");} }
+  catch{}
+  refresh();
+}
+function cancelJob(){
+  if(!confirm("Отменить распознавание? Процесс остановится, уже распознанная часть сохранится для скачивания.")) return;
+  ctrlJob("cancel");
+}
+function cancelProtocol(){
+  if(!confirm("Отменить сборку протокола? Распознанный текст уже сохранён — TXT/SRT/JSON останутся для скачивания.")) return;
+  ctrlJob("cancel");
+}
+/* Build a protocol from an already-finished recognition-only job. */
+async function makeProtocol(){
+  if(curMode!=='protocol') setMode('protocol');
+  await loadProviders();
+  const v=$("provider")?$("provider").value:"";
+  if(!v || v==='ollama-setup'){
+    onEngineChange();  // shows the local-install prompt if "ollama-setup" is selected
+    window.scrollTo({top:0,behavior:"smooth"});
+    alert("Выберите движок протокола вверху (локальный Ollama — установите кнопкой, либо подключите API по ключу), затем снова нажмите «Сделать протокол».");
+    return;
+  }
+  reanalyzeJob();  // runs analysis on the stored transcript with the chosen engine
+}
+
+/* ---------- history table ---------- */
+async function refresh(){
+  let jobs=[];
+  try{const r=await fetch("/api/jobs");if(!r.ok)return;jobs=await r.json();}catch{return;}
+
+  const active=jobs.find(j=>j.status==="running"||j.status==="analyzing"||j.status==="paused")||jobs.find(j=>j.status==="queued");
+  jobInProgress=!!active;  // guard page reload while work is in progress
+  if(active){if(activeId!==active.id){activeId=active.id;startTs=null;}if(!viewId)viewId=active.id;}
+
+  $("jobs").innerHTML=jobs.map(j=>{
+    const pct=Math.round((j.progress||0)*100);
+    let act="";
+    if(j.status==="done"){
+      act=`<a class="dl" onclick="openJob('${j.id}')">Показать</a>
+           <a class="dl" href="/api/jobs/${j.id}/result?format=txt" target="_blank">TXT</a>
+           <a class="dl" href="/api/jobs/${j.id}/result?format=srt">SRT</a>`;
+      if(j.analyze&&j.analysis&&!j.analysis_error)
+        act+=`<a class="dl" href="/api/jobs/${j.id}/result?format=docx">Word</a>`;
+    }else if(j.status==="error"){
+      act=`<span class="muted" title="${esc((j.error||'').replace(/"/g,'&quot;'))}">ошибка</span>`;
+    }else if(j.status==="cancelled"){
+      act=`<a class="dl" onclick="openJob('${j.id}')">Показать</a>`;
+    }else{
+      act=`<a class="dl" onclick="openJob('${j.id}')">Следить</a>`;
+    }
+    const modeIcon=j.analyze?'📄 ':'🎙 ';
+    return `<tr>
+      <td>${modeIcon}${esc(j.filename||"")}
+        <div class="muted">${j.duration?human(j.duration):""}</div></td>
+      <td><span class="badge ${j.status}">${STATUS[j.status]||j.status}</span></td>
+      <td><div class="bar" style="min-width:90px"><i style="width:${pct}%"></i></div></td>
+      <td>${act}</td></tr>`;
+  }).join("")||`<tr><td colspan="4" class="empty">Пока пусто</td></tr>`;
+
+  updateLive();
+}
+
+function openJob(id){viewId=id;startTs=null;updateLive();window.scrollTo({top:0,behavior:"smooth"});}
+
+// Warn before leaving/reloading (F5, Ctrl+F5, mouse reload, tab close) while a
+// job is in progress. NB: browsers show their OWN generic text here — a custom
+// message is not allowed for security reasons. The transcription itself keeps
+// running on the server regardless; this only guards against losing the page.
+window.addEventListener("beforeunload",(e)=>{
+  if(jobInProgress){ e.preventDefault(); e.returnValue=""; return ""; }
+});
+
+loadProviders();
+onApiProviderChange();
+onModelChange();
+refresh();
+setInterval(refresh,1500);
+</script>
+</body>
+</html>

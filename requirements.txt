@@ -1,0 +1,38 @@
+# Core web service
+fastapi==0.115.*
+uvicorn[standard]==0.32.*
+python-multipart==0.0.*
+jinja2==3.1.*
+
+# Transcription engine (CPU, int8)
+faster-whisper==1.2.*
+# CTranslate2 pinned to 4.4.0 for stability with faster-whisper 1.2.x.
+ctranslate2==4.4.0
+# CTranslate2 4.4.0 imports pkg_resources, which setuptools >= 81 dropped.
+setuptools<80
+# Requires Python 3.12 (3.13/3.14 not yet supported by the native deps).
+
+# Word document generation (protocol export)
+python-docx>=1.1
+
+# Timezone database for zoneinfo (so Weeek meeting times read correctly).
+tzdata>=2024.1
+
+# Screen-text capture from video (OCR of slides/code/docs shown on screen).
+# Python side; the external Tesseract binary + 'rus' language data are installed
+# in the Docker image (apt: tesseract-ocr tesseract-ocr-rus).
+Pillow>=10
+pytesseract>=0.3.10
+
+# AI analysis via Claude API (requires ANTHROPIC_API_KEY env var)
+anthropic>=0.40
+
+# --- Optional: meeting recorder bot (NOT enabled in this core build) ---
+# The Telemost bot needs a virtual display (Xvfb) + PulseAudio on the server.
+# It is added in the next step; uncomment then and run `playwright install chromium`.
+# playwright>=1.44
+
+# --- Optional: speaker diarization (heavy: needs >4 GB RAM + HF token) ---
+# Enable with VTX_DIARIZATION=1 after installing these in the image:
+# pyannote.audio==3.3.*
+# torch==2.* (CPU build)

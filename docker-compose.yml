@@ -1,0 +1,42 @@
+# Voice Transcriber — Linux core, Docker Compose.
+#
+#   Core only:                docker compose up -d --build
+#   Core + local AI (Ollama): docker compose --profile local-ai up -d --build
+#
+# Protocol generation needs an LLM. Either run the optional `ollama` service
+# (local, free — profile local-ai) or set a cloud key (GROQ_API_KEY /
+# ANTHROPIC_API_KEY / …) in .env. Recognition works without any of them.
+
+services:
+  app:
+    build: .
+    image: linux-voise:latest
+    container_name: linux-voise
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-8000}:8000"
+    env_file:
+      - .env
+    environment:
+      # App talks to the ollama service by its compose hostname.
+      OLLAMA_URL: "http://ollama:11434"
+    volumes:
+      - ./data:/data
+    # Ollama is optional; the app degrades gracefully if it's not up.
+
+  # Optional local LLM for offline protocol generation. Enable with:
+  #   docker compose --profile local-ai up -d
+  # First time, pull the model once:  bash scripts/setup-ollama.sh
+  ollama:
+    image: ollama/ollama:latest
+    container_name: linux-voise-ollama
+    restart: unless-stopped
+    profiles: ["local-ai"]
+    volumes:
+      - ollama:/root/.ollama
+    # Expose only if you want to reach Ollama from the host:
+    # ports:
+    #   - "11434:11434"
+
+volumes:
+  ollama:
