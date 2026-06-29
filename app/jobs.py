@@ -50,6 +50,8 @@ class Job:
     analysis_instructions: str = ""  # user's custom prompt additions
     analysis_prompt: str = ""        # expert mode: full prompt override
     capture_screen: bool = False     # OCR on-screen text from the video
+    delete_audio_when_done: bool = False  # delete the source media after processing
+                                          # (recordings already sent to the UI's cloud)
     status: str = STATUS_QUEUED
     progress: float = 0.0          # 0..1
     created_at: float = field(default_factory=time.time)
@@ -124,7 +126,8 @@ class JobStore:
                initial_prompt: str = "", glossary: str = "",
                analyze: bool = False, provider: str = "auto",
                analysis_instructions: str = "", analysis_prompt: str = "",
-               capture_screen: bool = False, model: str = "") -> Job:
+               capture_screen: bool = False, model: str = "",
+               delete_audio_when_done: bool = False) -> Job:
         job = Job(
             id=uuid.uuid4().hex[:12],
             filename=filename,
@@ -139,6 +142,7 @@ class JobStore:
             analysis_instructions=analysis_instructions,
             analysis_prompt=analysis_prompt,
             capture_screen=capture_screen,
+            delete_audio_when_done=delete_audio_when_done,
         )
         with self._lock:
             self._jobs[job.id] = job
@@ -481,6 +485,24 @@ class JobStore:
                 error=traceback.format_exc(limit=3),
                 finished_at=time.time(),
             )
+        finally:
+            # For meeting recordings already delivered to the UI's cloud, don't
+            # keep an internal copy of the video — drop the source after processing.
+            if getattr(job, "delete_audio_when_done", False):
+                self._delete_source(job)
+
+    def _delete_source(self, job: Job) -> None:
+        """Remove the source media file and its capture sidecars."""
+        try:
+            src = Path(job.audio_path)
+            for p in (src, Path(str(src) + ".ffmpeg.log"),
+                      src.with_suffix(".16k.wav"), src.with_suffix(".join-failed.png")):
+                try:
+                    p.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        except Exception:
+            pass
 
     def _finalise_cancel(self, job: Job) -> None:
         """Mark a job cancelled, keeping whatever was transcribed so far."""

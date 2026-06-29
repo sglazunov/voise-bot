@@ -253,6 +253,22 @@ class Scheduler:
             else:
                 log(f"Облако: {up.get('error')}")
 
+            # Keep the video ONLY where the UI points. If it was delivered
+            # elsewhere (a remote cloud, or a local folder other than the staging
+            # dir), the staging copy in data/recordings is redundant and must not
+            # linger inside the server. We delete it after the pipeline is done
+            # (transcription still needs to read it first).
+            delivered_elsewhere = False
+            if up.get("ok"):
+                if up.get("backend") != "local":
+                    delivered_elsewhere = True
+                else:
+                    try:
+                        delivered_elsewhere = (Path(up.get("path") or "").resolve()
+                                               != Path(out).resolve())
+                    except OSError:
+                        delivered_elsewhere = False
+
             # Optionally hand off to the transcription / protocol pipeline.
             # Recording always happens; transcription and protocol are separate
             # toggles so the user records only what they need.
@@ -268,8 +284,16 @@ class Scheduler:
                     language=config.DEFAULT_LANGUAGE, diarize=False,
                     analyze=do_protocol,
                     provider=cfg.get("analyze_provider") or "auto",
-                    capture_screen=bool(cfg.get("ocr_screen", True)))
+                    capture_screen=bool(cfg.get("ocr_screen", True)),
+                    delete_audio_when_done=delivered_elsewhere)
                 st.job_id = job.id
+            elif delivered_elsewhere:
+                # No transcription — nothing else needs the file; drop it now.
+                for p in (out, out + ".ffmpeg.log"):
+                    try:
+                        Path(p).unlink(missing_ok=True)
+                    except OSError:
+                        pass
 
             # Post the cloud link back to Weeek (protocol is produced later).
             if cfg.get("post_back_to_weeek") and st.cloud_url:
