@@ -142,7 +142,9 @@ def build_ffmpeg_cmd(out_path: str, cfg: dict, window_title: str | None = None) 
         # Capture the whole Xvfb display + the PulseAudio monitor of the sink the
         # browser plays into. window_title is irrelevant headless.
         if capture_video:
-            cmd += ["-f", "x11grab", "-framerate", "10",
+            # -draw_mouse 0 hides the mouse cursor (Xvfb draws a bare "X" without
+            # a cursor theme) so it never appears in the recording.
+            cmd += ["-f", "x11grab", "-draw_mouse", "0", "-framerate", "10",
                     "-video_size", _screen_size(), "-i", _display()]
         cmd += ["-f", "pulse", "-i", _pulse_source(cfg)]
         if capture_video:
