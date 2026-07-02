@@ -604,6 +604,14 @@ def automation_meetings(user: str = Depends(current_user)):
         meetings = weeek.upcoming_meetings(token, cfg.get("weeek_project_id"), tz)
     except weeek.WeeekError as e:
         raise HTTPException(502, str(e))
+    # Show upcoming meetings + only the single most recent past one (older past
+    # meetings just clutter the list).
+    from datetime import datetime
+    now = datetime.now(timezone.utc)
+    past = [m for m in meetings if m.start and m.start < now]
+    keep = id(max(past, key=lambda m: m.start)) if past else None
+    meetings = [m for m in meetings
+                if not (m.start and m.start < now) or id(m) == keep]
     decisions = cfg.get("rec_decisions") or {}
     return {"default_on": bool(cfg.get("rec_default_on", True)),
             "meetings": [
