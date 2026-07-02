@@ -95,6 +95,34 @@ PROVIDER_LABELS = {
 # Order = preference for "auto" (free/local first, paid last).
 PROVIDER_ORDER = ["ollama", "groq", "gemini", "yandex", "gigachat", "anthropic"]
 
+# Selectable model tiers per cloud provider — "how powerful the API model is".
+# Chosen from the UI as "<provider>:<model>"; the first entry is the default.
+# Weaker/cheaper tiers are faster; stronger tiers give better protocols.
+PROVIDER_MODELS = {
+    "groq": [
+        {"value": "llama-3.3-70b-versatile", "label": "Llama 3.3 70B · мощная (по умолчанию)"},
+        {"value": "llama-3.1-8b-instant", "label": "Llama 3.1 8B · быстрая/лёгкая"},
+    ],
+    "gigachat": [
+        {"value": "GigaChat", "label": "GigaChat Lite · базовая (быстро)"},
+        {"value": "GigaChat-Pro", "label": "GigaChat Pro · сильнее"},
+        {"value": "GigaChat-Max", "label": "GigaChat Max · максимум"},
+    ],
+    "yandex": [
+        {"value": "yandexgpt/latest", "label": "YandexGPT · полная"},
+        {"value": "yandexgpt-lite/latest", "label": "YandexGPT Lite · лёгкая/быстрая"},
+    ],
+    "gemini": [
+        {"value": "gemini-2.0-flash", "label": "Gemini 2.0 Flash · быстрая"},
+        {"value": "gemini-1.5-pro", "label": "Gemini 1.5 Pro · мощная"},
+    ],
+    "anthropic": [
+        {"value": "claude-sonnet-4-6", "label": "Claude Sonnet · баланс"},
+        {"value": "claude-opus-4-8", "label": "Claude Opus · максимум"},
+        {"value": "claude-haiku-4-5-20251001", "label": "Claude Haiku · быстрая/дешёвая"},
+    ],
+}
+
 # Providers configurable from the UI by an API key (+ optional extra field).
 KEY_PROVIDERS = {"anthropic", "groq", "gemini", "yandex", "gigachat"}
 

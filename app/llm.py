@@ -187,10 +187,13 @@ class GroqProvider:
 
     name = "groq"
 
+    def __init__(self, model: str | None = None) -> None:
+        self.model = model or config.GROQ_MODEL
+
     def complete(self, prompt: str, max_tokens: int = 2000, force_json: bool = True) -> str:
         url = "https://api.groq.com/openai/v1/chat/completions"
         payload = {
-            "model": config.GROQ_MODEL,
+            "model": self.model,
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": max_tokens,
             "temperature": 0.1,
@@ -208,6 +211,9 @@ class AnthropicProvider:
 
     name = "anthropic"
 
+    def __init__(self, model: str | None = None) -> None:
+        self.model = model or config.ANALYSIS_MODEL
+
     def complete(self, prompt: str, max_tokens: int = 2000, force_json: bool = True) -> str:
         # Claude follows the "return only JSON" instruction in the prompt well,
         # so force_json needs no special API flag here.
@@ -219,7 +225,7 @@ class AnthropicProvider:
             )
         client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
         message = client.messages.create(
-            model=config.ANALYSIS_MODEL,
+            model=self.model,
             max_tokens=max_tokens,
             temperature=0.1,
             messages=[{"role": "user", "content": prompt}],
@@ -233,8 +239,11 @@ class GeminiProvider:
 
     name = "gemini"
 
+    def __init__(self, model: str | None = None) -> None:
+        self.model = model or config.GEMINI_MODEL
+
     def complete(self, prompt: str, max_tokens: int = 2000, force_json: bool = True) -> str:
-        model = config.GEMINI_MODEL
+        model = self.model
         url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
                f"{model}:generateContent?key={config.GEMINI_API_KEY}")
         gen = {"temperature": 0.1, "maxOutputTokens": max_tokens}
@@ -254,10 +263,13 @@ class YandexProvider:
 
     name = "yandex"
 
+    def __init__(self, model: str | None = None) -> None:
+        self.model = model or config.YANDEX_MODEL
+
     def complete(self, prompt: str, max_tokens: int = 2000, force_json: bool = True) -> str:
         url = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
         payload = {
-            "modelUri": f"gpt://{config.YANDEX_FOLDER_ID}/{config.YANDEX_MODEL}",
+            "modelUri": f"gpt://{config.YANDEX_FOLDER_ID}/{self.model}",
             "completionOptions": {"stream": False, "temperature": 0.1,
                                   "maxTokens": str(max_tokens)},
             "messages": [{"role": "user", "text": prompt}],
@@ -289,6 +301,9 @@ class GigaChatProvider:
     _ctx.check_hostname = False
     _ctx.verify_mode = ssl.CERT_NONE
 
+    def __init__(self, model: str | None = None) -> None:
+        self.model = model or config.GIGACHAT_MODEL
+
     def _get_token(self) -> str:
         if self._token and time.time() < self._exp - 30:
             return self._token
@@ -314,7 +329,7 @@ class GigaChatProvider:
         token = self._get_token()
         url = "https://gigachat.devices.sberbank.ru/api/v1/chat/completions"
         payload = {
-            "model": config.GIGACHAT_MODEL,
+            "model": self.model,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.1,
             "max_tokens": max_tokens,
@@ -346,14 +361,18 @@ _PROVIDERS = {
 def get_provider(name: str | None) -> LLMProvider:
     """Resolve 'auto'/None to a concrete configured provider and instantiate it.
 
-    Ollama may carry a specific model as "ollama:<model>" (e.g.
-    "ollama:qwen2.5:7b"); the part after the first ':' is the model name.
+    A specific model (tier) may be carried as "<provider>:<model>", e.g.
+    "groq:llama-3.1-8b-instant", "gigachat:GigaChat-Pro", "ollama:qwen2.5:7b".
+    The part after the FIRST ':' is the model; the rest of an ollama tag (which
+    itself contains ':') is preserved.
     """
-    ollama_model = None
+    model = None
     base = name
-    if name and name.lower().startswith("ollama:"):
-        base, ollama_model = "ollama", name.split(":", 1)[1]
+    if name and ":" in name:
+        base, model = name.split(":", 1)
     resolved = config.resolve_provider(base)
-    if resolved == "ollama":
-        return OllamaProvider(model=ollama_model)
-    return _PROVIDERS[resolved]()
+    cls = _PROVIDERS[resolved]
+    try:
+        return cls(model=model)          # providers that accept a model tier
+    except TypeError:
+        return cls()

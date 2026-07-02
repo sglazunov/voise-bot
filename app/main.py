@@ -66,7 +66,14 @@ def _engine_list() -> list[dict]:
     for p in avail:
         if p == "ollama":
             continue
-        engines.append({"value": p, "label": config.PROVIDER_LABELS.get(p, p)})
+        tiers = config.PROVIDER_MODELS.get(p)
+        if tiers:
+            # One entry per model tier so the user picks how powerful it is.
+            # The tier label already names the brand (Llama / GigaChat / …).
+            for t in tiers:
+                engines.append({"value": f"{p}:{t['value']}", "label": t["label"]})
+        else:
+            engines.append({"value": p, "label": config.PROVIDER_LABELS.get(p, p)})
     return engines
 
 app = FastAPI(title="Voice Transcriber", version="1.0")
