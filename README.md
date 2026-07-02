@@ -24,8 +24,9 @@
 - Linux (Ubuntu 22.04+ или любой с Docker) — для сервера. Локально подойдёт и
   Docker Desktop на Windows/Mac (Linux-контейнер).
 - **Docker** + **Docker Compose v2** (`docker compose version`).
-- ОЗУ: ~2 ГБ для модели `small`; **+1–2 ГБ** для бота (Chromium+Xvfb); для локального
-  ИИ-протокола (Ollama) — ещё ~5–6 ГБ. Комфортно от **4 ГБ**.
+- ОЗУ: ~2 ГБ для модели `small`; **+1–2 ГБ** для бота (Chromium+Xvfb). Комфортно от
+  **4 ГБ**. Ollama на сервер не ставится (подключается снаружи) — под неё память
+  на этом сервере не нужна.
 - Первая сборка образа — несколько минут (ставится ffmpeg, tesseract, Chromium).
 
 Установка Docker на чистом Ubuntu:
@@ -100,14 +101,23 @@ docker compose up -d --build
 
 ## Протокол встречи (LLM)
 
-Распознавание работает без ключей; для **протокола** нужен движок:
+Распознавание работает без ключей; для **протокола** нужен движок. На сервер Ollama
+**не ставится** — её нужно **подключить снаружи** (или использовать облако по ключу).
 
-**A. Локально и бесплатно (Ollama):**
+**A. Ollama — бесплатно, локально, но ВНЕШНЯЯ (у Ollama нет API-ключа):**
+Поставьте её на этой же машине (на хосте, вне Docker) или на отдельном сервере:
 ```bash
-docker compose --profile local-ai up -d --build   # поднимет сервис ollama
-bash scripts/setup-ollama.sh                       # один раз: скачает модель ~4.7 ГБ
+curl -fsSL https://ollama.com/install.sh | sh
+OLLAMA_HOST=0.0.0.0 ollama serve        # чтобы принимала подключения из контейнера
+ollama pull qwen2.5:7b                   # модель для протокола (~4.7 ГБ)
 ```
-Приложение обращается к Ollama по `http://ollama:11434` автоматически.
+Затем в `.env` приложения укажите её адрес:
+```
+OLLAMA_URL=http://host.docker.internal:11434   # Ollama на ЭТОЙ машине (хост)
+# OLLAMA_URL=http://192.168.1.50:11434          # Ollama на другом сервере
+```
+и `docker compose up -d`. (По умолчанию `OLLAMA_URL` уже указывает на хост — если
+Ollama там, можно ничего не менять.)
 
 **B. Облако по ключу:** впишите в `.env` `GROQ_API_KEY` (бесплатный тариф),
 `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `GIGACHAT_AUTH_KEY`, `YANDEX_API_KEY`+

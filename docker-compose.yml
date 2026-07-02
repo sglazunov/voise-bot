@@ -1,11 +1,10 @@
-# Voice Transcriber — Linux core, Docker Compose.
+# Voice Transcriber — Linux, Docker Compose.
 #
-#   Core only:                docker compose up -d --build
-#   Core + local AI (Ollama): docker compose --profile local-ai up -d --build
+#   docker compose up -d --build
 #
-# Protocol generation needs an LLM. Either run the optional `ollama` service
-# (local, free — profile local-ai) or set a cloud key (GROQ_API_KEY /
-# ANTHROPIC_API_KEY / …) in .env. Recognition works without any of them.
+# Protocol generation needs an LLM, but NONE is installed on the server here.
+# Either connect an EXTERNAL Ollama (set OLLAMA_URL in .env — see below) or set a
+# cloud key (GROQ_API_KEY / ANTHROPIC_API_KEY / …). Recognition works without any.
 
 services:
   app:
@@ -18,32 +17,16 @@ services:
     env_file:
       - .env
     environment:
-      # Where to reach Ollama. Default = the bundled compose service; override in
-      # .env to point at an Ollama running elsewhere (host machine / another server).
-      OLLAMA_URL: "${OLLAMA_URL:-http://ollama:11434}"
-    # Lets OLLAMA_URL=http://host.docker.internal:11434 reach an Ollama running on
-    # the Docker host (works on Linux servers too, not just Docker Desktop).
+      # Ollama is NOT bundled/installed here — connect an external one. Default
+      # assumes Ollama runs on the Docker host; override in .env for another server:
+      #   OLLAMA_URL=http://host.docker.internal:11434   (Ollama on this machine)
+      #   OLLAMA_URL=http://192.168.1.50:11434           (Ollama on another server)
+      # Start that Ollama with OLLAMA_HOST=0.0.0.0 so it accepts connections.
+      OLLAMA_URL: "${OLLAMA_URL:-http://host.docker.internal:11434}"
+    # Lets host.docker.internal reach a service on the Docker host (Linux too).
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
       - ./data:/data
     # Chromium needs more shared memory than the 64 MB default.
     shm_size: "1gb"
-    # Ollama is optional; the app degrades gracefully if it's not up.
-
-  # Optional local LLM for offline protocol generation. Enable with:
-  #   docker compose --profile local-ai up -d
-  # First time, pull the model once:  bash scripts/setup-ollama.sh
-  ollama:
-    image: ollama/ollama:latest
-    container_name: linux-voise-ollama
-    restart: unless-stopped
-    profiles: ["local-ai"]
-    volumes:
-      - ollama:/root/.ollama
-    # Expose only if you want to reach Ollama from the host:
-    # ports:
-    #   - "11434:11434"
-
-volumes:
-  ollama:
