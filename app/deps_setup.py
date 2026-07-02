@@ -52,8 +52,31 @@ def _has(mod: str) -> bool:
 
 
 def _chromium_installed() -> bool:
-    base = os.path.join(os.environ.get("LOCALAPPDATA", ""), "ms-playwright")
-    return bool(glob.glob(os.path.join(base, "chromium-*")))
+    """Whether Playwright's Chromium is on disk. Checks every location Playwright
+    may use, so it doesn't report "not installed" when it actually is:
+      * PLAYWRIGHT_BROWSERS_PATH (e.g. /ms-playwright in Docker),
+      * the per-OS default cache (Windows LOCALAPPDATA / macOS / Linux ~/.cache).
+    Falls back to asking Playwright for the executable path."""
+    bases = []
+    if os.environ.get("PLAYWRIGHT_BROWSERS_PATH"):
+        bases.append(os.environ["PLAYWRIGHT_BROWSERS_PATH"])
+    if sys.platform == "win32":
+        bases.append(os.path.join(os.environ.get("LOCALAPPDATA", ""), "ms-playwright"))
+    elif sys.platform == "darwin":
+        bases.append(os.path.expanduser("~/Library/Caches/ms-playwright"))
+    else:
+        bases.append(os.path.expanduser("~/.cache/ms-playwright"))
+    for base in bases:
+        if base and glob.glob(os.path.join(base, "chromium-*")):
+            return True
+    # Definitive fallback: ask Playwright where the browser is (honours env too).
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            return bool(p.chromium.executable_path and
+                        os.path.exists(p.chromium.executable_path))
+    except Exception:
+        return False
 
 
 def find_ffmpeg() -> str | None:

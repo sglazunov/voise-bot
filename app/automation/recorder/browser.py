@@ -11,11 +11,13 @@ Playwright is imported lazily so the rest of the app runs without it.
 """
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import sys
 import tempfile
 import time
+import wave
 from pathlib import Path
 
 from ... import config
@@ -107,6 +109,21 @@ _LAUNCH_ARGS = [
 # sink ("meet"), so no extra flag is needed for capture.
 if sys.platform.startswith("linux"):
     _LAUNCH_ARGS += ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
+
+
+def _silent_wav() -> str:
+    """Path to a 1-second silent WAV, created once, for the fake mic input."""
+    path = os.path.join(tempfile.gettempdir(), "vtx-silence.wav")
+    if not os.path.exists(path):
+        try:
+            with wave.open(path, "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(16000)
+                w.writeframes(b"\x00\x00" * 16000)  # 1 s of silence
+        except OSError:
+            pass
+    return path
 
 
 def playwright_available() -> bool:
@@ -217,6 +234,10 @@ class TelemostBot:
         # For recording, open a real maximised window (full screen width) so the
         # capture is as large as possible; headless contexts keep a fixed size.
         args = list(_LAUNCH_ARGS)
+        # Feed the fake mic a SILENT file: Chromium's default fake audio is a
+        # beep, so if the mic ever gets re-enabled (Telemost re-renders after a
+        # while) the bot would transmit that beep. Silence guarantees it can't.
+        args.append(f"--use-file-for-fake-audio-capture={_silent_wav()}")
         if not headless:
             args += ["--start-maximized", "--window-position=0,0"]
         self._ctx = self._pw.chromium.launch_persistent_context(
@@ -500,6 +521,7 @@ class TelemostBot:
         thin_since = None
         seen_others = False           # has anyone besides the bot ever appeared?
         gone_since = None             # since when is_in_call has been False
+        last_mute = 0.0               # keep the bot muted for the whole meeting
         # If nobody ever joins, don't sit for the full max_sec — leave after this.
         never_joined_sec = int(self.cfg.get("end_if_nobody_joins_sec", 300))
         # Give the call a moment to render its controls before we judge it.
@@ -509,6 +531,16 @@ class TelemostBot:
                 return "stopped"
             if time.time() - start > max_sec:
                 return "max_duration"
+            # Re-assert mute periodically: Telemost can reset the mic/cam after a
+            # reconnect or a long session, so muting once at join isn't enough.
+            if time.time() - last_mute > 20:
+                try:
+                    self._page.mouse.move(400, 300)   # nudge UI to reveal controls
+                    self._page.mouse.move(400, 680)
+                except Exception:
+                    pass
+                self.ensure_muted()
+                last_mute = time.time()
             if not self.is_in_call():
                 # Don't bail on a transient miss (UI re-render); only conclude the
                 # call ended after the controls have been absent for a while.
