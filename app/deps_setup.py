@@ -33,7 +33,7 @@ _LABELS = {
     "diarization": "«Кто говорил» (torch + pyannote.audio)",
     "ffmpeg": "ffmpeg (запись и конвертация видео/аудио)",
     "ocr": "Текст с экрана (Pillow + pytesseract + Tesseract)",
-    "audio_loopback": "Виртуальное аудио для записи звука (VB-CABLE)",
+    "audio_loopback": "Виртуальное аудио для записи звука",
 }
 
 # Audio devices that let ffmpeg capture the meeting's sound (system loopback).
@@ -128,12 +128,18 @@ def component_ready(c: str) -> bool:
 
 
 def _loopback_device_present() -> bool:
-    """True if ffmpeg can see a loopback/virtual audio device to capture sound."""
+    """True if there's a loopback/virtual audio device to capture meeting sound.
+
+    On Linux the "virtual cable" is a PulseAudio monitor source (the container's
+    null-sink), created automatically at startup — any *.monitor counts. On
+    Windows it's VB-CABLE / Stereo Mix, matched by name.
+    """
     try:
         from .automation.recorder import capture
-        from .automation import settings as auto_settings
-        ff = auto_settings.load().get("ffmpeg_path") or "ffmpeg"
-        names = capture.list_audio_devices(ff)
+        names = capture.list_audio_devices("ffmpeg")
+        if sys.platform.startswith("linux"):
+            target = os.environ.get("VTX_PULSE_MONITOR", "meet.monitor")
+            return any(n == target or n.endswith(".monitor") for n in names)
         return any(any(k in n.lower() for k in _LOOPBACK_KEYS) for n in names)
     except Exception:
         return False
@@ -237,6 +243,30 @@ def _do_install(c: str) -> None:
                 return
             _set(c, "done", "Готово — распознавание текста с экрана доступно "
                  "(для русского нужен языковой пакет rus в Tesseract).", ok=True)
+
+        elif c == "audio_loopback" and sys.platform.startswith("linux"):
+            # Linux: the virtual "cable" is a PulseAudio null-sink, set up by the
+            # container automatically. No download — just ensure it exists.
+            _set(c, "running", "Проверяю виртуальное аудио (PulseAudio)…")
+            if not _loopback_device_present():
+                try:
+                    subprocess.run(["pactl", "load-module", "module-null-sink",
+                                    "sink_name=meet",
+                                    "sink_properties=device.description=meet"],
+                                   capture_output=True, text=True)
+                    subprocess.run(["pactl", "set-default-sink", "meet"],
+                                   capture_output=True, text=True)
+                except FileNotFoundError:
+                    pass
+            if _loopback_device_present():
+                _set(c, "done", "Готово — виртуальное аудио настроено автоматически "
+                     "(PulseAudio null-sink «meet.monitor»). Отдельная установка на Linux "
+                     "не нужна.", ok=True)
+            else:
+                _set(c, "error", "PulseAudio-монитор не найден. Убедитесь, что контейнер "
+                     "запущен с VTX_RECORDER_ENABLED=1 (тогда null-sink создаётся при старте).",
+                     ok=False)
+            return
 
         elif c == "audio_loopback":
             import tempfile
