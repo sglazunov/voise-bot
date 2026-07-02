@@ -18,8 +18,13 @@ services:
     env_file:
       - .env
     environment:
-      # App talks to the ollama service by its compose hostname.
-      OLLAMA_URL: "http://ollama:11434"
+      # Where to reach Ollama. Default = the bundled compose service; override in
+      # .env to point at an Ollama running elsewhere (host machine / another server).
+      OLLAMA_URL: "${OLLAMA_URL:-http://ollama:11434}"
+    # Lets OLLAMA_URL=http://host.docker.internal:11434 reach an Ollama running on
+    # the Docker host (works on Linux servers too, not just Docker Desktop).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./data:/data
     # Chromium needs more shared memory than the 64 MB default.
