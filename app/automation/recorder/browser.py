@@ -97,18 +97,32 @@ _REC_STOP = [
     'text="Остановить запись"', 'text=Остановить запись',
     'button:has-text("Остановить запись")', 'text=Завершить запись',
 ]
-# Launch args: auto-accept mic/cam prompts; fake mic so we never send real audio.
+# Launch args: auto-accept mic/cam prompts; fake mic so we never send real audio;
+# suppress the noisy first-run/default-browser/translate popups that otherwise
+# show up in the recording.
 _LAUNCH_ARGS = [
     "--use-fake-ui-for-media-stream",
     "--use-fake-device-for-media-stream",
     "--autoplay-policy=no-user-gesture-required",
     "--disable-blink-features=AutomationControlled",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--disable-features=Translate,TranslateUI",
 ]
 # In a Linux container Chromium must run without the sandbox (esp. as root) and
 # not rely on the tiny default /dev/shm. Audio just follows the default Pulse
 # sink ("meet"), so no extra flag is needed for capture.
 if sys.platform.startswith("linux"):
     _LAUNCH_ARGS += ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
+
+
+def _screen_wh() -> tuple[int, int]:
+    """Xvfb display size (W, H) from VTX_SCREEN_RES, default 1920x1080."""
+    res = os.environ.get("VTX_SCREEN_RES", "1920x1080x24").split("x")
+    try:
+        return int(res[0]), int(res[1])
+    except (ValueError, IndexError):
+        return 1920, 1080
 
 
 def _silent_wav() -> str:
@@ -239,7 +253,16 @@ class TelemostBot:
         # while) the bot would transmit that beep. Silence guarantees it can't.
         args.append(f"--use-file-for-fake-audio-capture={_silent_wav()}")
         if not headless:
-            args += ["--start-maximized", "--window-position=0,0"]
+            args.append("--window-position=0,0")
+            if sys.platform.startswith("linux"):
+                # No window manager under Xvfb, so --start-maximized / the CDP
+                # maximise don't fill the screen. Size the window to the whole
+                # display and go fullscreen (also hides the toolbar/tabs from
+                # the recording).
+                w, h = _screen_wh()
+                args += [f"--window-size={w},{h}", "--start-fullscreen"]
+            else:
+                args.append("--start-maximized")
         self._ctx = self._pw.chromium.launch_persistent_context(
             user_dir, headless=headless, args=args,
             permissions=["microphone", "camera"],
@@ -249,7 +272,9 @@ class TelemostBot:
         self._page = self._ctx.pages[0] if self._ctx.pages else self._ctx.new_page()
         self._download_path = None
         self._ctx.on("download", self._on_download)
-        if not headless:
+        # On Windows the CDP maximise fills the screen reliably. On Linux/Xvfb we
+        # already forced --window-size + --start-fullscreen (no WM to maximise).
+        if not headless and not sys.platform.startswith("linux"):
             self._maximize_window()
 
     def _maximize_window(self) -> None:
