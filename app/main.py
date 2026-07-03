@@ -555,6 +555,8 @@ class AutomationSettings(BaseModel):
     lookahead_min: int | None = None
     bot_join_name: str | None = None
     post_back_to_weeek: bool | None = None
+    weeek_set_video_field: bool | None = None
+    weeek_video_field: str | None = None
     # recorder
     record_mode: str | None = None
     auth_mode: str | None = None

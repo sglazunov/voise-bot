@@ -278,3 +278,44 @@ def add_comment(token: str, task_id: Any, text: str) -> bool:
         except WeeekError:
             continue
     return False
+
+
+def _find_custom_field_id(task: dict, field_name: str):
+    """Id of a task's custom field by (case-insensitive, then partial) name."""
+    fields = task.get("customFields") or []
+    name = field_name.strip().lower()
+    for cf in fields:
+        if isinstance(cf, dict) and str(cf.get("name", "")).strip().lower() == name:
+            return cf.get("id")
+    for cf in fields:  # partial match fallback
+        if isinstance(cf, dict) and name in str(cf.get("name", "")).lower():
+            return cf.get("id")
+    return None
+
+
+def set_custom_field(token: str, task_id: Any, field_name: str, value: str) -> dict:
+    """Write `value` into the task's custom field named `field_name` (e.g. a link
+    field «Видео встречи»). Best-effort: tries the known Weeek write shapes and
+    returns {ok, ...} with the API error for diagnosis if all fail."""
+    try:
+        task = get_task(token, task_id)
+    except WeeekError as e:
+        return {"ok": False, "error": f"Не прочитал задачу: {e}"}
+    fid = _find_custom_field_id(task, field_name)
+    if fid is None:
+        return {"ok": False, "error": f"Кастом-поле «{field_name}» не найдено в задаче."}
+    # Least-destructive first: a dedicated per-field endpoint, then task update
+    # with the field as a list / as a map (Weeek variants differ by workspace).
+    attempts = [
+        ("POST", f"/tm/tasks/{task_id}/custom-fields/{fid}", {"value": value}),
+        ("PUT", f"/tm/tasks/{task_id}", {"customFields": [{"id": fid, "value": value}]}),
+        ("PUT", f"/tm/tasks/{task_id}", {"customFields": {str(fid): value}}),
+    ]
+    last = ""
+    for method, path, body in attempts:
+        try:
+            _request(method, path, token, body=body)
+            return {"ok": True, "field_id": fid}
+        except WeeekError as e:
+            last = str(e)
+    return {"ok": False, "error": last or "Не удалось записать поле.", "field_id": fid}

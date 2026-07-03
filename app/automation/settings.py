@@ -97,6 +97,9 @@ _DEFAULTS: dict[str, Any] = {
     "ocr_screen": True,               # recognise on-screen text (slides/code) too
     "analyze_provider": "auto",       # which LLM builds the protocol
     "post_back_to_weeek": True,       # attach protocol link as a task comment
+    # --- write the recording link into a Weeek custom field of the task ---
+    "weeek_set_video_field": True,    # put the cloud link into a custom field
+    "weeek_video_field": "Видео встречи",  # name of that link custom field
 }
 
 

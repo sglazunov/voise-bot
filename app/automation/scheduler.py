@@ -263,6 +263,14 @@ class Scheduler:
             else:
                 log(f"Облако: {up.get('error')}")
 
+            # Write the recording link into the task's «Видео встречи» custom field.
+            field = (cfg.get("weeek_video_field") or "").strip()
+            if cfg.get("weeek_set_video_field", True) and st.cloud_url and field:
+                res = weeek.set_custom_field(cfg.get("weeek_token"), st.task_id,
+                                             field, st.cloud_url)
+                log(f"Поле «{field}» в Weeek: "
+                    + ("заполнено ✓" if res.get("ok") else f"не удалось — {res.get('error')}"))
+
             # Keep the video ONLY where the UI points. If it was delivered
             # elsewhere (a remote cloud, or a local folder other than the staging
             # dir), the staging copy in data/recordings is redundant and must not
