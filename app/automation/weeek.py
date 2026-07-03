@@ -240,24 +240,34 @@ def task_to_meeting(task: dict, local_tz: tzinfo = timezone.utc) -> Meeting | No
     )
     if not url:
         return None
+    proj = task.get("projectId") or task.get("project_id")
+    if proj is None and isinstance(task.get("project"), dict):
+        proj = task["project"].get("id")
     return Meeting(
         task_id=task.get("id"),
         title=task.get("title") or task.get("name") or f"Задача {task.get('id')}",
         url=url,
         start=parse_start(task, local_tz),
-        project_id=task.get("projectId") or task.get("project_id"),
+        project_id=proj,
         raw=task,
     )
 
 
 def upcoming_meetings(token: str, project_id: Any = None,
                       local_tz: tzinfo = timezone.utc) -> list[Meeting]:
-    """All tasks that have a Telemost link, as Meetings (start may be None)."""
+    """Tasks with a Telemost link, as Meetings. When `project_id` is set, only
+    that project's meetings are returned — enforced BOTH server-side (the API
+    filter) and client-side (belt-and-suspenders, in case the API ignores it)."""
     meetings = []
     for task in list_tasks(token, project_id=project_id):
         m = task_to_meeting(task, local_tz)
         if m:
             meetings.append(m)
+    pid = str(project_id).strip() if project_id not in (None, "", 0) else None
+    if pid and any(m.project_id is not None for m in meetings):
+        # Only filter when we can actually read project ids, so an unexpected
+        # field name can't silently drop every meeting.
+        meetings = [m for m in meetings if str(m.project_id) == pid]
     meetings.sort(key=lambda m: (m.start is None, m.start or datetime.max.replace(
         tzinfo=timezone.utc)))
     return meetings
