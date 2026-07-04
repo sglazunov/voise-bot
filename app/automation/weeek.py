@@ -314,18 +314,12 @@ def set_custom_field(token: str, task_id: Any, field_name: str, value: str) -> d
     fid = _find_custom_field_id(task, field_name)
     if fid is None:
         return {"ok": False, "error": f"Кастом-поле «{field_name}» не найдено в задаче."}
-    # Least-destructive first: a dedicated per-field endpoint, then task update
-    # with the field as a list / as a map (Weeek variants differ by workspace).
-    attempts = [
-        ("POST", f"/tm/tasks/{task_id}/custom-fields/{fid}", {"value": value}),
-        ("PUT", f"/tm/tasks/{task_id}", {"customFields": [{"id": fid, "value": value}]}),
-        ("PUT", f"/tm/tasks/{task_id}", {"customFields": {str(fid): value}}),
-    ]
-    last = ""
-    for method, path, body in attempts:
-        try:
-            _request(method, path, token, body=body)
-            return {"ok": True, "field_id": fid}
-        except WeeekError as e:
-            last = str(e)
-    return {"ok": False, "error": last or "Не удалось записать поле.", "field_id": fid}
+    # Verified against the live Weeek API: update the task, passing customFields
+    # as a {fieldId: value} MAP, and the value as a plain STRING. (The list shape
+    # [{"id","value"}] returns 200 but is silently ignored; a non-string 422s.)
+    try:
+        _request("PUT", f"/tm/tasks/{task_id}", token,
+                 body={"customFields": {str(fid): str(value)}})
+        return {"ok": True, "field_id": fid}
+    except WeeekError as e:
+        return {"ok": False, "error": str(e), "field_id": fid}
