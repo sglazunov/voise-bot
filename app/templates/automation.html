@@ -9,18 +9,27 @@
           --txt:#eaf1fb;--muted:#93a6c4;--line:rgba(120,150,200,.18);--ok:#16a34a;--err:#dc2626;--warn:#d97706;}
     *{box-sizing:border-box}
     body{margin:0;color:var(--txt);font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+         height:100vh;overflow:hidden;
          background:radial-gradient(1200px 600px at 15% -5%,rgba(56,189,248,.14),transparent 60%),
                     radial-gradient(1000px 500px at 95% 0%,rgba(124,58,237,.12),transparent 55%),
                     linear-gradient(180deg,#0a0f1c,#080c16)}
-    .wrap{max-width:1320px;margin:0 auto;padding:18px 18px 40px}
+    /* Full-height layout: header + tabs fixed, only the active panel scrolls. */
+    .wrap{max-width:1180px;margin:0 auto;padding:12px 18px 14px;height:100vh;
+          display:flex;flex-direction:column;min-height:0}
     a{color:var(--accent)}
-    h1{font-size:22px;margin:2px 0;letter-spacing:.2px}
-    .sub{color:var(--muted);font-size:13px;margin-bottom:14px}
-    /* two balanced columns so everything fits with minimal scroll */
-    .cards{column-count:2;column-gap:16px}
-    @media(max-width:1000px){.cards{column-count:1}}
+    h1{font-size:20px;margin:2px 0;letter-spacing:.2px}
+    .sub{color:var(--muted);font-size:12px;margin:2px 0 8px}
+    /* Tabs */
+    .tabbar{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;flex:0 0 auto}
+    .tabbtn{background:#141f38;color:var(--muted);border:1px solid var(--line);border-radius:10px;
+            padding:8px 14px;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit}
+    .tabbtn:hover{color:var(--txt)}
+    .tabbtn.active{background:linear-gradient(90deg,var(--accent),var(--accent2));color:#04212f;border-color:transparent}
+    .tabpanels{flex:1 1 auto;min-height:0;overflow:auto;padding-right:4px}
+    .tabpanel{display:none}
+    .tabpanel.active{display:block}
     .card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:15px 16px;
-          margin:0 0 16px;break-inside:avoid;-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);
+          margin:0 0 16px;-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);
           box-shadow:0 10px 30px -18px rgba(0,0,0,.7)}
     .card h2{font-size:14px;margin:0 0 3px;font-weight:700;letter-spacing:.2px}
     .card .desc{color:var(--muted);font-size:12px;margin:0 0 10px}
@@ -82,9 +91,15 @@
   <div class="sub">Weeek → запись Телемоста ботом → облако → распознавание и протокол.
     <a href="/">← к распознаванию</a></div>
 
-  <div class="cards">
+  <div class="tabbar">
+    <button class="tabbtn active" onclick="showTab('weeek',this)">1 · Weeek</button>
+    <button class="tabbtn" onclick="showTab('cloud',this)">2 · Облако</button>
+    <button class="tabbtn" onclick="showTab('recorder',this)">3 · Бот-рекордер</button>
+    <button class="tabbtn" onclick="showTab('scheduler',this)">4 · Планировщик</button>
+  </div>
+  <div class="tabpanels">
   <!-- ============ WEEEK ============ -->
-  <div class="card">
+  <div class="card tabpanel active" id="tab-weeek">
     <h2>1 · Weeek</h2>
     <p class="desc">Откуда брать встречи. Токен — персональный API-ключ из настроек воркспейса.</p>
     <label>API-токен Weeek</label>
@@ -106,7 +121,7 @@
   </div>
 
   <!-- ============ CLOUD ============ -->
-  <div class="card">
+  <div class="card tabpanel" id="tab-cloud">
     <h2>2 · Куда сохранять запись</h2>
     <p class="desc">Облако для готовой записи. Секреты хранятся локально на сервере.</p>
     <label>Облако</label>
@@ -156,7 +171,7 @@
   </div>
 
   <!-- ============ RECORDER ============ -->
-  <div class="card">
+  <div class="card tabpanel" id="tab-recorder">
     <h2>3 · Бот-рекордер (Телемост)</h2>
     <p class="desc">Бот заходит в встречу (как гость) и записывает <b>окно с встречей</b> на всю длину (ffmpeg), со звуком. Нужны Playwright, ffmpeg и виртуальное аудио — кнопки установки ниже.</p>
     <div class="grid2">
@@ -224,7 +239,7 @@
   </div>
 
   <!-- ============ SCHEDULER ============ -->
-  <div class="card">
+  <div class="card tabpanel" id="tab-scheduler">
     <h2>4 · Планировщик</h2>
     <p class="desc">Главный выключатель автоматики и её текущее состояние.</p>
     <div class="chk"><input id="enabled" type="checkbox" onchange="toggleEnabled()">
@@ -302,7 +317,7 @@
     <div id="sched_status" class="statusline"></div>
     <div id="sched_meetings" class="mlist"></div>
   </div>
-  </div><!-- /.cards -->
+  </div><!-- /.tabpanels -->
 </div>
 
 <div id="toast" class="toast"></div>
@@ -310,6 +325,13 @@
 <script>
 const $=id=>document.getElementById(id);
 let SETTINGS={};
+
+function showTab(name, btn){
+  document.querySelectorAll('.tabpanel').forEach(p=>p.classList.toggle('active', p.id==='tab-'+name));
+  document.querySelectorAll('.tabbtn').forEach(b=>b.classList.remove('active'));
+  if(btn) btn.classList.add('active');
+  document.querySelector('.tabpanels').scrollTop=0;
+}
 
 async function api(method, path, body){
   const opt={method, headers:{}};
