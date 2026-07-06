@@ -65,6 +65,8 @@ ENV VTX_DATA_DIR=/data \
     VTX_SCREEN_RES=1920x1080x24 \
     VTX_PULSE_MONITOR=meet0.monitor \
     DISPLAY=:99 \
+    XDG_RUNTIME_DIR=/tmp/xdg \
+    PULSE_RUNTIME_PATH=/tmp/pulse \
     OLLAMA_URL=http://ollama:11434 \
     TZ=Europe/Moscow
 
