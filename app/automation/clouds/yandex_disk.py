@@ -70,19 +70,29 @@ def upload(file_path: str, name: str, cfg: dict) -> dict:
         if put_status not in (201, 202):
             raise CloudError(f"Загрузка не удалась (HTTP {put_status}).")
 
-        # The file is safely uploaded now. Getting a public link is best-effort:
-        # a timeout/error here must NOT fail the whole job (the recording is saved).
-        url = None
+        # The file is uploaded. Publish it and fetch the PUBLIC share link
+        # (https://disk.yandex.ru/d/…). Reading the link back needs the read
+        # scope; with a write-only token this 403s — surface a clear note.
+        url, note = None, None
         try:
             pub_status, _ = request("PUT", f"{API}/resources/publish",
                                     headers=headers, params={"path": remote})
             if pub_status in (200, 201):
-                _, meta = request_json("GET", f"{API}/resources",
-                                       headers=headers, params={"path": remote})
-                url = (meta or {}).get("public_url")
-        except CloudError:
-            pass  # no shareable link, but the file is on the Disk
+                meta_status, meta = request_json(
+                    "GET", f"{API}/resources", headers=headers,
+                    params={"path": remote, "fields": "public_url"})
+                if meta_status == 200:
+                    url = (meta or {}).get("public_url")
+                elif meta_status in (401, 403):
+                    note = ("Файл загружен, но публичную ссылку не получить: токену "
+                            "Яндекс.Диска нужен доступ на ЧТЕНИЕ (cloud_api:disk.read). "
+                            "Добавьте «Чтение всего Диска» в приложении Яндекса и "
+                            "получите токен заново.")
+        except CloudError as e:
+            note = f"Публичная ссылка не получена: {e}"
+        # `url` is the real share link (or None). Never return the internal
+        # disk:/ path as a link — it isn't openable.
         return {"ok": True, "backend": "yandex_disk",
-                "url": url or remote, "path": remote}
+                "url": url, "path": remote, "public_note": note}
     except CloudError as e:
         return {"ok": False, "backend": "yandex_disk", "error": str(e)}

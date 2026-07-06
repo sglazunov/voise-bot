@@ -239,11 +239,14 @@ class Scheduler:
                     self._set(st, "recording", msg)
 
             self._set(st, "recording", "Бот заходит на встречу…")
-            stamp = time.strftime("%Y%m%d-%H%M%S")
-            safe = "".join(c for c in str(st.title) if c.isalnum() or c in " -_")[:40].strip()
+            # Human-readable file name «ДД.ММ.ГГГГ - ЧЧ:ММ» in the workspace tz.
+            # ':' is invalid in file names (and on Yandex.Disk), so time uses '-'.
+            when = (st.start.astimezone(self._tz(cfg)) if st.start
+                    else datetime.now(self._tz(cfg)))
+            stamp = when.strftime("%d.%m.%Y - %H-%M")
             rec_dir = security.user_dir(user) / "recordings"  # private per-user
             rec_dir.mkdir(parents=True, exist_ok=True)
-            out = str(rec_dir / f"{stamp}-{safe or st.task_id}.mp4")
+            out = str(rec_dir / f"{stamp}.mp4")
 
             res = recorder.record_meeting(
                 st.url, out, cfg, on_log=log,
@@ -259,7 +262,9 @@ class Scheduler:
             self._set(st, "uploading", "Выгружаю запись в облако…")
             up = clouds.upload(out, Path(out).name, cfg)
             if up.get("ok"):
-                st.cloud_url = up.get("url")
+                st.cloud_url = up.get("url")  # public share link (or None)
+                if up.get("public_note"):
+                    log(up["public_note"])
             else:
                 log(f"Облако: {up.get('error')}")
 

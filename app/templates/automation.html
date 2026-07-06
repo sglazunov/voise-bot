@@ -122,7 +122,7 @@
     </div>
     <div id="cf_yandex_disk" class="cf hide">
       <div class="grid2">
-        <div><label>OAuth-токен Я.Диска</label><input id="yd_token" type="password" placeholder="scope cloud_api:disk.write"></div>
+        <div><label>OAuth-токен Я.Диска</label><input id="yd_token" type="password" placeholder="scope: disk.read + disk.write"></div>
         <div><label>Папка на диске</label><input id="yd_folder" type="text" placeholder="disk:/Телемост-записи"></div>
       </div>
       <div class="note">
@@ -333,7 +333,7 @@ async function loadAll(){
   // cloud
   setVal("cloud", s.cloud||"local"); setVal("local_dir", s.local_dir);
   const yd=s.yandex_disk||{}; setVal("yd_folder", yd.folder);
-  $("yd_token").placeholder = yd.token ? "•••• сохранён" : "scope cloud_api:disk.write";
+  $("yd_token").placeholder = yd.token ? "•••• сохранён" : "scope: disk.read + disk.write";
   const gd=s.gdrive||{};
   $("gd_client_secret").placeholder = gd.client_secret ? "•••• сохранён":"";
   $("gd_refresh_token").placeholder = gd.refresh_token ? "•••• сохранён":"";
@@ -448,11 +448,14 @@ async function saveCloud(){
 function getYandexToken(){
   const cid=($("yd_client_id").value||"").trim();
   if(!cid){ $("cloud_status").innerHTML="<span class='bad'>Сначала вставьте ClientID приложения.</span>"; return; }
-  // Implicit flow: the token is shown on the verification_code page after consent.
-  const url="https://oauth.yandex.ru/authorize?response_type=token&client_id="+encodeURIComponent(cid);
+  // Implicit flow + request BOTH read and write: read is needed to fetch the
+  // public share link after publishing (write-only can't read it back).
+  const scope=encodeURIComponent("cloud_api:disk.read cloud_api:disk.write");
+  const url="https://oauth.yandex.ru/authorize?response_type=token&scope="+scope+"&client_id="+encodeURIComponent(cid);
   try{ window.open(url,"_blank","noopener"); }catch(e){}
-  $("cloud_status").innerHTML="<span class='ok'>Разрешите доступ на странице Яндекса, затем скопируйте показанный токен в поле «OAuth-токен Я.Диска» и нажмите «Сохранить».</span> "
-    +"Если вкладка не открылась — перейдите вручную: <a href='"+url+"' target='_blank' rel='noopener'>открыть авторизацию</a>";
+  $("cloud_status").innerHTML="<span class='ok'>Разрешите доступ (нужны и чтение, и запись Диска), скопируйте токен в поле «OAuth-токен Я.Диска» и нажмите «Сохранить».</span> "
+    +"В приложении Яндекса должны быть включены оба разрешения: «Чтение всего Диска» и «Запись в любом месте». "
+    +"Если вкладка не открылась — <a href='"+url+"' target='_blank' rel='noopener'>открыть авторизацию</a>";
 }
 async function testCloud(){
   $("cloud_status").innerHTML="загрузка тестового файла…";
