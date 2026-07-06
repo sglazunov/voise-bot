@@ -22,7 +22,7 @@ _LOCK = threading.Lock()
 
 # Secret fields are stored ENCRYPTED on disk (per-user key) and decrypted only in
 # memory. Dotted paths reach into the nested cloud sub-dicts.
-_SECRET_PATHS = ("weeek_token", "yandex_disk.token",
+_SECRET_PATHS = ("weeek_token", "yandex_disk.token", "yandex_disk.read_token",
                  "gdrive.client_secret", "gdrive.refresh_token")
 
 
@@ -57,7 +57,7 @@ _DEFAULTS: dict[str, Any] = {
     "timezone": "Europe/Moscow",      # workspace tz for naive Weeek date/times
     # --- where to put finished recordings ---
     "cloud": "local",                 # "local" | "gdrive" | "yandex_disk"
-    "yandex_disk": {"token": "", "folder": "disk:/Телемост-записи"},
+    "yandex_disk": {"token": "", "read_token": "", "folder": "disk:/Телемост-записи"},
     "gdrive": {"client_id": "", "client_secret": "", "refresh_token": "",
                "folder_id": ""},
     "local_dir": "",                  # empty -> DATA_DIR/recordings
@@ -184,6 +184,7 @@ def redacted(user: str) -> dict[str, Any]:
     out["weeek_token"] = bool(data.get("weeek_token"))
     yd = dict(data.get("yandex_disk") or {})
     yd["token"] = bool(yd.get("token"))
+    yd["read_token"] = bool(yd.get("read_token"))
     out["yandex_disk"] = yd
     gd = dict(data.get("gdrive") or {})
     for secret in ("client_secret", "refresh_token"):

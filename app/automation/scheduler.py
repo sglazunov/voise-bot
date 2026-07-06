@@ -239,14 +239,18 @@ class Scheduler:
                     self._set(st, "recording", msg)
 
             self._set(st, "recording", "Бот заходит на встречу…")
-            # Human-readable file name «ДД.ММ.ГГГГ - ЧЧ:ММ» in the workspace tz.
-            # ':' is invalid in file names (and on Yandex.Disk), so time uses '-'.
+            # Human-readable file name: «ДД.ММ.ГГГГ, ЧЧ:ММ. - <название задачи>»
+            # in the workspace timezone.
             when = (st.start.astimezone(self._tz(cfg)) if st.start
                     else datetime.now(self._tz(cfg)))
-            stamp = when.strftime("%d.%m.%Y - %H-%M")
+            stamp = when.strftime("%d.%m.%Y, %H:%M")
+            bad = '\\/*?"<>|'  # strip chars that break file names / URLs (keep the time ':')
+            title = "".join(" " if c in bad else c for c in str(st.title or "")).strip()
+            title = " ".join(title.split())[:80]
+            fname = f"{stamp}. - {title}.mp4" if title else f"{stamp}.mp4"
             rec_dir = security.user_dir(user) / "recordings"  # private per-user
             rec_dir.mkdir(parents=True, exist_ok=True)
-            out = str(rec_dir / f"{stamp}.mp4")
+            out = str(rec_dir / fname)
 
             res = recorder.record_meeting(
                 st.url, out, cfg, on_log=log,

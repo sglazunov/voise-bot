@@ -124,7 +124,9 @@
       <div class="grid2">
         <div><label>OAuth-токен Я.Диска</label><input id="yd_token" type="password" placeholder="scope: disk.read + disk.write"></div>
         <div><label>Папка на диске</label><input id="yd_folder" type="text" placeholder="disk:/Телемост-записи"></div>
+        <div><label>Токен чтения (необязательно)</label><input id="yd_read_token" type="password" placeholder="если основной токен только на запись"></div>
       </div>
+      <div class="note">«Токен чтения» нужен только для получения публичной ссылки, если у основного токена нет доступа на чтение. Должен быть от <b>того же</b> аккаунта Яндекса. Проще — один токен с обоими правами (чтение + запись).</div>
       <div class="note">
         ⚠️ <b>ClientID и Client secret — это НЕ токен</b>, их в поле выше вставлять нельзя (будет 401).
         Токен нужно получить отдельно: вставьте ваш <b>ClientID</b> и нажмите «Получить токен» —
@@ -334,6 +336,7 @@ async function loadAll(){
   setVal("cloud", s.cloud||"local"); setVal("local_dir", s.local_dir);
   const yd=s.yandex_disk||{}; setVal("yd_folder", yd.folder);
   $("yd_token").placeholder = yd.token ? "•••• сохранён" : "scope: disk.read + disk.write";
+  $("yd_read_token").placeholder = yd.read_token ? "•••• сохранён" : "если основной токен только на запись";
   const gd=s.gdrive||{};
   $("gd_client_secret").placeholder = gd.client_secret ? "•••• сохранён":"";
   $("gd_refresh_token").placeholder = gd.refresh_token ? "•••• сохранён":"";
@@ -436,13 +439,14 @@ async function saveCloud(){
   const b={cloud:$("cloud").value, local_dir:$("local_dir").value||null};
   const yd={folder:$("yd_folder").value||undefined};
   if($("yd_token").value.trim()) yd.token=$("yd_token").value.trim();
+  if($("yd_read_token").value.trim()) yd.read_token=$("yd_read_token").value.trim();
   if(Object.keys(yd).length) b.yandex_disk=yd;
   const gd={folder_id:$("gd_folder_id").value||undefined, client_id:$("gd_client_id").value||undefined};
   if($("gd_client_secret").value.trim()) gd.client_secret=$("gd_client_secret").value.trim();
   if($("gd_refresh_token").value.trim()) gd.refresh_token=$("gd_refresh_token").value.trim();
   if(Object.keys(gd).length) b.gdrive=gd;
   try{ await api("POST","/api/automation/settings", b);
-    ["yd_token","gd_client_secret","gd_refresh_token"].forEach(i=>$(i).value="");
+    ["yd_token","yd_read_token","gd_client_secret","gd_refresh_token"].forEach(i=>$(i).value="");
     toast("Облако сохранено"); cloudStatus(); }catch(e){ toast(e.message,true); }
 }
 function getYandexToken(){

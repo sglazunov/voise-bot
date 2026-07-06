@@ -22,6 +22,14 @@ def _auth(cfg: dict) -> dict:
     return {"Authorization": f"OAuth {token}"}
 
 
+def _read_auth(cfg: dict) -> dict:
+    """Header for READ calls (getting the public link). Uses a separate read
+    token if the user provided one (their main token may be write-only), else
+    falls back to the main token. Must be the SAME Yandex account."""
+    rt = (cfg.get("read_token") or "").strip()
+    return {"Authorization": f"OAuth {rt}"} if rt else _auth(cfg)
+
+
 def readiness(cfg: dict) -> dict:
     token = (cfg.get("token") or "").strip()
     if not token:
@@ -79,15 +87,15 @@ def upload(file_path: str, name: str, cfg: dict) -> dict:
                                     headers=headers, params={"path": remote})
             if pub_status in (200, 201):
                 meta_status, meta = request_json(
-                    "GET", f"{API}/resources", headers=headers,
+                    "GET", f"{API}/resources", headers=_read_auth(cfg),
                     params={"path": remote, "fields": "public_url"})
                 if meta_status == 200:
                     url = (meta or {}).get("public_url")
                 elif meta_status in (401, 403):
-                    note = ("Файл загружен, но публичную ссылку не получить: токену "
-                            "Яндекс.Диска нужен доступ на ЧТЕНИЕ (cloud_api:disk.read). "
-                            "Добавьте «Чтение всего Диска» в приложении Яндекса и "
-                            "получите токен заново.")
+                    note = ("Файл загружен, но публичную ссылку не получить: нужен доступ "
+                            "на ЧТЕНИЕ (cloud_api:disk.read). Впишите отдельный «токен "
+                            "чтения» Я.Диска в настройках, либо добавьте «Чтение всего "
+                            "Диска» в приложении Яндекса и получите токен заново.")
         except CloudError as e:
             note = f"Публичная ссылка не получена: {e}"
         # `url` is the real share link (or None). Never return the internal
