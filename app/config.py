@@ -127,21 +127,36 @@ PROVIDER_MODELS = {
 KEY_PROVIDERS = {"anthropic", "groq", "gemini", "yandex", "gigachat"}
 
 
-def available_providers() -> list[str]:
-    """Providers that are configured and therefore selectable right now."""
+def provider_creds(provider: str, user_keys: dict | None = None) -> tuple[str, str]:
+    """(api_key, extra) for a provider: the user's own key first, then the server
+    env fallback. `user_keys` is {provider: {'key','extra'}} from user_creds."""
+    u = (user_keys or {}).get(provider) or {}
+    env = {
+        "anthropic": (ANTHROPIC_API_KEY, ""),
+        "groq": (GROQ_API_KEY, ""),
+        "gemini": (GEMINI_API_KEY, ""),
+        "yandex": (YANDEX_API_KEY, YANDEX_FOLDER_ID),
+        "gigachat": (GIGACHAT_AUTH_KEY, GIGACHAT_SCOPE),
+    }.get(provider, ("", ""))
+    return (u.get("key") or env[0], u.get("extra") or env[1])
+
+
+def _has_provider_key(p: str, user_keys: dict | None) -> bool:
+    key, extra = provider_creds(p, user_keys)
+    if p == "yandex":
+        return bool(key and extra)
+    return bool(key)
+
+
+def available_providers(user_keys: dict | None = None) -> list[str]:
+    """Providers configured (and thus selectable) for this user — their own key
+    first, then the server env fallback."""
     out = []
     if OLLAMA_ENABLED:
         out.append("ollama")
-    if GROQ_API_KEY:
-        out.append("groq")
-    if GEMINI_API_KEY:
-        out.append("gemini")
-    if YANDEX_API_KEY and YANDEX_FOLDER_ID:
-        out.append("yandex")
-    if GIGACHAT_AUTH_KEY:
-        out.append("gigachat")
-    if ANTHROPIC_API_KEY:
-        out.append("anthropic")
+    for p in ("groq", "gemini", "yandex", "gigachat", "anthropic"):
+        if _has_provider_key(p, user_keys):
+            out.append(p)
     return [p for p in PROVIDER_ORDER if p in out]
 
 
@@ -177,9 +192,9 @@ def set_provider_key(provider: str, key: str, extra: str = "") -> None:
         raise RuntimeError(f"Ключ для провайдера '{provider}' не поддерживается.")
 
 
-def resolve_provider(name: str | None) -> str:
+def resolve_provider(name: str | None, user_keys: dict | None = None) -> str:
     """Turn a requested provider (or 'auto'/None) into a concrete one."""
-    avail = available_providers()
+    avail = available_providers(user_keys)
     if not avail:
         raise RuntimeError(
             "Ни один LLM-провайдер не настроен. Включите Ollama (VTX_OLLAMA=1) "

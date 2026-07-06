@@ -187,8 +187,10 @@ class GroqProvider:
 
     name = "groq"
 
-    def __init__(self, model: str | None = None) -> None:
+    def __init__(self, model: str | None = None, api_key: str | None = None,
+                 extra: str | None = None) -> None:
         self.model = model or config.GROQ_MODEL
+        self.api_key = api_key or config.GROQ_API_KEY
 
     def complete(self, prompt: str, max_tokens: int = 2000, force_json: bool = True) -> str:
         url = "https://api.groq.com/openai/v1/chat/completions"
@@ -200,7 +202,7 @@ class GroqProvider:
         }
         if force_json:
             payload["response_format"] = {"type": "json_object"}
-        headers = {"Authorization": f"Bearer {config.GROQ_API_KEY}"}
+        headers = {"Authorization": f"Bearer {self.api_key}"}
         out = _http_post_json(url, payload, headers, timeout=180)
         return out["choices"][0]["message"]["content"].strip()
 
@@ -211,8 +213,10 @@ class AnthropicProvider:
 
     name = "anthropic"
 
-    def __init__(self, model: str | None = None) -> None:
+    def __init__(self, model: str | None = None, api_key: str | None = None,
+                 extra: str | None = None) -> None:
         self.model = model or config.ANALYSIS_MODEL
+        self.api_key = api_key or config.ANTHROPIC_API_KEY
 
     def complete(self, prompt: str, max_tokens: int = 2000, force_json: bool = True) -> str:
         # Claude follows the "return only JSON" instruction in the prompt well,
@@ -223,7 +227,7 @@ class AnthropicProvider:
             raise RuntimeError(
                 "Пакет anthropic не установлен. Выполните: pip install anthropic"
             )
-        client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
+        client = anthropic.Anthropic(api_key=self.api_key)
         message = client.messages.create(
             model=self.model,
             max_tokens=max_tokens,
@@ -239,13 +243,15 @@ class GeminiProvider:
 
     name = "gemini"
 
-    def __init__(self, model: str | None = None) -> None:
+    def __init__(self, model: str | None = None, api_key: str | None = None,
+                 extra: str | None = None) -> None:
         self.model = model or config.GEMINI_MODEL
+        self.api_key = api_key or config.GEMINI_API_KEY
 
     def complete(self, prompt: str, max_tokens: int = 2000, force_json: bool = True) -> str:
         model = self.model
         url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
-               f"{model}:generateContent?key={config.GEMINI_API_KEY}")
+               f"{model}:generateContent?key={self.api_key}")
         gen = {"temperature": 0.1, "maxOutputTokens": max_tokens}
         if force_json:
             gen["responseMimeType"] = "application/json"
@@ -263,19 +269,22 @@ class YandexProvider:
 
     name = "yandex"
 
-    def __init__(self, model: str | None = None) -> None:
+    def __init__(self, model: str | None = None, api_key: str | None = None,
+                 extra: str | None = None) -> None:
         self.model = model or config.YANDEX_MODEL
+        self.api_key = api_key or config.YANDEX_API_KEY
+        self.folder = extra or config.YANDEX_FOLDER_ID
 
     def complete(self, prompt: str, max_tokens: int = 2000, force_json: bool = True) -> str:
         url = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
         payload = {
-            "modelUri": f"gpt://{config.YANDEX_FOLDER_ID}/{self.model}",
+            "modelUri": f"gpt://{self.folder}/{self.model}",
             "completionOptions": {"stream": False, "temperature": 0.1,
                                   "maxTokens": str(max_tokens)},
             "messages": [{"role": "user", "text": prompt}],
         }
-        headers = {"Authorization": f"Api-Key {config.YANDEX_API_KEY}",
-                   "x-folder-id": config.YANDEX_FOLDER_ID}
+        headers = {"Authorization": f"Api-Key {self.api_key}",
+                   "x-folder-id": self.folder}
         out = _http_post_json(url, payload, headers)
         try:
             return out["result"]["alternatives"][0]["message"]["text"].strip()
@@ -301,19 +310,22 @@ class GigaChatProvider:
     _ctx.check_hostname = False
     _ctx.verify_mode = ssl.CERT_NONE
 
-    def __init__(self, model: str | None = None) -> None:
+    def __init__(self, model: str | None = None, api_key: str | None = None,
+                 extra: str | None = None) -> None:
         self.model = model or config.GIGACHAT_MODEL
+        self.api_key = api_key or config.GIGACHAT_AUTH_KEY
+        self.scope = extra or config.GIGACHAT_SCOPE
 
     def _get_token(self) -> str:
         if self._token and time.time() < self._exp - 30:
             return self._token
         url = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
-        body = f"scope={config.GIGACHAT_SCOPE}".encode("utf-8")
+        body = f"scope={self.scope}".encode("utf-8")
         req = urllib.request.Request(url, data=body, method="POST")
         req.add_header("Content-Type", "application/x-www-form-urlencoded")
         req.add_header("Accept", "application/json")
         req.add_header("RqUID", str(uuid.uuid4()))
-        req.add_header("Authorization", f"Basic {config.GIGACHAT_AUTH_KEY}")
+        req.add_header("Authorization", f"Basic {self.api_key}")
         try:
             with urllib.request.urlopen(req, timeout=30, context=self._ctx) as resp:
                 d = json.loads(resp.read().decode("utf-8"))
@@ -358,7 +370,7 @@ _PROVIDERS = {
 }
 
 
-def get_provider(name: str | None) -> LLMProvider:
+def get_provider(name: str | None, keys: dict | None = None) -> LLMProvider:
     """Resolve 'auto'/None to a concrete configured provider and instantiate it.
 
     A specific model (tier) may be carried as "<provider>:<model>", e.g.
@@ -370,9 +382,9 @@ def get_provider(name: str | None) -> LLMProvider:
     base = name
     if name and ":" in name:
         base, model = name.split(":", 1)
-    resolved = config.resolve_provider(base)
+    resolved = config.resolve_provider(base, keys)
     cls = _PROVIDERS[resolved]
-    try:
-        return cls(model=model)          # providers that accept a model tier
-    except TypeError:
-        return cls()
+    if resolved == "ollama":
+        return cls(model=model)
+    key, extra = config.provider_creds(resolved, keys)
+    return cls(model=model, api_key=key, extra=extra)

@@ -309,6 +309,12 @@
       <input id="weeek_video_field" type="text" placeholder="Видео встречи" style="max-width:280px">
       <span class="note" style="align-self:center">имя link-поля в Weeek (регистр не важен)</span>
     </div>
+    <div class="chk"><input id="upload_protocol" type="checkbox"> Выгружать готовый протокол (.docx) в облако</div>
+    <div class="chk"><input id="weeek_set_protocol_field" type="checkbox"> и вписывать ссылку на протокол в кастом-поле:</div>
+    <div class="row" style="margin:-6px 0 4px 26px">
+      <input id="weeek_protocol_field" type="text" placeholder="Протокол встречи" style="max-width:280px">
+      <span class="note" style="align-self:center">протокол также остаётся скачиваемым в интерфейсе</span>
+    </div>
     <div class="row">
       <button class="go" onclick="saveScheduler()">Сохранить</button>
       <button class="ghost" onclick="refreshStatus()">Обновить статус</button>
@@ -374,6 +380,7 @@ async function loadAll(){
   setVal("lookahead_min", s.lookahead_min); setVal("analyze_provider", s.analyze_provider||"auto");
   setChk("post_back_to_weeek", s.post_back_to_weeek);
   setChk("weeek_set_video_field", s.weeek_set_video_field); setVal("weeek_video_field", s.weeek_video_field);
+  setChk("upload_protocol", s.upload_protocol); setChk("weeek_set_protocol_field", s.weeek_set_protocol_field); setVal("weeek_protocol_field", s.weeek_protocol_field);
   setChk("do_transcribe", s.do_transcribe); setChk("do_protocol", s.do_protocol);
   setChk("ocr_screen", s.ocr_screen); stageDeps();
   // record filter
@@ -590,6 +597,7 @@ async function saveScheduler(){
   const b={poll_interval_sec:+$("poll_interval_sec").value, lookahead_min:+$("lookahead_min").value,
     analyze_provider:$("analyze_provider").value, post_back_to_weeek:$("post_back_to_weeek").checked,
     weeek_set_video_field:$("weeek_set_video_field").checked, weeek_video_field:$("weeek_video_field").value||"Видео встречи",
+    upload_protocol:$("upload_protocol").checked, weeek_set_protocol_field:$("weeek_set_protocol_field").checked, weeek_protocol_field:$("weeek_protocol_field").value||"Протокол встречи",
     do_transcribe:$("do_transcribe").checked, do_protocol:$("do_protocol").checked,
     ocr_screen:$("ocr_screen").checked,
     rec_time_from:$("rec_time_from").value||"", rec_time_to:$("rec_time_to").value||"",

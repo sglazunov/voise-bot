@@ -12,15 +12,15 @@ from fastapi.responses import (HTMLResponse, PlainTextResponse, FileResponse,
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
-from . import config, llm, analyze, security
+from . import config, llm, analyze, security, user_creds
 from .jobs import store, STATUS_DONE, STATUS_ANALYZING, STATUS_CANCELLED
 
 
-def _provider_list() -> list[dict]:
+def _provider_list(user_keys: dict | None = None) -> list[dict]:
     """Currently configured/available providers with display labels."""
     return [
         {"id": p, "label": config.PROVIDER_LABELS.get(p, p)}
-        for p in config.available_providers()
+        for p in config.available_providers(user_keys)
     ]
 
 
@@ -39,13 +39,13 @@ def _ollama_label(name: str) -> str:
     return f"Локально · {disp} ({', '.join(tags)})"
 
 
-def _engine_list() -> list[dict]:
+def _engine_list(user_keys: dict | None = None) -> list[dict]:
     """Engines for the UI picker: each installed Ollama model + cloud providers.
 
     Ollama models are returned as value "ollama:<model>"; cloud providers as
     their plain id. The tuned/default model is sorted first.
     """
-    avail = config.available_providers()
+    avail = config.available_providers(user_keys)
     engines: list[dict] = []
     if "ollama" in avail:
         models = llm.list_ollama_models()
@@ -201,6 +201,7 @@ def automation_page(request: Request):
 
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request, user: str = Depends(current_user)):
+    uk = user_creds.load(user)
     return templates.TemplateResponse(
         "index.html",
         {
@@ -208,8 +209,8 @@ def index(request: Request, user: str = Depends(current_user)):
             "username": user,
             "jobs": [j.to_public() for j in store.list(owner=user)],
             "diarization_enabled": config.DIARIZATION_ENABLED,
-            "analysis_enabled": bool(config.available_providers()),
-            "providers": _provider_list(),
+            "analysis_enabled": bool(config.available_providers(uk)),
+            "providers": _provider_list(uk),
             "model": config.MODEL,
             "models": ALLOWED_MODELS,
             "max_upload_mb": config.MAX_UPLOAD_MB,
@@ -250,7 +251,7 @@ async def create_job(
             out.write(chunk)
 
     want_diar = diarize  # honour the UI toggle; readiness is reported separately
-    want_analyze = analyze and bool(config.available_providers())
+    want_analyze = analyze and bool(config.available_providers(user_creds.load(user)))
     model_sel = model.strip() if model.strip() in ALLOWED_MODELS else ""
     job = store.create(file.filename, str(dest), language, want_diar,
                        initial_prompt=hint.strip(), glossary=glossary.strip(),
@@ -275,12 +276,14 @@ class ProviderKey(BaseModel):
 
 
 @app.get("/api/providers")
-def list_providers():
-    """All known providers + which are currently usable (for the UI picker)."""
-    avail = set(config.available_providers())
+def list_providers(user: str = Depends(current_user)):
+    """All known providers + which are usable for THIS user (their own keys)."""
+    uk = user_creds.load(user)
+    avail = set(config.available_providers(uk))
+    present = user_creds.present(user)  # which the user has a personal key for
     return {
-        "available": config.available_providers(),
-        "engines": _engine_list(),
+        "available": config.available_providers(uk),
+        "engines": _engine_list(uk),
         "ollama_status": llm.ollama_status(),
         "ollama_install_url": "https://ollama.com/download",
         "providers": [
@@ -289,6 +292,7 @@ def list_providers():
                 "label": config.PROVIDER_LABELS.get(p, p),
                 "available": p in avail,
                 "needs_key": p in config.KEY_PROVIDERS,
+                "has_key": present.get(p, False),
             }
             for p in config.PROVIDER_ORDER
         ],
@@ -296,11 +300,11 @@ def list_providers():
 
 
 @app.post("/api/providers/connect")
-def connect_provider(body: ProviderKey):
-    """Set an API key at runtime and verify it with a tiny live call.
+def connect_provider(body: ProviderKey, user: str = Depends(current_user)):
+    """Save an LLM API key IN THIS USER'S ACCOUNT (encrypted) and verify it.
 
-    The key is held in memory only (not persisted to disk). On success the
-    provider becomes selectable in the engine picker immediately.
+    The key is stored per-user: entered once, isolated from other users, and it
+    survives restarts. On success the provider becomes selectable for this user.
     """
     provider = body.provider.strip().lower()
     key = body.api_key.strip()
@@ -312,17 +316,23 @@ def connect_provider(body: ProviderKey):
     if provider == "yandex" and not extra:
         raise HTTPException(400, "Для YandexGPT укажите folder id (идентификатор каталога)")
 
-    # Tentatively set the credentials, then validate with a cheap non-JSON ping
-    # so bad credentials fail fast and are rolled back.
-    config.set_provider_key(provider, key, extra)
+    # Verify the key with a cheap non-JSON ping BEFORE saving, so a bad key
+    # fails fast and nothing is persisted.
+    trial = {provider: {"key": key, "extra": extra}}
     try:
-        llm.get_provider(provider).complete("Ответь одним словом: ok",
-                                            max_tokens=5, force_json=False)
+        llm.get_provider(provider, trial).complete("Ответь одним словом: ok",
+                                                   max_tokens=5, force_json=False)
     except Exception as e:
-        config.set_provider_key(provider, "", "")  # roll back the bad key
         raise HTTPException(400, f"Не удалось подключиться: {e}")
+    user_creds.save(user, provider, key, extra)
+    return {"ok": True, "connected": provider, "providers": _provider_list(user_creds.load(user))}
 
-    return {"ok": True, "connected": provider, "providers": _provider_list()}
+
+@app.post("/api/providers/disconnect")
+def disconnect_provider(body: ProviderKey, user: str = Depends(current_user)):
+    """Remove this user's saved key for a provider."""
+    user_creds.clear(user, body.provider.strip().lower())
+    return {"ok": True, "providers": _provider_list(user_creds.load(user))}
 
 
 def _require_owned(job_id: str, user: str):
@@ -557,6 +567,9 @@ class AutomationSettings(BaseModel):
     post_back_to_weeek: bool | None = None
     weeek_set_video_field: bool | None = None
     weeek_video_field: str | None = None
+    upload_protocol: bool | None = None
+    weeek_set_protocol_field: bool | None = None
+    weeek_protocol_field: str | None = None
     # recorder
     record_mode: str | None = None
     auth_mode: str | None = None

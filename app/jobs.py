@@ -31,6 +31,18 @@ STATUS_ERROR = "error"
 STATUS_CANCELLED = "cancelled"
 
 
+def _owner_keys(owner: str | None):
+    """The owner's per-user LLM API keys, so the protocol is built with THEIR
+    keys (not another user's). None → fall back to server env keys."""
+    if not owner:
+        return None
+    try:
+        from . import user_creds
+        return user_creds.load(owner)
+    except Exception:
+        return None
+
+
 class JobCancelled(Exception):
     """Raised from the segment callback to abort a running transcription."""
 
@@ -269,7 +281,8 @@ class JobStore:
                 extra_instructions=job.analysis_instructions,
                 custom_prompt=job.analysis_prompt,
                 on_progress=self._on_analysis(job.id),
-                cancel_check=lambda: self._control.get(job.id, {}).get("cancel"))
+                cancel_check=lambda: self._control.get(job.id, {}).get("cancel"),
+                keys=_owner_keys(job.owner))
             prov = result.get("_provider") or job.provider
             segs = []
             jp = self.result_path(job.id, "json")
@@ -452,7 +465,8 @@ class JobStore:
                         extra_instructions=job.analysis_instructions,
                         custom_prompt=job.analysis_prompt,
                         on_progress=self._on_analysis(job.id),
-                        cancel_check=lambda: self._control.get(job.id, {}).get("cancel"))
+                        cancel_check=lambda: self._control.get(job.id, {}).get("cancel"),
+                        keys=_owner_keys(job.owner))
                     prov = analysis_result.get("_provider") or job.provider
                     segs_dicts = [
                         {"start": s.start, "end": s.end,

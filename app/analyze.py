@@ -223,7 +223,7 @@ def _stream_complete(backend, prompt, max_tokens, on_progress, stage, force_json
 
 def analyze_transcript(transcript_text: str, provider: str | None = None,
                        extra_instructions: str = "", custom_prompt: str = "",
-                       on_progress=None, cancel_check=None) -> dict:
+                       on_progress=None, cancel_check=None, keys: dict | None = None) -> dict:
     """Send the transcript to the chosen LLM provider and return structured analysis.
 
     `provider` is one of "ollama" | "groq" | "gemini" | "yandex" | "gigachat" |
@@ -237,7 +237,7 @@ def analyze_transcript(transcript_text: str, provider: str | None = None,
     Returns a dict with keys: summary, detailed, key_thoughts, conclusions,
     decisions, done_tasks, tasks, minor_tasks, _provider.
     """
-    backend = llm.get_provider(provider)
+    backend = llm.get_provider(provider, keys)
     text = (transcript_text or "").strip()
     custom = (custom_prompt or "").strip()
 

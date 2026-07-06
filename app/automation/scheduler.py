@@ -315,6 +315,14 @@ class Scheduler:
                     delete_audio_when_done=delivered_elsewhere,
                     owner=user)
                 st.job_id = job.id
+                # Once the protocol (.docx) is built, upload it to the same cloud
+                # and link it in Weeek — in a background waiter so the recording
+                # lock isn't held during transcription.
+                if do_protocol and cfg.get("upload_protocol", True):
+                    threading.Thread(
+                        target=self._await_and_upload_protocol,
+                        args=(user, st.task_id, job.id, cfg, Path(out).stem),
+                        daemon=True).start()
             elif delivered_elsewhere:
                 # No transcription — nothing else needs the file; drop it now.
                 for p in (out, out + ".ffmpeg.log"):
@@ -344,6 +352,33 @@ class Scheduler:
             self._set(st, "error", f"Сбой: {e}")
         finally:
             self._recording.release()
+
+    def _await_and_upload_protocol(self, user: str, task_id, job_id: str,
+                                   cfg: dict, base_name: str) -> None:
+        """Wait for the job's protocol (.docx) to be generated, then upload it to
+        the same cloud as the recording and write its link into the Weeek field.
+        The .docx stays downloadable in the UI."""
+        deadline = time.time() + 2 * 3600
+        while time.time() < deadline:
+            job = store.get(job_id)
+            if job is None:
+                return
+            if job.status in ("done", "error", "cancelled"):
+                break
+            time.sleep(5)
+        job = store.get(job_id)
+        provs = getattr(job, "docx_providers", None) if job else None
+        if not job or job.status != "done" or not provs:
+            return
+        docx = store.docx_path(job_id, provs[-1])
+        if not docx.exists():
+            return
+        up = clouds.upload(str(docx), f"{base_name} - протокол.docx", cfg)
+        if not (up.get("ok") and up.get("url")):
+            return
+        field = (cfg.get("weeek_protocol_field") or "").strip()
+        if cfg.get("weeek_set_protocol_field", True) and field:
+            weeek.set_custom_field(cfg.get("weeek_token"), task_id, field, up["url"])
 
     def _set(self, st: MeetingState, state: str, detail: str) -> None:
         with self._lock:
