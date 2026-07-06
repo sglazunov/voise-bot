@@ -617,17 +617,22 @@ async function refreshStatus(){
     const last=s.last_poll?fmt(new Date(s.last_poll*1000).toISOString()):"—";
     $("sched_status").innerHTML=`Поток: ${s.running?"<span class='ok'>работает</span>":"<span class='bad'>стоит</span>"} · `+
       `автоматика: ${s.enabled?"<span class='ok'>вкл</span>":"выкл"} · `+
-      `запись: ${s.recording?"<span class='warn'>идёт</span>":"нет"} · опрос: ${last}`;
+      `запись: ${s.active?`<span class='warn'>${s.active}/${s.max_parallel}</span>`:"нет"} · опрос: ${last}`;
     $("stopBtn").disabled=!s.recording;
     $("sched_meetings").innerHTML=(s.meetings||[]).map(m=>`
       <div class="mrow"><div><div class="t">${esc(m.title)} <span class="badge b-${m.state}">${m.state}</span></div>
         <div class="s">${m.start?fmt(m.start):"без времени"}${m.detail?" · "+esc(m.detail):""}${m.cloud_url?` · <a href="${m.cloud_url}" target="_blank">запись</a>`:""}</div></div>
-        ${m.state==="scheduled"?`<button class="ghost" onclick="runNow('${m.task_id}')">Сейчас</button>`:""}</div>`).join("");
+        ${m.state==="scheduled"?`<button class="ghost" onclick="runNow('${m.task_id}')">Сейчас</button>`:
+          m.state==="recording"?`<button class="ghost danger" onclick="stopOne('${m.task_id}')">■ Стоп</button>`:""}</div>`).join("");
   }catch(e){ $("sched_status").textContent=e.message; }
 }
 async function runNow(taskId){
   try{ await api("POST","/api/automation/scheduler/run-now?task_id="+encodeURIComponent(taskId));
     toast("Запись запущена"); refreshStatus(); }catch(e){ toast(e.message,true); }
+}
+async function stopOne(taskId){
+  try{ const r=await api("POST","/api/automation/scheduler/stop-recording?task_id="+encodeURIComponent(taskId));
+    toast(r.detail||"Останавливаю…"); refreshStatus(); }catch(e){ toast(e.message,true); }
 }
 async function stopRecording(){
   try{ const r=await api("POST","/api/automation/scheduler/stop-recording"); toast(r.detail||"Останавливаю…"); refreshStatus(); }

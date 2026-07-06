@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import config, security
-from . import clouds, settings as auto_settings, weeek
+from . import clouds, recorder, settings as auto_settings, weeek
 
 # How late after start we'll still auto-join (avoids joining long-finished
 # meetings on the first poll after startup).
@@ -40,6 +40,7 @@ class MeetingState:
     detail: str = ""
     job_id: str | None = None
     cloud_url: str | None = None
+    stop_flag: bool = False           # manual "stop this recording"
     logs: list = field(default_factory=list)
 
     def public(self) -> dict:
@@ -53,10 +54,8 @@ class Scheduler:
     def __init__(self) -> None:
         self._states: dict[str, MeetingState] = {}
         self._lock = threading.Lock()
-        self._recording = threading.Lock()
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
-        self._stop_recording = threading.Event()  # manual "stop current recording"
         self._last_poll: dict[str, float] = {}  # per-user last Weeek poll
         self._boot_time = 0.0  # session start; meetings older than this are missed
 
@@ -84,9 +83,11 @@ class Scheduler:
             latest = max(missed, key=lambda m: m.get("start") or "")
             meetings = [m for m in meetings
                         if m.get("state") != "missed" or m is latest]
+        active = recorder.active_recordings()
         return {"running": bool(self._thread and self._thread.is_alive()),
                 "enabled": bool(cfg.get("enabled")),
-                "recording": self._recording.locked(),
+                "recording": active > 0,
+                "active": active, "max_parallel": recorder.MAX_SLOTS,
                 "last_poll": self._last_poll.get(user, 0.0), "meetings": meetings}
 
     # -- main loop ----------------------------------------------------------
@@ -177,8 +178,6 @@ class Scheduler:
         # Auto-record only when the bot is enabled in this build.
         if os.getenv("VTX_RECORDER_ENABLED", "0") != "1":
             return
-        if self._recording.locked():
-            return
         now = datetime.now(timezone.utc).timestamp()
         lookahead = int(cfg.get("lookahead_min", 2)) * 60
         candidates = []
@@ -205,30 +204,31 @@ class Scheduler:
                     st.state, st.detail = "skipped", f"Не записываем: {why}."
                     continue
                 candidates.append((start, st))
-        if candidates:
-            candidates.sort(key=lambda x: x[0])  # earliest-starting first
-            chosen = candidates[0][1]
-            # Claim it atomically: flip "scheduled" -> "recording" under the lock
-            # BEFORE spawning the worker, so the next tick (and the poller) see it
-            # is taken and never start a second browser for the same meeting.
+        # Launch as many due meetings as there are FREE recording slots — up to
+        # MAX_SLOTS run in parallel, each isolated on its own display + sink.
+        candidates.sort(key=lambda x: x[0])  # earliest-starting first
+        for _, chosen in candidates:
+            slot = recorder.acquire_slot()
+            if slot is None:
+                break  # all slots busy — the rest wait for the next tick
+            # Claim atomically BEFORE spawning, so the next tick/poller sees it's
+            # taken and never starts a second browser for the same meeting.
+            claimed = False
             with self._lock:
-                if chosen.state != "scheduled":
-                    return
-                chosen.state, chosen.detail = "recording", "Бот заходит на встречу…"
-            threading.Thread(target=self._run, args=(chosen,), daemon=True).start()
+                if chosen.state == "scheduled":
+                    chosen.state, chosen.detail = "recording", "Бот заходит на встречу…"
+                    chosen.stop_flag = False
+                    claimed = True
+            if not claimed:
+                recorder.release_slot(slot)
+                continue
+            threading.Thread(target=self._run, args=(chosen, slot), daemon=True).start()
 
     # -- per-meeting pipeline ----------------------------------------------
-    def _run(self, st: MeetingState) -> None:
-        if not self._recording.acquire(blocking=False):
-            # Another recording is in progress; release our claim so this meeting
-            # can be retried on a later tick instead of getting stuck "recording".
-            self._set(st, "scheduled", "")
-            return
+    def _run(self, st: MeetingState, slot) -> None:
         try:
-            from . import recorder
             user = st.owner
             cfg = auto_settings.load(user)
-            self._stop_recording.clear()  # fresh manual-stop flag per recording
 
             def log(msg: str) -> None:
                 msg = str(msg)
@@ -253,9 +253,9 @@ class Scheduler:
             out = str(rec_dir / fname)
 
             res = recorder.record_meeting(
-                st.url, out, cfg, on_log=log,
+                st.url, out, cfg, on_log=log, slot=slot,
                 should_stop=lambda: (self._stop.is_set()
-                                     or self._stop_recording.is_set()
+                                     or st.stop_flag
                                      or not auto_settings.get(user, "enabled")))
             if not res.get("ok"):
                 self._set(st, "error", res.get("error") or "Запись не удалась.")
@@ -351,7 +351,7 @@ class Scheduler:
         except Exception as e:  # noqa: BLE001
             self._set(st, "error", f"Сбой: {e}")
         finally:
-            self._recording.release()
+            recorder.release_slot(slot)
 
     def _await_and_upload_protocol(self, user: str, task_id, job_id: str,
                                    cfg: dict, base_name: str) -> None:
@@ -384,12 +384,23 @@ class Scheduler:
         with self._lock:
             st.state, st.detail = state, detail
 
-    def stop_recording(self) -> dict:
-        """Manually stop the recording in progress (the main meeting is over)."""
-        if not self._recording.locked():
+    def stop_recording(self, user: str | None = None, task_id=None) -> dict:
+        """Stop recording(s) in progress. With `task_id` — just that meeting;
+        otherwise all of `user`'s active recordings."""
+        n = 0
+        with self._lock:
+            for st in self._states.values():
+                if st.state != "recording":
+                    continue
+                if user is not None and st.owner != user:
+                    continue
+                if task_id is not None and str(st.task_id) != str(task_id):
+                    continue
+                st.stop_flag = True
+                n += 1
+        if not n:
             return {"ok": False, "error": "Сейчас запись не идёт."}
-        self._stop_recording.set()
-        return {"ok": True, "detail": "Останавливаю запись…"}
+        return {"ok": True, "detail": f"Останавливаю запись ({n})…"}
 
     def set_decision(self, user: str, task_id: str, record) -> dict:
         """Record/skip a specific meeting for `user` (override the filters)."""
@@ -416,12 +427,16 @@ class Scheduler:
                        if s.owner == user and str(s.task_id) == str(task_id)), None)
         if not st:
             return {"ok": False, "error": "Встреча не найдена (сначала опрос Weeek)."}
-        if self._recording.locked():
-            return {"ok": False, "error": "Уже идёт запись другой встречи."}
+        if st.state == "recording":
+            return {"ok": False, "error": "Эта встреча уже записывается."}
+        slot = recorder.acquire_slot()
+        if slot is None:
+            return {"ok": False, "error": f"Все слоты записи заняты "
+                    f"(до {recorder.MAX_SLOTS} одновременно). Попробуйте позже."}
         # Claim before spawning so a concurrent tick can't double-launch.
         with self._lock:
-            st.state, st.detail = "recording", "Бот заходит на встречу…"
-        threading.Thread(target=self._run, args=(st,), daemon=True).start()
+            st.state, st.detail, st.stop_flag = "recording", "Бот заходит на встречу…", False
+        threading.Thread(target=self._run, args=(st, slot), daemon=True).start()
         return {"ok": True, "detail": "Запись запущена."}
 
 

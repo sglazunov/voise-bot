@@ -701,10 +701,11 @@ def automation_scheduler_run_now(task_id: str, user: str = Depends(current_user)
 
 
 @app.post("/api/automation/scheduler/stop-recording")
-def automation_scheduler_stop_recording():
-    """Stop the recording in progress (e.g. the main meeting is over)."""
+def automation_scheduler_stop_recording(task_id: str | None = None,
+                                        user: str = Depends(current_user)):
+    """Stop recording(s): a specific meeting (task_id) or all of the user's."""
     from .automation.scheduler import scheduler
-    res = scheduler.stop_recording()
+    res = scheduler.stop_recording(user, task_id)
     if not res.get("ok"):
         raise HTTPException(400, res.get("error"))
     return res
@@ -777,10 +778,16 @@ def automation_recorder_test(body: RecorderTest, user: str = Depends(current_use
     Path(out).parent.mkdir(parents=True, exist_ok=True)
     deadline = time.time() + max(5, min(int(body.seconds), 300))
     logs: list[str] = []
-    res = recorder.record_meeting(
-        body.url, out, cfg,
-        on_log=lambda m: logs.append(str(m)),
-        should_stop=lambda: time.time() > deadline)
+    slot = recorder.acquire_slot()
+    if slot is None:
+        raise HTTPException(409, f"Все слоты записи заняты (до {recorder.MAX_SLOTS}).")
+    try:
+        res = recorder.record_meeting(
+            body.url, out, cfg, slot=slot,
+            on_log=lambda m: logs.append(str(m)),
+            should_stop=lambda: time.time() > deadline)
+    finally:
+        recorder.release_slot(slot)
     res["logs"] = logs
     return res
 

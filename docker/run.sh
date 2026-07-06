@@ -1,21 +1,16 @@
 #!/usr/bin/env bash
 # Runs as the unprivileged `app` user. When the recorder bot is enabled, brings
-# up a virtual display (Xvfb) and PulseAudio with a null-sink for meeting audio,
-# then starts the web app. With the bot disabled it just starts the app.
+# up ONE virtual display (Xvfb) + ONE PulseAudio null-sink PER PARALLEL SLOT, so
+# up to VTX_MAX_CONCURRENT_RECORDINGS meetings record in isolation at once.
 set -e
 
 export HOME=/home/app
-export DISPLAY="${DISPLAY:-:99}"
 SCREEN_RES="${VTX_SCREEN_RES:-1920x1080x24}"
+DISPLAY_BASE="${VTX_DISPLAY_BASE:-99}"
+SLOTS="${VTX_MAX_CONCURRENT_RECORDINGS:-4}"
+export DISPLAY=":${DISPLAY_BASE}"   # default for tools; each recording overrides it
 
 start_display_and_audio() {
-  echo "[run] starting Xvfb on $DISPLAY ($SCREEN_RES)…"
-  Xvfb "$DISPLAY" -screen 0 "$SCREEN_RES" -nolisten tcp -ac >/tmp/xvfb.log 2>&1 &
-  for _ in $(seq 1 40); do
-    xdpyinfo -display "$DISPLAY" >/dev/null 2>&1 && break
-    sleep 0.25
-  done
-
   echo "[run] starting PulseAudio…"
   export XDG_RUNTIME_DIR=/tmp/xdg
   export PULSE_RUNTIME_PATH=/tmp/pulse
@@ -23,11 +18,22 @@ start_display_and_audio() {
   pulseaudio -D --exit-idle-time=-1 --disable-shm=true >/tmp/pulse.log 2>&1 || true
   sleep 1
 
-  # Null-sink that the browser plays the call into; its monitor is what we record.
-  pactl load-module module-null-sink \
-        sink_name=meet sink_properties=device.description=meet >/dev/null 2>&1 || true
-  pactl set-default-sink meet >/dev/null 2>&1 || true
-  echo "[run] pulse sources:"; pactl list short sources 2>/dev/null || true
+  # One Xvfb display + one null-sink per slot (indices 0..SLOTS-1).
+  i=0
+  while [ "$i" -lt "$SLOTS" ]; do
+    disp=":$((DISPLAY_BASE + i))"
+    echo "[run] slot $i: Xvfb $disp + sink meet$i…"
+    Xvfb "$disp" -screen 0 "$SCREEN_RES" -nolisten tcp -ac >"/tmp/xvfb$i.log" 2>&1 &
+    for _ in $(seq 1 40); do
+      xdpyinfo -display "$disp" >/dev/null 2>&1 && break
+      sleep 0.2
+    done
+    pactl load-module module-null-sink \
+          "sink_name=meet$i" "sink_properties=device.description=meet$i" \
+          >/dev/null 2>&1 || true
+    i=$((i + 1))
+  done
+  echo "[run] pulse sinks:"; pactl list short sinks 2>/dev/null || true
 }
 
 if [ "${VTX_RECORDER_ENABLED:-0}" = "1" ]; then

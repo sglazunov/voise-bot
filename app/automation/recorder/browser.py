@@ -210,9 +210,11 @@ def _profile_dir(cfg: dict) -> Path:
 class TelemostBot:
     """Drive a Chromium instance into a Telemost call and back out."""
 
-    def __init__(self, cfg: dict, on_log=None):
+    def __init__(self, cfg: dict, on_log=None, display=None, sink=None):
         self.cfg = cfg
         self._on_log = on_log or (lambda *_: None)
+        self._display = display   # per-slot Xvfb display (e.g. ":99")
+        self._sink = sink         # per-slot PulseAudio sink (e.g. "meet0")
         self._pw = None
         self._ctx = None
         self._page = None
@@ -263,8 +265,19 @@ class TelemostBot:
                 args += [f"--window-size={w},{h}", "--start-fullscreen"]
             else:
                 args.append("--start-maximized")
+        # Pin the browser process to this slot's display + audio sink, so its
+        # window renders on the slot's Xvfb and its sound plays into the slot's
+        # PulseAudio sink (which ffmpeg records) — full isolation between parallel
+        # recordings. PULSE_SINK routes all of Chromium's playback to that sink.
+        launch_env = None
+        if self._display or self._sink:
+            launch_env = dict(os.environ)
+            if self._display:
+                launch_env["DISPLAY"] = self._display
+            if self._sink:
+                launch_env["PULSE_SINK"] = self._sink
         self._ctx = self._pw.chromium.launch_persistent_context(
-            user_dir, headless=headless, args=args,
+            user_dir, headless=headless, args=args, env=launch_env,
             permissions=["microphone", "camera"],
             accept_downloads=True,   # Telemost "Запись на компьютер" → a download
             no_viewport=not headless,  # use the actual window size when headed

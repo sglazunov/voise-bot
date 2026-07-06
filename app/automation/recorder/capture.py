@@ -37,7 +37,7 @@ def _screen_size() -> str:
 def _pulse_source(cfg: dict) -> str:
     """The PulseAudio source to record the meeting from (the null-sink monitor)."""
     return ((cfg.get("audio_device") or "").strip()
-            or os.environ.get("VTX_PULSE_MONITOR", "meet.monitor"))
+            or os.environ.get("VTX_PULSE_MONITOR", "meet0.monitor"))
 
 
 def ffmpeg_available(ffmpeg: str = "ffmpeg") -> bool:
@@ -128,25 +128,29 @@ def test_audio_level(ffmpeg: str, device: str, seconds: int = 3) -> dict:
     return {"ok": True, "has_sound": has_sound, "max_db": max_db, "mean_db": mean_db}
 
 
-def build_ffmpeg_cmd(out_path: str, cfg: dict, window_title: str | None = None) -> list[str]:
+def build_ffmpeg_cmd(out_path: str, cfg: dict, window_title: str | None = None,
+                     display: str | None = None, source: str | None = None) -> list[str]:
     """Build the ffmpeg capture command from settings.
 
-    Records video (just the browser window if `window_title` is given, else the
-    whole desktop) and the configured audio device into one mp4.
+    On Linux `display`/`source` pin capture to a specific Xvfb display and
+    PulseAudio monitor (the parallel-recording slot); they default to the
+    single-slot values. Records into one mp4.
     """
     ffmpeg = cfg.get("ffmpeg_path") or "ffmpeg"
     capture_video = bool(cfg.get("capture_video", True))
     cmd = [ffmpeg, "-y", "-hide_banner"]
 
     if _is_linux():
-        # Capture the whole Xvfb display + the PulseAudio monitor of the sink the
-        # browser plays into. window_title is irrelevant headless.
+        disp = display or _display()
+        src = source or _pulse_source(cfg)
+        # Capture this slot's Xvfb display + the monitor of the sink the browser
+        # plays into. window_title is irrelevant headless.
         if capture_video:
             # -draw_mouse 0 hides the mouse cursor (Xvfb draws a bare "X" without
             # a cursor theme) so it never appears in the recording.
             cmd += ["-f", "x11grab", "-draw_mouse", "0", "-framerate", "10",
-                    "-video_size", _screen_size(), "-i", _display()]
-        cmd += ["-f", "pulse", "-i", _pulse_source(cfg)]
+                    "-video_size", _screen_size(), "-i", disp]
+        cmd += ["-f", "pulse", "-i", src]
         if capture_video:
             cmd += ["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p"]
         cmd += ["-c:a", "aac", "-b:a", "128k", out_path]
@@ -174,14 +178,18 @@ def readiness(cfg: dict) -> dict:
         return {"ready": False,
                 "detail": "ffmpeg не найден. Установите ffmpeg и/или укажите путь."}
     if _is_linux():
-        src = _pulse_source(cfg)
         sources = list_audio_devices(ffmpeg)
-        if sources and src not in sources:
+        monitors = [s for s in sources if s.startswith("meet") and s.endswith(".monitor")]
+        if not monitors:
             return {"ready": False, "devices": sources,
-                    "detail": f"PulseAudio-источник «{src}» не найден. Доступны: {sources}. "
-                              "Проверьте, что null-sink 'meet' создан (entrypoint)."}
-        return {"ready": True, "devices": sources,
-                "detail": f"Linux: экран {_display()} ({_screen_size()}) + звук pulse «{src}»"}
+                    "detail": "Не найдено ни одного PulseAudio-монитора «meet*.monitor». "
+                              "Проверьте, что запущен с VTX_RECORDER_ENABLED=1 (null-sink'и "
+                              "создаются при старте)."}
+        import os as _os
+        slots = _os.getenv("VTX_MAX_CONCURRENT_RECORDINGS", "4")
+        return {"ready": True, "devices": monitors,
+                "detail": f"Linux: до {slots} параллельных записей "
+                          f"(экраны+звук {', '.join(monitors)})"}
     audio = (cfg.get("audio_device") or "").strip()
     if not audio:
         devices = list_audio_devices(ffmpeg)
@@ -204,17 +212,21 @@ def readiness(cfg: dict) -> dict:
 class FFmpegRecorder:
     """Start/stop an ffmpeg capture, finalising the file cleanly on stop."""
 
-    def __init__(self, out_path: str, cfg: dict, on_log=None, window_title=None):
+    def __init__(self, out_path: str, cfg: dict, on_log=None, window_title=None,
+                 display=None, source=None):
         self.out_path = out_path
         self.cfg = cfg
         self._on_log = on_log or (lambda *_: None)
         self._proc: subprocess.Popen | None = None
         self.window_title = window_title
+        self._display = display
+        self._source = source
         self._log_path = out_path + ".ffmpeg.log"
         self._log_file = None
 
     def start(self) -> None:
-        cmd = build_ffmpeg_cmd(self.out_path, self.cfg, self.window_title)
+        cmd = build_ffmpeg_cmd(self.out_path, self.cfg, self.window_title,
+                               display=self._display, source=self._source)
         self._on_log("ffmpeg: " + " ".join(cmd))
         # Keep ffmpeg's stderr in a log so an immediate failure (window not
         # found, bad audio device) is diagnosable instead of a silent empty file.
