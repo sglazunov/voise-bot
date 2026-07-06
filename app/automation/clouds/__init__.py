@@ -41,11 +41,22 @@ def readiness(settings: dict) -> dict:
 
 
 def upload(file_path: str, name: str, settings: dict,
-           backend: str | None = None) -> dict:
-    """Upload `file_path` as `name` to the chosen (or selected) cloud."""
+           backend: str | None = None, folder: str | None = None) -> dict:
+    """Upload `file_path` as `name` to the chosen (or selected) cloud.
+
+    `folder` overrides the destination folder for this one upload (e.g. put
+    protocols in a different folder than the recordings)."""
     key = backend or settings.get("cloud") or "local"
     entry = BACKENDS.get(key)
     if not entry:
         return {"ok": False, "backend": key, "error": f"Неизвестное облако: {key}"}
     mod = entry[0]
-    return mod.upload(file_path, name, _backend_cfg(settings, key))
+    bcfg = _backend_cfg(settings, key)
+    if folder:
+        if key == "local":
+            bcfg["local_dir"] = folder
+        elif key == "gdrive":
+            bcfg["folder_id"] = folder
+        else:  # yandex_disk
+            bcfg["folder"] = folder
+    return mod.upload(file_path, name, bcfg)

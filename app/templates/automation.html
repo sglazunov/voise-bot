@@ -42,6 +42,10 @@
     @media(max-width:640px){.grid2,.grid3{grid-template-columns:1fr}}
     .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:12px}
     .chk{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--txt);margin-top:9px}
+    .subfield{margin:5px 0 4px 26px;display:flex;flex-direction:column;gap:3px;max-width:360px}
+    .subfield input{max-width:360px}
+    .subfield .note{margin-top:0}
+    .subfield label{margin:0 0 1px}
     .filterbox{border:1px dashed var(--line);border-radius:12px;padding:8px 12px;background:rgba(15,24,48,.4)}
     .filterbox>summary{cursor:pointer;font-size:13px;color:var(--txt);user-select:none;font-weight:600}
     .daysrow{display:flex;gap:4px;flex-wrap:wrap}
@@ -304,16 +308,20 @@
       </div>
     </div>
     <div class="chk"><input id="post_back_to_weeek" type="checkbox"> Оставлять комментарий со ссылкой на запись в задаче Weeek</div>
-    <div class="chk"><input id="weeek_set_video_field" type="checkbox"> Вписывать ссылку на запись в кастом-поле задачи:</div>
-    <div class="row" style="margin:-6px 0 4px 26px">
-      <input id="weeek_video_field" type="text" placeholder="Видео встречи" style="max-width:280px">
-      <span class="note" style="align-self:center">имя link-поля в Weeek (регистр не важен)</span>
+    <div class="chk"><input id="weeek_set_video_field" type="checkbox"> Вписывать ссылку на запись в кастом-поле задачи</div>
+    <div class="subfield">
+      <input id="weeek_video_field" type="text" placeholder="Видео встречи">
+      <span class="note">имя link-поля в Weeek (регистр не важен)</span>
     </div>
     <div class="chk"><input id="upload_protocol" type="checkbox"> Выгружать готовый протокол (.docx) в облако</div>
-    <div class="chk"><input id="weeek_set_protocol_field" type="checkbox"> и вписывать ссылку на протокол в кастом-поле:</div>
-    <div class="row" style="margin:-6px 0 4px 26px">
-      <input id="weeek_protocol_field" type="text" placeholder="Протокол встречи" style="max-width:280px">
-      <span class="note" style="align-self:center">протокол также остаётся скачиваемым в интерфейсе</span>
+    <div class="subfield">
+      <label>Папка для протоколов (на Я.Диске — отдельно от видео)</label>
+      <input id="protocol_folder" type="text" placeholder="disk:/Телемост-протоколы">
+    </div>
+    <div class="chk"><input id="weeek_set_protocol_field" type="checkbox"> Вписывать ссылку на протокол в кастом-поле</div>
+    <div class="subfield">
+      <input id="weeek_protocol_field" type="text" placeholder="Протокол встречи">
+      <span class="note">протокол также остаётся скачиваемым в интерфейсе</span>
     </div>
     <div class="row">
       <button class="go" onclick="saveScheduler()">Сохранить</button>
@@ -381,6 +389,7 @@ async function loadAll(){
   setChk("post_back_to_weeek", s.post_back_to_weeek);
   setChk("weeek_set_video_field", s.weeek_set_video_field); setVal("weeek_video_field", s.weeek_video_field);
   setChk("upload_protocol", s.upload_protocol); setChk("weeek_set_protocol_field", s.weeek_set_protocol_field); setVal("weeek_protocol_field", s.weeek_protocol_field);
+  setVal("protocol_folder", s.protocol_folder);
   setChk("do_transcribe", s.do_transcribe); setChk("do_protocol", s.do_protocol);
   setChk("ocr_screen", s.ocr_screen); stageDeps();
   // record filter
@@ -598,6 +607,7 @@ async function saveScheduler(){
     analyze_provider:$("analyze_provider").value, post_back_to_weeek:$("post_back_to_weeek").checked,
     weeek_set_video_field:$("weeek_set_video_field").checked, weeek_video_field:$("weeek_video_field").value||"Видео встречи",
     upload_protocol:$("upload_protocol").checked, weeek_set_protocol_field:$("weeek_set_protocol_field").checked, weeek_protocol_field:$("weeek_protocol_field").value||"Протокол встречи",
+    protocol_folder:$("protocol_folder").value||"disk:/Телемост-протоколы",
     do_transcribe:$("do_transcribe").checked, do_protocol:$("do_protocol").checked,
     ocr_screen:$("ocr_screen").checked,
     rec_time_from:$("rec_time_from").value||"", rec_time_to:$("rec_time_to").value||"",

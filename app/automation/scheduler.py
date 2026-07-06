@@ -373,7 +373,9 @@ class Scheduler:
         docx = store.docx_path(job_id, provs[-1])
         if not docx.exists():
             return
-        up = clouds.upload(str(docx), f"{base_name} - протокол.docx", cfg)
+        # Protocols go into their OWN cloud folder (separate from the recordings).
+        up = clouds.upload(str(docx), f"{base_name} - протокол.docx", cfg,
+                           folder=(cfg.get("protocol_folder") or "").strip() or None)
         if not (up.get("ok") and up.get("url")):
             return
         field = (cfg.get("weeek_protocol_field") or "").strip()

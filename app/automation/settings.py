@@ -100,8 +100,9 @@ _DEFAULTS: dict[str, Any] = {
     # --- write the recording link into a Weeek custom field of the task ---
     "weeek_set_video_field": True,    # put the cloud link into a custom field
     "weeek_video_field": "Видео встречи",  # name of that link custom field
-    # --- after the protocol (.docx) is built: upload it to the same cloud ---
+    # --- after the protocol (.docx) is built: upload it to the cloud ---
     "upload_protocol": True,          # send the generated protocol to the cloud too
+    "protocol_folder": "disk:/Телемост-протоколы",  # SEPARATE folder for protocols
     "weeek_set_protocol_field": True,  # write its link into a Weeek custom field
     "weeek_protocol_field": "Протокол встречи",  # name of that link custom field
 }

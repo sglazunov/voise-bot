@@ -568,6 +568,7 @@ class AutomationSettings(BaseModel):
     weeek_set_video_field: bool | None = None
     weeek_video_field: str | None = None
     upload_protocol: bool | None = None
+    protocol_folder: str | None = None
     weeek_set_protocol_field: bool | None = None
     weeek_protocol_field: str | None = None
     # recorder
