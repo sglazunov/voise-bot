@@ -197,22 +197,34 @@ def _parse_dt(value: Any, local_tz: tzinfo = timezone.utc) -> datetime | None:
 
 
 def parse_start(task: dict, local_tz: tzinfo = timezone.utc) -> datetime | None:
-    """Best-effort meeting start time from a task, tz-aware in UTC.
+    """Meeting START time from a task, tz-aware in UTC.
 
-    `local_tz` is the workspace timezone used for naive Weeek values (e.g.
-    Europe/Moscow). Returns None when no usable date is present."""
-    for f in _DATETIME_FIELDS:
+    IMPORTANT: for meetings with a time range Weeek exposes both `startDateTime`
+    (the START, UTC) and `dueDateTime` (the END, UTC). We must take the START, so
+    the bot joins at the beginning — not `dueDateTime`, which would be the end.
+    Single-time meetings only carry `date` + `time`.
+
+    `local_tz` is the workspace timezone used for naive (no-offset) values.
+    """
+    # 1) Explicit START datetime (range meetings). NEVER dueDateTime here.
+    for f in ("startDateTime", "dateTime", "datetime"):
         dt = _parse_dt(task.get(f), local_tz)
         if dt:
             return dt.astimezone(timezone.utc)
-    # date + optional time split across two fields
-    date_val = next((task.get(f) for f in _DATE_FIELDS if task.get(f)), None)
-    if date_val:
-        time_val = next((task.get(f) for f in _TIME_FIELDS if task.get(f)), None)
-        combined = f"{date_val}T{time_val}" if time_val else str(date_val)
+    # 2) A day + a START time (local). Prefer start-time fields over generic ones.
+    day = next((task.get(f) for f in
+                ("dateStart", "date", "startDate", "dueDate", "day") if task.get(f)), None)
+    stime = next((task.get(f) for f in
+                  ("timeStart", "startTime", "time") if task.get(f)), None)
+    if day:
+        combined = f"{day}T{stime}" if stime else str(day)
         dt = _parse_dt(combined, local_tz)
         if dt:
             return dt.astimezone(timezone.utc)
+    # 3) Last resort: dueDateTime (the END for ranges, but == start for single times).
+    dt = _parse_dt(task.get("dueDateTime"), local_tz)
+    if dt:
+        return dt.astimezone(timezone.utc)
     return None
 
 
