@@ -11,8 +11,10 @@ task to see the raw JSON and pin field names if needed.
 """
 from __future__ import annotations
 
+import http.client
 import json
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -63,25 +65,44 @@ def _request(method: str, path: str, token: str,
         url += "?" + urllib.parse.urlencode(
             {k: v for k, v in params.items() if v is not None})
     data = json.dumps(body).encode("utf-8") if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method)
-    req.add_header("Authorization", f"Bearer {token}")
-    req.add_header("Accept", "application/json")
-    if data is not None:
-        req.add_header("Content-Type", "application/json")
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            payload = resp.read().decode("utf-8")
-    except urllib.error.HTTPError as e:
-        detail = e.read().decode("utf-8", "replace")[:300]
-        if e.code in (401, 403):
-            raise WeeekError(
-                f"Weeek отклонил токен ({e.code}). Проверьте токен в настройках "
-                f"воркспейса. {detail}") from e
-        raise WeeekError(f"Weeek API {e.code}: {detail}") from e
-    except urllib.error.URLError as e:
-        raise WeeekError(f"Не удалось подключиться к Weeek: {e.reason}") from e
-    except (TimeoutError, OSError) as e:
-        raise WeeekError(f"Таймаут/сетевая ошибка Weeek: {e}") from e
+
+    # Weeek sometimes truncates a big response mid-read (http.client.IncompleteRead
+    # on a chunked/keep-alive connection) — which silently broke the scheduler poll
+    # so the bot never joined. Force a non-keep-alive connection and retry the
+    # whole request a few times on transient network/read errors.
+    payload = None
+    last_err: Exception | None = None
+    for attempt in range(4):
+        req = urllib.request.Request(url, data=data, method=method)
+        req.add_header("Authorization", f"Bearer {token}")
+        req.add_header("Accept", "application/json")
+        req.add_header("Accept-Encoding", "identity")
+        req.add_header("Connection", "close")
+        if data is not None:
+            req.add_header("Content-Type", "application/json")
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                payload = resp.read().decode("utf-8")
+            break
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode("utf-8", "replace")[:300]
+            if e.code in (401, 403):
+                raise WeeekError(
+                    f"Weeek отклонил токен ({e.code}). Проверьте токен в настройках "
+                    f"воркспейса. {detail}") from e
+            if e.code in (429, 500, 502, 503, 504) and attempt < 3:
+                last_err = e
+                time.sleep(0.7 * (attempt + 1))
+                continue
+            raise WeeekError(f"Weeek API {e.code}: {detail}") from e
+        except (http.client.IncompleteRead, urllib.error.URLError,
+                TimeoutError, OSError) as e:
+            last_err = e
+            time.sleep(0.7 * (attempt + 1))
+            continue
+    if payload is None:
+        raise WeeekError(f"Weeek: сеть нестабильна, ответ не получен ({last_err}).")
+
     try:
         out = json.loads(payload)
     except ValueError as e:
