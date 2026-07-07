@@ -1,8 +1,13 @@
 """Per-user LLM provider API keys, encrypted at rest under each user's key.
 
 Every login keeps its own keys (Groq/Claude/Gemini/YandexGPT/GigaChat): one
-user's key is never visible or usable by another. Server env keys (if an admin
-set any) act as a shared fallback, but a user's own key always wins.
+user's key is never visible or usable by another. A provider may hold SEVERAL
+keys — the LLM layer rotates to the next one when the current key hits its rate
+limit, so long protocol generation isn't interrupted. Server env keys (if an
+admin set any) act as a shared fallback, but a user's own keys always win.
+
+On disk: {provider: [{"key": <enc>, "extra": <enc>}, ...]}  (list per provider).
+Old single-key format {provider: {"key","extra"}} is auto-migrated on read.
 """
 from __future__ import annotations
 
@@ -22,12 +27,20 @@ def _path(user: str) -> Path:
 
 def _read_raw(user: str) -> dict:
     p = _path(user)
-    if p.exists():
-        try:
-            return json.loads(p.read_text(encoding="utf-8")) or {}
-        except (ValueError, OSError):
-            return {}
-    return {}
+    if not p.exists():
+        return {}
+    try:
+        raw = json.loads(p.read_text(encoding="utf-8")) or {}
+    except (ValueError, OSError):
+        return {}
+    # Normalise every provider's value to a LIST of {key,extra} entries.
+    out = {}
+    for prov, val in raw.items():
+        if isinstance(val, list):
+            out[prov] = [e for e in val if isinstance(e, dict) and e.get("key")]
+        elif isinstance(val, dict) and val.get("key"):
+            out[prov] = [val]           # migrate old single-key format
+    return out
 
 
 def _write(user: str, raw: dict) -> None:
@@ -43,20 +56,43 @@ def _write(user: str, raw: dict) -> None:
 
 
 def load(user: str) -> dict:
-    """{provider: {'key':.., 'extra':..}} with values DECRYPTED (in memory only)."""
+    """{provider: [{'key':.., 'extra':..}, ...]} with values DECRYPTED."""
     out = {}
-    for prov, rec in _read_raw(user).items():
-        if isinstance(rec, dict):
-            out[prov] = {"key": security.decrypt_secret(user, rec.get("key", "")),
-                         "extra": security.decrypt_secret(user, rec.get("extra", ""))}
+    for prov, entries in _read_raw(user).items():
+        dec = []
+        for e in entries:
+            dec.append({"key": security.decrypt_secret(user, e.get("key", "")),
+                        "extra": security.decrypt_secret(user, e.get("extra", ""))})
+        if dec:
+            out[prov] = dec
     return out
 
 
-def save(user: str, provider: str, key: str, extra: str = "") -> None:
+def add(user: str, provider: str, key: str, extra: str = "") -> None:
+    """Append a key to `provider`'s pool (skips exact duplicates)."""
     raw = _read_raw(user)
-    raw[provider] = {"key": security.encrypt_secret(user, key or ""),
-                     "extra": security.encrypt_secret(user, extra or "")}
+    entries = raw.get(provider) or []
+    for e in entries:  # de-dupe by decrypted key
+        if security.decrypt_secret(user, e.get("key", "")) == key:
+            e["extra"] = security.encrypt_secret(user, extra or "")
+            _write(user, raw)
+            return
+    entries.append({"key": security.encrypt_secret(user, key or ""),
+                    "extra": security.encrypt_secret(user, extra or "")})
+    raw[provider] = entries
     _write(user, raw)
+
+
+def remove_at(user: str, provider: str, index: int) -> None:
+    raw = _read_raw(user)
+    entries = raw.get(provider) or []
+    if 0 <= index < len(entries):
+        entries.pop(index)
+        if entries:
+            raw[provider] = entries
+        else:
+            raw.pop(provider, None)
+        _write(user, raw)
 
 
 def clear(user: str, provider: str) -> None:
@@ -65,7 +101,7 @@ def clear(user: str, provider: str) -> None:
         _write(user, raw)
 
 
-def present(user: str) -> dict:
-    """{provider: bool} — which providers this user has a key for (for the UI)."""
+def counts(user: str) -> dict:
+    """{provider: how many keys the user has} — for the UI (no secrets)."""
     raw = _read_raw(user)
-    return {p: bool((raw.get(p) or {}).get("key")) for p in KEY_PROVIDERS}
+    return {p: len(raw.get(p) or []) for p in KEY_PROVIDERS}

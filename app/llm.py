@@ -386,5 +386,54 @@ def get_provider(name: str | None, keys: dict | None = None) -> LLMProvider:
     cls = _PROVIDERS[resolved]
     if resolved == "ollama":
         return cls(model=model)
-    key, extra = config.provider_creds(resolved, keys)
-    return cls(model=model, api_key=key, extra=extra)
+    creds = config.provider_creds(resolved, keys) or [("", "")]
+    if len(creds) == 1:
+        k, ex = creds[0]
+        return cls(model=model, api_key=k, extra=ex)
+    return _RotatingProvider(cls, model, creds)
+
+
+def _is_rate_limit(e: Exception) -> bool:
+    """Whether an error means the current API key hit its rate/quota limit."""
+    s = f"{type(e).__name__} {e}".lower()
+    return ("429" in s or "too many requests" in s or "rate limit" in s
+            or "rate_limit" in s or "ratelimit" in s or "quota" in s
+            or "resource_exhausted" in s or "insufficient_quota" in s)
+
+
+class _RotatingProvider:
+    """Wraps a provider with a POOL of API keys. On a rate-limit error it moves to
+    the next key and retries the same request — so long protocol generation isn't
+    interrupted when one key is exhausted. Fails only if ALL keys are limited."""
+
+    def __init__(self, cls, model, creds: list[tuple[str, str]]):
+        self._cls = cls
+        self._model = model
+        self._creds = creds
+        self.name = getattr(cls, "name", "llm")
+        self._i = 0                 # current key index (sticks to a working one)
+        self._instances: dict[int, object] = {}
+
+    def _inst(self, i: int):
+        if i not in self._instances:
+            k, ex = self._creds[i]
+            self._instances[i] = self._cls(model=self._model, api_key=k, extra=ex)
+        return self._instances[i]
+
+    def complete(self, prompt: str, max_tokens: int = 2000, force_json: bool = True) -> str:
+        n = len(self._creds)
+        limited = []
+        for attempt in range(n):
+            i = (self._i + attempt) % n
+            try:
+                out = self._inst(i).complete(prompt, max_tokens, force_json)
+                self._i = i           # keep using this key for the next chunk
+                return out
+            except Exception as e:    # noqa: BLE001
+                if _is_rate_limit(e) and n > 1:
+                    limited.append(i + 1)
+                    continue          # try the next key
+                raise
+        raise RuntimeError(
+            f"Все {n} API-ключа(ей) исчерпали лимит (ключи {limited}). "
+            "Добавьте ещё ключ или подождите сброса лимита.")

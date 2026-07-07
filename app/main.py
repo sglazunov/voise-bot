@@ -280,7 +280,7 @@ def list_providers(user: str = Depends(current_user)):
     """All known providers + which are usable for THIS user (their own keys)."""
     uk = user_creds.load(user)
     avail = set(config.available_providers(uk))
-    present = user_creds.present(user)  # which the user has a personal key for
+    counts = user_creds.counts(user)  # how many personal keys per provider
     return {
         "available": config.available_providers(uk),
         "engines": _engine_list(uk),
@@ -292,7 +292,7 @@ def list_providers(user: str = Depends(current_user)):
                 "label": config.PROVIDER_LABELS.get(p, p),
                 "available": p in avail,
                 "needs_key": p in config.KEY_PROVIDERS,
-                "has_key": present.get(p, False),
+                "keys": counts.get(p, 0),
             }
             for p in config.PROVIDER_ORDER
         ],
@@ -318,19 +318,22 @@ def connect_provider(body: ProviderKey, user: str = Depends(current_user)):
 
     # Verify the key with a cheap non-JSON ping BEFORE saving, so a bad key
     # fails fast and nothing is persisted.
-    trial = {provider: {"key": key, "extra": extra}}
+    trial = {provider: [{"key": key, "extra": extra}]}
     try:
         llm.get_provider(provider, trial).complete("Ответь одним словом: ok",
                                                    max_tokens=5, force_json=False)
     except Exception as e:
         raise HTTPException(400, f"Не удалось подключиться: {e}")
-    user_creds.save(user, provider, key, extra)
-    return {"ok": True, "connected": provider, "providers": _provider_list(user_creds.load(user))}
+    # Append to the provider's key POOL (several keys rotate on rate limits).
+    user_creds.add(user, provider, key, extra)
+    return {"ok": True, "connected": provider,
+            "keys": user_creds.counts(user).get(provider, 1),
+            "providers": _provider_list(user_creds.load(user))}
 
 
 @app.post("/api/providers/disconnect")
 def disconnect_provider(body: ProviderKey, user: str = Depends(current_user)):
-    """Remove this user's saved key for a provider."""
+    """Remove ALL of this user's saved keys for a provider."""
     user_creds.clear(user, body.provider.strip().lower())
     return {"ok": True, "providers": _provider_list(user_creds.load(user))}
 

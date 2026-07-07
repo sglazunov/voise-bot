@@ -127,10 +127,14 @@ PROVIDER_MODELS = {
 KEY_PROVIDERS = {"anthropic", "groq", "gemini", "yandex", "gigachat"}
 
 
-def provider_creds(provider: str, user_keys: dict | None = None) -> tuple[str, str]:
-    """(api_key, extra) for a provider: the user's own key first, then the server
-    env fallback. `user_keys` is {provider: {'key','extra'}} from user_creds."""
-    u = (user_keys or {}).get(provider) or {}
+def provider_creds(provider: str, user_keys: dict | None = None) -> list[tuple[str, str]]:
+    """List of (api_key, extra) for a provider — ALL the user's keys (for
+    rate-limit rotation), else the server env fallback. `user_keys` is
+    {provider: [{'key','extra'}, ...]} from user_creds.load()."""
+    entries = (user_keys or {}).get(provider) or []
+    creds = [(e.get("key", ""), e.get("extra", "")) for e in entries if e.get("key")]
+    if creds:
+        return creds
     env = {
         "anthropic": (ANTHROPIC_API_KEY, ""),
         "groq": (GROQ_API_KEY, ""),
@@ -138,14 +142,16 @@ def provider_creds(provider: str, user_keys: dict | None = None) -> tuple[str, s
         "yandex": (YANDEX_API_KEY, YANDEX_FOLDER_ID),
         "gigachat": (GIGACHAT_AUTH_KEY, GIGACHAT_SCOPE),
     }.get(provider, ("", ""))
-    return (u.get("key") or env[0], u.get("extra") or env[1])
+    return [env] if env[0] else []
 
 
 def _has_provider_key(p: str, user_keys: dict | None) -> bool:
-    key, extra = provider_creds(p, user_keys)
+    creds = provider_creds(p, user_keys)
+    if not creds:
+        return False
     if p == "yandex":
-        return bool(key and extra)
-    return bool(key)
+        return any(key and extra for key, extra in creds)
+    return True
 
 
 def available_providers(user_keys: dict | None = None) -> list[str]:

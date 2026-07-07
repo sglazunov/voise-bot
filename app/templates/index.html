@@ -321,17 +321,21 @@
                placeholder="folder id" style="width:100%;padding:10px;border-radius:10px;
                border:1px solid var(--line);background:#0b1220;color:var(--txt);margin-top:8px">
         <div class="row" style="margin-top:8px">
-          <button class="go" id="connectKey" type="button" onclick="connectKey()">Подключить</button>
+          <button class="go" id="connectKey" type="button" onclick="connectKey()">Добавить ключ</button>
+          <button class="ghost" id="clearKeys" type="button" onclick="clearKeys()">Очистить ключи провайдера</button>
           <span class="muted" id="connectMsg"></span>
         </div>
+        <div class="muted" id="keysInfo" style="margin-top:6px;font-size:12px"></div>
         <div class="muted" style="margin-top:8px;font-size:11px;line-height:1.5">
-          Ключ хранится только в памяти сервера и пропадёт после перезапуска.
+          Можно добавить <b>несколько ключей</b> одного провайдера — при исчерпании лимита
+          (429) генерация автоматически переключится на следующий ключ и не прервётся.
+          Ключи хранятся <b>в вашем аккаунте, зашифрованно</b> (переживают перезапуск), и
+          недоступны другим пользователям.
           Где взять: Groq — <code>console.groq.com</code>,
           Gemini — <code>aistudio.google.com/apikey</code>,
           YandexGPT — <code>console.cloud.yandex.ru</code> (нужен API-ключ + folder id),
           GigaChat — <code>developers.sber.ru/studio</code> (Authorization key),
           Claude — <code>console.anthropic.com</code>.
-          Для постоянной работы добавьте ключ в <b>run.bat</b>.
         </div>
       </details>
 
@@ -485,9 +489,25 @@ function prettyProvider(p){
   if(p.indexOf("ollama:")===0)return "Ollama · "+p.slice(7);
   return PROV_SHORT[p]||PROV_LABELS[p]||p;
 }
+let PROV_KEYS={};   // provider id -> how many API keys the user has
+function updateKeysInfo(){
+  const el=$('keysInfo'); if(!el) return;
+  const p=$('apiProvider')?$('apiProvider').value:null;
+  const n=p?(PROV_KEYS[p]||0):0;
+  el.textContent = n? `Ключей у «${p}»: ${n} — переключаются автоматически при лимите.`
+                    : (p? `У «${p}» пока нет ключей.` : "");
+}
+async function clearKeys(){
+  const p=$('apiProvider').value;
+  if(!confirm(`Удалить все API-ключи провайдера «${p}»?`)) return;
+  try{ await fetch("/api/providers/disconnect",{method:"POST",
+    headers:{"Content-Type":"application/json"},body:JSON.stringify({provider:p,api_key:"x"})});
+    await loadProviders(); $('connectMsg').textContent="Ключи удалены."; }catch(e){}
+}
 async function loadProviders(){
   let data;
   try{const r=await fetch("/api/providers");if(!r.ok)return;data=await r.json();}catch{return;}
+  PROV_KEYS={}; (data.providers||[]).forEach(p=>{PROV_KEYS[p.id]=p.keys||0;});
   // engines = each installed Ollama model (value "ollama:<model>") + cloud providers
   let engines=data.engines||[];
   // Defensive: an older server build has no `engines` field (e.g. when the
@@ -508,6 +528,7 @@ async function loadProviders(){
   if(prev&&engines.some(e=>e.value===prev))sel.value=prev;
   $('noEngine').classList.add('hidden');  // always ≥1 option (local-setup) + key panel below
   onEngineChange();
+  updateKeysInfo();
 }
 async function loadDefaultPrompt(){
   try{const d=await(await fetch("/api/prompt/default")).json();
@@ -735,6 +756,7 @@ function onApiProviderChange(){
   if(p==='yandex'){ex.classList.remove('hidden');ex.placeholder="folder id (идентификатор каталога)";}
   else if(p==='gigachat'){ex.classList.remove('hidden');ex.placeholder="scope (по умолчанию GIGACHAT_API_PERS)";}
   else{ex.classList.add('hidden');ex.value="";}
+  updateKeysInfo();
 }
 /* After a key is connected, resume an analysis that previously failed (e.g. on
    limits) on the newly available engine — no re-transcription. */
@@ -771,11 +793,13 @@ async function connectKey(){
       $('apiKey').value="";
       await loadProviders();
       $('provider').value=provider;          // auto-select the just-connected engine
+      const nkeys=d.keys||1;
+      const ktxt=nkeys>1?` (ключей: ${nkeys} — переключаются при лимите)`:"";
       // If an analysis failed (e.g. limits), resume it now on the new engine.
       const resumed=await resumeFailedAnalysis(provider);
       msg.innerHTML=resumed
-        ? '<span style="color:#22c55e">✓ Подключено — продолжаю анализ…</span>'
-        : '<span style="color:#22c55e">✓ Подключено</span>';
+        ? `<span style="color:#22c55e">✓ Ключ добавлен${ktxt} — продолжаю анализ…</span>`
+        : `<span style="color:#22c55e">✓ Ключ добавлен${ktxt}</span>`;
     }else{
       const detail=String(d.detail||"Ошибка");
       msg.innerHTML='<span style="color:#f87171">✗ '+esc(detail)+'</span>';
