@@ -36,10 +36,11 @@ class MeetingState:
     url: str
     start: datetime | None
     owner: str = ""                   # which login this meeting belongs to
-    state: str = "scheduled"          # scheduled|no_time|missed|recording|uploading|transcribing|done|error
+    state: str = "scheduled"          # scheduled|no_time|missed|recording|uploading|transcribing|analyzing|done|error
     detail: str = ""
     job_id: str | None = None
     cloud_url: str | None = None
+    do_protocol: bool = False         # whether this meeting also builds a protocol
     stop_flag: bool = False           # manual "stop this recording"
     logs: list = field(default_factory=list)
 
@@ -47,7 +48,8 @@ class MeetingState:
         return {"task_id": self.task_id, "title": self.title, "url": self.url,
                 "start": self.start.isoformat() if self.start else None,
                 "state": self.state, "detail": self.detail,
-                "job_id": self.job_id, "cloud_url": self.cloud_url}
+                "job_id": self.job_id, "cloud_url": self.cloud_url,
+                "do_protocol": self.do_protocol}
 
 
 class Scheduler:
@@ -83,6 +85,10 @@ class Scheduler:
             latest = max(missed, key=lambda m: m.get("start") or "")
             meetings = [m for m in meetings
                         if m.get("state") != "missed" or m is latest]
+        # Reflect the LIVE pipeline stage (recognition → protocol → done) from
+        # the job's own status, so the UI shows real progress after recording.
+        for m in meetings:
+            self._enrich_from_job(m)
         active = recorder.active_recordings()
         return {"running": bool(self._thread and self._thread.is_alive()),
                 "enabled": bool(cfg.get("enabled")),
@@ -345,12 +351,14 @@ class Scheduler:
 
             where = "в облаке" if st.cloud_url else "локально"
             if not do_transcribe:
-                detail = f"Готово. Запись {where} (распознавание отключено)."
-            elif not do_protocol:
-                detail = f"Готово. Запись {where}, распознавание — job {job.id} (без протокола)."
+                self._set(st, "done", f"Готово. Запись {where} (распознавание отключено).")
             else:
-                detail = f"Готово. Запись {where}, распознавание+протокол — job {job.id}."
-            self._set(st, "done", detail)
+                # Recording is finished; transcription + protocol run in the job
+                # worker. The live stage (video recognition → protocol) is shown
+                # in status() straight from the job's own state.
+                st.do_protocol = bool(do_protocol)
+                self._set(st, "transcribing",
+                          f"Запись {where}. Распознаю видео… — job {job.id}")
         except Exception as e:  # noqa: BLE001
             self._set(st, "error", f"Сбой: {e}")
         finally:
@@ -384,6 +392,38 @@ class Scheduler:
         field = (cfg.get("weeek_protocol_field") or "").strip()
         if cfg.get("weeek_set_protocol_field", True) and field:
             weeek.set_custom_field(cfg.get("weeek_token"), task_id, field, up["url"])
+
+    def _enrich_from_job(self, m: dict) -> None:
+        """Overlay the live transcription/protocol stage onto a meeting dict,
+        read from its job's own status (recognition → protocol → done)."""
+        jid = m.get("job_id")
+        if not jid:
+            return
+        job = store.get(jid)
+        if job is None:
+            return
+        where = "в облаке" if m.get("cloud_url") else "локально"
+        dp = m.get("do_protocol")
+        st = job.status
+        if st in ("queued", "running", "paused"):
+            pct = int((job.progress or 0) * 100)
+            tail = f" {pct}%" if pct else ""
+            m["state"] = "transcribing"
+            m["detail"] = f"Распознаю видео…{tail} — запись {where}, job {jid}"
+        elif st == "analyzing":
+            m["state"] = "analyzing"
+            m["detail"] = f"Генерирую протокол… — запись {where}, job {jid}"
+        elif st == "done":
+            m["state"] = "done"
+            m["detail"] = (f"Готово. Запись {where}, распознавание+протокол — job {jid}."
+                           if dp else
+                           f"Готово. Запись {where}, распознавание — job {jid} (без протокола).")
+        elif st == "error":
+            m["state"] = "error"
+            m["detail"] = f"Ошибка распознавания — job {jid}."
+        elif st == "cancelled":
+            m["state"] = "done"
+            m["detail"] = f"Распознавание отменено — запись {where}, job {jid}."
 
     def _set(self, st: MeetingState, state: str, detail: str) -> None:
         with self._lock:

@@ -69,7 +69,7 @@
              border-radius:6px;transition:width .3s}
     .badge{font-size:11px;padding:3px 9px;border-radius:999px;font-weight:600;background:#334155}
     .b-scheduled{background:#334155}.b-recording{background:#0369a1}.b-uploading{background:#7c3aed}
-    .b-transcribing{background:#6d28d9}.b-done{background:#15803d}.b-error{background:#7f1d1d}
+    .b-transcribing{background:#6d28d9}.b-analyzing{background:#0e7490}.b-done{background:#15803d}.b-error{background:#7f1d1d}
     .b-missed{background:#6b7280}.b-no_time{background:#a16207}
     .mlist{margin-top:12px}
     .mrow{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:10px 12px;
@@ -623,6 +623,9 @@ async function toggleEnabled(){
     toast($("enabled").checked?"Автоматика включена":"Автоматика выключена"); refreshStatus(); }
   catch(e){ toast(e.message,true); }
 }
+const MSTATE={scheduled:"запланирована",no_time:"без времени",missed:"пропущена",
+  recording:"идёт запись",uploading:"загрузка в облако",transcribing:"распознавание видео",
+  analyzing:"генерация протокола",done:"готово",error:"ошибка",cancelled:"отменено"};
 async function refreshStatus(){
   try{ const s=await api("GET","/api/automation/scheduler/status");
     const last=s.last_poll?fmt(new Date(s.last_poll*1000).toISOString()):"—";
@@ -631,7 +634,7 @@ async function refreshStatus(){
       `запись: ${s.active?`<span class='warn'>${s.active}/${s.max_parallel}</span>`:"нет"} · опрос: ${last}`;
     $("stopBtn").disabled=!s.recording;
     $("sched_meetings").innerHTML=(s.meetings||[]).map(m=>`
-      <div class="mrow"><div><div class="t">${esc(m.title)} <span class="badge b-${m.state}">${m.state}</span></div>
+      <div class="mrow"><div><div class="t">${esc(m.title)} <span class="badge b-${m.state}">${esc(MSTATE[m.state]||m.state)}</span></div>
         <div class="s">${m.start?fmt(m.start):"без времени"}${m.detail?" · "+esc(m.detail):""}${m.cloud_url?` · <a href="${m.cloud_url}" target="_blank">запись</a>`:""}</div></div>
         ${m.state==="scheduled"?`<button class="ghost" onclick="runNow('${m.task_id}')">Сейчас</button>`:
           m.state==="recording"?`<button class="ghost danger" onclick="stopOne('${m.task_id}')">■ Стоп</button>`:""}</div>`).join("");
