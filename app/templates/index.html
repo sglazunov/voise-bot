@@ -344,10 +344,12 @@
                border:1px solid var(--line);background:#0b1220;color:var(--txt);margin-top:8px">
         <div class="row" style="margin-top:8px">
           <button class="go" id="connectKey" type="button" onclick="connectKey()">Добавить ключ</button>
+          <button class="go" id="useProviderBtn" type="button" onclick="useProvider()">🔌 Подключить</button>
           <button class="ghost" id="clearKeys" type="button" onclick="clearKeys()">Очистить ключи провайдера</button>
           <span class="muted" id="connectMsg"></span>
         </div>
         <div class="muted" id="keysInfo" style="margin-top:6px;font-size:12px"></div>
+        <div id="keysList" style="margin-top:8px"></div>
         <div class="muted" style="margin-top:8px;font-size:11px;line-height:1.5">
           Можно добавить <b>несколько ключей</b> одного провайдера — при исчерпании лимита
           (429) генерация автоматически переключится на следующий ключ и не прервётся.
@@ -585,12 +587,52 @@ function updateKeysInfo(){
   el.textContent = n? `Ключей у «${p}»: ${n} — переключаются автоматически при лимите.`
                     : (p? `У «${p}» пока нет ключей.` : "");
 }
+// Выбрать в списке движков запись выбранного провайдера (значения там вида
+// "groq:<модель>", поэтому просто value=provider не сработает).
+function selectEngineForProvider(p){
+  const sel=$('provider'); if(!sel) return false;
+  const opt=[...sel.options].find(o=>o.value===p||o.value.indexOf(p+":")===0);
+  if(opt){ sel.value=opt.value; onEngineChange(); return true; }
+  return false;
+}
+// Кнопка «Подключить»: сделать выбранного провайдера активным движком протокола.
+function useProvider(){
+  const p=$('apiProvider').value, msg=$('connectMsg');
+  if(!(PROV_KEYS[p]>0)){ msg.innerHTML='<span style="color:#f87171">Сначала добавьте ключ этого провайдера.</span>'; return; }
+  if(selectEngineForProvider(p)) msg.innerHTML=`<span style="color:#22c55e">✓ Подключено: движок «${esc(PROV_SHORT[p]||p)}»</span>`;
+  else msg.innerHTML='<span style="color:#f87171">Движок недоступен — обновите страницу.</span>';
+}
+// Прокручиваемый список ключей провайдера с удалением по одному.
+async function renderKeysList(){
+  const box=$('keysList'); if(!box) return;
+  const p=$('apiProvider')?$('apiProvider').value:null;
+  if(!p){box.innerHTML="";return;}
+  let d; try{ d=await(await fetch("/api/providers/keys?provider="+encodeURIComponent(p))).json(); }
+  catch{ box.innerHTML=""; return; }
+  const keys=d.keys||[];
+  if(!keys.length){ box.innerHTML=`<div class="muted" style="font-size:12px">Нет добавленных ключей.</div>`; return; }
+  const rows=keys.map(k=>`
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;
+         padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:#0b1220;margin-bottom:6px">
+      <span style="font-family:monospace;font-size:12px">#${k.index+1} · ${esc(k.masked)}${k.extra?` · <span class="muted">${esc(k.extra)}</span>`:""}</span>
+      <button class="ghost" type="button" title="Удалить этот ключ"
+              onclick="removeKey(${k.index})" style="padding:2px 9px">✕</button>
+    </div>`).join("");
+  box.innerHTML=`<div style="max-height:150px;overflow:auto;padding-right:2px">${rows}</div>`;
+}
+async function removeKey(index){
+  const p=$('apiProvider').value;
+  if(!confirm(`Удалить ключ #${index+1} провайдера «${p}»?`)) return;
+  try{ await fetch("/api/providers/keys/remove",{method:"POST",
+    headers:{"Content-Type":"application/json"},body:JSON.stringify({provider:p,index})}); }catch{}
+  await loadProviders(); await renderKeysList(); updateKeysInfo();
+}
 async function clearKeys(){
   const p=$('apiProvider').value;
   if(!confirm(`Удалить все API-ключи провайдера «${p}»?`)) return;
   try{ await fetch("/api/providers/disconnect",{method:"POST",
     headers:{"Content-Type":"application/json"},body:JSON.stringify({provider:p,api_key:"x"})});
-    await loadProviders(); $('connectMsg').textContent="Ключи удалены."; }catch(e){}
+    await loadProviders(); await renderKeysList(); $('connectMsg').textContent="Ключи удалены."; }catch(e){}
 }
 async function loadProviders(){
   let data;
@@ -617,6 +659,7 @@ async function loadProviders(){
   $('noEngine').classList.add('hidden');  // always ≥1 option (local-setup) + key panel below
   onEngineChange();
   updateKeysInfo();
+  renderKeysList();
 }
 async function loadDefaultPrompt(){
   try{const d=await(await fetch("/api/prompt/default")).json();
@@ -869,6 +912,7 @@ function onApiProviderChange(){
   else if(p==='gigachat'){ex.classList.remove('hidden');ex.placeholder="scope (по умолчанию GIGACHAT_API_PERS)";}
   else{ex.classList.add('hidden');ex.value="";}
   updateKeysInfo();
+  renderKeysList();
 }
 /* After a key is connected, resume an analysis that previously failed (e.g. on
    limits) on the newly available engine — no re-transcription. */
@@ -904,7 +948,8 @@ async function connectKey(){
     if(r.ok){
       $('apiKey').value="";
       await loadProviders();
-      $('provider').value=provider;          // auto-select the just-connected engine
+      selectEngineForProvider(provider);     // auto-select the just-connected engine
+      await renderKeysList();
       const nkeys=d.keys||1;
       const ktxt=nkeys>1?` (ключей: ${nkeys} — переключаются при лимите)`:"";
       // If an analysis failed (e.g. limits), resume it now on the new engine.

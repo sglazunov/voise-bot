@@ -344,6 +344,35 @@ def disconnect_provider(body: ProviderKey, user: str = Depends(current_user)):
     return {"ok": True, "providers": _provider_list(user_creds.load(user))}
 
 
+@app.get("/api/providers/keys")
+def provider_keys(provider: str, user: str = Depends(current_user)):
+    """This user's saved keys for a provider, MASKED — to browse/remove them."""
+    prov = provider.strip().lower()
+    entries = user_creds.load(user).get(prov) or []
+
+    def mask(k: str) -> str:
+        k = k or ""
+        return "•" * len(k) if len(k) <= 8 else f"{k[:4]}…{k[-4:]}"
+
+    return {"provider": prov, "keys": [
+        {"index": i, "masked": mask(e.get("key", "")), "extra": (e.get("extra") or "")}
+        for i, e in enumerate(entries)]}
+
+
+class KeyRef(BaseModel):
+    provider: str
+    index: int
+
+
+@app.post("/api/providers/keys/remove")
+def provider_keys_remove(body: KeyRef, user: str = Depends(current_user)):
+    """Remove ONE saved key of a provider by its index."""
+    prov = body.provider.strip().lower()
+    user_creds.remove_at(user, prov, body.index)
+    return {"ok": True, "keys": user_creds.counts(user).get(prov, 0),
+            "providers": _provider_list(user_creds.load(user))}
+
+
 def _require_owned(job_id: str, user: str):
     job = store.get_owned(job_id, user)
     if not job:
