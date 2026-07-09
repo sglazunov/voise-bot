@@ -713,6 +713,16 @@ def automation_scheduler_run_now(task_id: str, user: str = Depends(current_user)
     return res
 
 
+@app.post("/api/automation/scheduler/poll-now")
+def automation_scheduler_poll_now(user: str = Depends(current_user)):
+    """Force an immediate Weeek re-poll (the manual «Обновить статус» button)."""
+    from .automation.scheduler import scheduler
+    res = scheduler.poll_now(user)
+    if not res.get("ok"):
+        raise HTTPException(400, res.get("error"))
+    return res
+
+
 @app.post("/api/automation/scheduler/stop-recording")
 def automation_scheduler_stop_recording(task_id: str | None = None,
                                         user: str = Depends(current_user)):

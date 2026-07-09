@@ -96,6 +96,24 @@ class Scheduler:
                 "active": active, "max_parallel": recorder.MAX_SLOTS,
                 "last_poll": self._last_poll.get(user, 0.0), "meetings": meetings}
 
+    def poll_now(self, user: str) -> dict:
+        """Force an immediate Weeek re-poll for this user — the manual «Обновить
+        статус» button — so new meetings and status appear without waiting for
+        the next tick."""
+        cfg = auto_settings.load(user)
+        if not cfg.get("weeek_token"):
+            return {"ok": False, "error": "Сначала задайте токен Weeek."}
+        self.start()  # idempotent
+        try:
+            self._poll(user, cfg)
+            self._last_poll[user] = time.time()
+            self._maybe_trigger(user, cfg)
+        except weeek.WeeekError as e:
+            return {"ok": False, "error": str(e)}
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": f"Сбой опроса: {e}"}
+        return {"ok": True, "detail": "Обновлено из Weeek."}
+
     # -- main loop ----------------------------------------------------------
     def _loop(self) -> None:
         while not self._stop.is_set():

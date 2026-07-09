@@ -72,6 +72,9 @@
     .b-transcribing{background:#6d28d9}.b-analyzing{background:#0e7490}.b-done{background:#15803d}.b-error{background:#7f1d1d}
     .b-missed{background:#6b7280}.b-no_time{background:#a16207}
     .mlist{margin-top:12px}
+    .mhead{margin-top:16px;margin-bottom:2px;font-size:12px;font-weight:700;letter-spacing:.02em;
+           color:var(--muted);text-transform:uppercase}
+    .mempty{font-size:12px;color:var(--muted);padding:8px 2px}
     .mrow{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:10px 12px;
           border:1px solid var(--line);border-radius:10px;background:var(--card2);margin-bottom:8px}
     .mrow .t{font-size:13px}.mrow .s{font-size:11px;color:var(--muted)}
@@ -326,10 +329,13 @@
     </div>
     <div class="row">
       <button class="go" onclick="saveScheduler()">Сохранить</button>
-      <button class="ghost" onclick="refreshStatus()">Обновить статус</button>
+      <button class="ghost" id="refreshBtn" onclick="manualRefresh(this)">Обновить статус</button>
       <button class="ghost danger" id="stopBtn" onclick="stopRecording()">■ Остановить запись</button>
     </div>
     <div id="sched_status" class="statusline"></div>
+    <div class="mhead">📅 Сегодня</div>
+    <div id="today_meetings" class="mlist"></div>
+    <div class="mhead">Все встречи</div>
     <div id="sched_meetings" class="mlist"></div>
   </div>
   </div><!-- /.tabpanels -->
@@ -630,6 +636,17 @@ async function toggleEnabled(){
 const MSTATE={scheduled:"запланирована",no_time:"без времени",missed:"пропущена",
   recording:"идёт запись",uploading:"загрузка в облако",transcribing:"распознавание видео",
   analyzing:"генерация протокола",done:"готово",error:"ошибка",cancelled:"отменено"};
+function isToday(iso){
+  if(!iso) return false;
+  const d=new Date(iso), n=new Date();
+  return d.getFullYear()===n.getFullYear()&&d.getMonth()===n.getMonth()&&d.getDate()===n.getDate();
+}
+function meetingRow(m){
+  return `<div class="mrow"><div><div class="t">${esc(m.title)} <span class="badge b-${m.state}">${esc(MSTATE[m.state]||m.state)}</span></div>
+    <div class="s">${m.start?fmt(m.start):"без времени"}${m.detail?" · "+esc(m.detail):""}${m.cloud_url?` · <a href="${m.cloud_url}" target="_blank">запись</a>`:""}</div></div>
+    ${m.state==="scheduled"?`<button class="ghost" onclick="runNow('${m.task_id}')">Сейчас</button>`:
+      m.state==="recording"?`<button class="ghost danger" onclick="stopOne('${m.task_id}')">■ Стоп</button>`:""}</div>`;
+}
 async function refreshStatus(){
   try{ const s=await api("GET","/api/automation/scheduler/status");
     const last=s.last_poll?fmt(new Date(s.last_poll*1000).toISOString()):"—";
@@ -637,12 +654,23 @@ async function refreshStatus(){
       `автоматика: ${s.enabled?"<span class='ok'>вкл</span>":"выкл"} · `+
       `запись: ${s.active?`<span class='warn'>${s.active}/${s.max_parallel}</span>`:"нет"} · опрос: ${last}`;
     $("stopBtn").disabled=!s.recording;
-    $("sched_meetings").innerHTML=(s.meetings||[]).map(m=>`
-      <div class="mrow"><div><div class="t">${esc(m.title)} <span class="badge b-${m.state}">${esc(MSTATE[m.state]||m.state)}</span></div>
-        <div class="s">${m.start?fmt(m.start):"без времени"}${m.detail?" · "+esc(m.detail):""}${m.cloud_url?` · <a href="${m.cloud_url}" target="_blank">запись</a>`:""}</div></div>
-        ${m.state==="scheduled"?`<button class="ghost" onclick="runNow('${m.task_id}')">Сейчас</button>`:
-          m.state==="recording"?`<button class="ghost danger" onclick="stopOne('${m.task_id}')">■ Стоп</button>`:""}</div>`).join("");
+    const all=s.meetings||[];
+    const today=all.filter(m=>isToday(m.start));
+    $("today_meetings").innerHTML=today.length?today.map(meetingRow).join("")
+      :`<div class="mempty">На сегодня встреч нет.</div>`;
+    $("sched_meetings").innerHTML=all.length?all.map(meetingRow).join("")
+      :`<div class="mempty">Встреч пока нет.</div>`;
   }catch(e){ $("sched_status").textContent=e.message; }
+}
+async function manualRefresh(btn){
+  if(btn) btn.disabled=true;
+  const old=btn?btn.textContent:""; if(btn) btn.textContent="Обновляю…";
+  try{
+    const r=await api("POST","/api/automation/scheduler/poll-now");
+    await refreshStatus(); await loadMeetings(true);
+    toast(r.detail||"Статус обновлён");
+  }catch(e){ toast(e.message,true); }
+  finally{ if(btn){ btn.disabled=false; btn.textContent=old||"Обновить статус"; } }
 }
 async function runNow(taskId){
   try{ await api("POST","/api/automation/scheduler/run-now?task_id="+encodeURIComponent(taskId));
