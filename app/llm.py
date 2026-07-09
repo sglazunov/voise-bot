@@ -77,7 +77,7 @@ def _http_post_json(url: str, payload: dict, headers: dict, timeout: int = 180,
         # Cloudflare, which rejects the default "Python-urllib/x.y" agent with a
         # 403 / error 1010 ("banned by browser signature").
         req.add_header("User-Agent",
-                       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                       "Mozilla/5.0 (X11; Linux x86_64) "
                        "AppleWebKit/537.36 (KHTML, like Gecko) "
                        "Chrome/124.0 Safari/537.36")
         req.add_header("Accept", "application/json")
@@ -123,13 +123,8 @@ def ollama_status() -> str:
             return "running"
     except Exception:
         pass
-    import os
     import shutil
-    exe = os.path.join(os.environ.get("LOCALAPPDATA", ""),
-                       "Programs", "Ollama", "ollama.exe")
-    if os.path.exists(exe) or shutil.which("ollama"):
-        return "installed"
-    return "missing"
+    return "installed" if shutil.which("ollama") else "missing"
 
 
 class OllamaProvider:

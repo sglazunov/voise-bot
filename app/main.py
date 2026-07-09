@@ -836,7 +836,7 @@ def automation_recorder_status(user: str = Depends(current_user)):
 
 @app.get("/api/automation/recorder/audio-devices")
 def automation_recorder_audio_devices(user: str = Depends(current_user)):
-    """List audio capture sources ffmpeg can use (pulse on Linux / dshow on Win)."""
+    """List the PulseAudio sources ffmpeg can capture the meeting sound from."""
     from .automation import settings as auto_settings
     from .automation.recorder import capture
     cfg = auto_settings.load(user)

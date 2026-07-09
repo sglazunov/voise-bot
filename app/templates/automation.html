@@ -196,18 +196,19 @@
     </div>
     <div class="grid2">
       <div><label>Программа ffmpeg (путь, если нет в системе)</label>
-        <input id="ffmpeg_path" type="text" placeholder="ffmpeg (или полный путь к ffmpeg.exe)">
-        <div class="note" style="margin-top:4px">ffmpeg — бесплатная программа записи/конвертации видео и звука. Обычно ставится один раз, и поле можно оставить как <code>ffmpeg</code>. Если её нет — нажмите «Установить ffmpeg» ниже, путь пропишется сам.</div>
+        <input id="ffmpeg_path" type="text" placeholder="ffmpeg (или полный путь)">
+        <div class="note" style="margin-top:4px">ffmpeg — бесплатная программа записи/конвертации видео и звука. В образе она уже есть, поле можно оставить как <code>ffmpeg</code>. Если её нет — ставится сама при запуске (<code>apt install ffmpeg</code>).</div>
       </div>
-      <div><label>Аудио-устройство встречи (звук участников)</label>
-        <select id="audio_device"><option value="">— выбрать —</option></select>
+      <div><label>Источник звука встречи (PulseAudio)</label>
+        <select id="audio_device"><option value="">— по умолчанию (meet&lt;слот&gt;.monitor) —</option></select>
       </div>
     </div>
     <div class="note">
-      🔊 <b>Чтобы в записи был звук встречи</b> (нужно для протокола), выберите выше <b>«CABLE Output (VB-Audio Virtual Cable)»</b> и один раз настройте Windows:<br>
-      1) <b>Параметры → Звук → Вывод</b> → сделайте устройством вывода <b>«CABLE Input (VB-Audio Virtual Cable)»</b> (тогда звук встречи пойдёт в кабель).<br>
-      2) Чтобы <b>самому слышать</b> встречу: <b>Панель управления → Звук → Запись</b> → «CABLE Output» → Свойства → вкладка «Прослушать» → ✓ «Прослушивать с данного устройства» → выберите наушники/динамики.<br>
-      3) Нажмите <b>«Проверить звук»</b> ниже — должно показать «звук есть ✓».
+      🔊 <b>Звук встречи</b> пишется автоматически: браузер бота играет звонок в виртуальный
+      «динамик» PulseAudio (<code>meet0</code>, <code>meet1</code>, … — по одному на слот записи), а ffmpeg
+      пишет его «монитор» (<code>meet0.monitor</code>). Ничего настраивать не нужно — sink'и создаются
+      при старте контейнера (<code>VTX_RECORDER_ENABLED=1</code>). Оставьте поле пустым, чтобы каждый слот
+      писал свой источник. Нажмите <b>«Проверить звук»</b> — должно показать «звук есть ✓».
     </div>
     <div class="row">
       <button class="ghost" onclick="testAudio()">🔊 Проверить звук (3 сек)</button>
@@ -595,7 +596,7 @@ async function testAudio(){
     const r=await api("GET","/api/automation/recorder/audio-test");
     if(!r.ok){ el.innerHTML='<span class="warn">'+esc(r.error||"ошибка")+'</span>'; return; }
     if(r.has_sound) el.innerHTML='<span class="ok">✓ Звук есть (макс. '+r.max_db+' дБ) — запись будет со звуком. Можно записывать.</span>';
-    else el.innerHTML='<span class="warn">✗ Тишина (макс. '+r.max_db+' дБ). Звук встречи не идёт в это устройство — настройте Windows по инструкции выше (сделайте «CABLE Input» устройством вывода и включите что-нибудь со звуком при проверке).</span>';
+    else el.innerHTML='<span class="warn">✗ Тишина (макс. '+r.max_db+' дБ). В этот источник сейчас ничего не играет — это нормально, если встреча не идёт. Проверка со звуком имеет смысл во время записи; убедитесь, что выбран монитор вида <code>meet0.monitor</code>.</span>';
   }catch(e){ el.textContent=e.message; }
 }
 async function checkLogin(){

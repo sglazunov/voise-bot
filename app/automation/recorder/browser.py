@@ -285,7 +285,7 @@ class TelemostBot:
         self._page = self._ctx.pages[0] if self._ctx.pages else self._ctx.new_page()
         self._download_path = None
         self._ctx.on("download", self._on_download)
-        # On Windows the CDP maximise fills the screen reliably. On Linux/Xvfb we
+        # CDP maximise fills the Xvfb screen. We
         # already forced --window-size + --start-fullscreen (no WM to maximise).
         if not headless and not sys.platform.startswith("linux"):
             self._maximize_window()
@@ -397,7 +397,7 @@ class TelemostBot:
     def window_title(self) -> str | None:
         """The browser window's title — used by ffmpeg to grab just this window.
 
-        Brings the window to the foreground first so gdigrab captures it cleanly
+        Brings the window to the foreground first so x11grab captures it cleanly
         (a fully occluded window can grab black)."""
         try:
             self._page.bring_to_front()

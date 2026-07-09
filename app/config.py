@@ -2,7 +2,7 @@
 
 Defaults are tuned for THIS machine:
     AMD Ryzen 5 5500U — 6 cores / 12 threads, 14 GB RAM, no CUDA GPU,
-    Windows 11. With this much CPU/RAM we can run the "medium" model with
+    Linux/Docker. With this much CPU/RAM we can run bigger models with
     beam search for noticeably better Russian quality than the old low-end
     "small"/greedy defaults.
 """
@@ -182,7 +182,7 @@ def set_hf_token(token: str) -> None:
 
 def set_provider_key(provider: str, key: str, extra: str = "") -> None:
     """Set an API key at runtime (from the UI). Kept in memory only — not
-    written to disk, so it's gone on restart. Add it to run.bat to persist.
+    written to disk, so it's gone on restart. Put it in .env to persist.
 
     `extra` carries the provider's second credential where needed:
     YandexGPT → folder id; GigaChat → scope (optional)."""

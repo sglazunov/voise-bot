@@ -5,7 +5,7 @@ Public surface:
   record_meeting(url, out_path, cfg, ...) -> {ok, path, reason} | {ok: False, error}
 
 The bot join (browser.py) and the capture (capture.py) are kept separate so the
-capture backend can be swapped (Windows dshow now, Linux PulseAudio later) and so
+capture backend (x11grab + PulseAudio) sits behind one interface, and so
 each can be tuned independently. Live recording requires Playwright + Chromium +
 ffmpeg + a loopback audio device on the host — see docs/automation-plan.md.
 """

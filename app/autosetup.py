@@ -12,9 +12,8 @@ in the BACKGROUND, without a single click:
                      (Linux only: it's just a `pactl` call, no downloads/prompts).
   * speech models  — all Whisper models, pre-downloaded (see whisper_setup).
 
-Heavy or interactive installs are deliberately NOT automatic: diarization pulls
-~2.5 GB of torch (only when VTX_DIARIZATION=1), and Windows' VB-CABLE driver
-needs a UAC prompt, so it stays a manual button.
+Heavy installs stay opt-in: diarization pulls ~2.5 GB of torch, so it only runs
+when VTX_DIARIZATION=1.
 
 In Docker everything is already baked into the image, so this is a cheap no-op
 there — it's what makes a bare-metal or first-run install work unattended.
@@ -23,7 +22,6 @@ Disable with VTX_AUTO_SETUP=0.
 from __future__ import annotations
 
 import os
-import sys
 import threading
 import time
 
@@ -40,14 +38,11 @@ def status() -> dict:
 
 
 def _wanted() -> list[str]:
-    """Components we may install unattended on THIS machine."""
+    """Components we install unattended on this machine."""
     want = ["ocr", "ffmpeg"]
     if os.getenv("VTX_RECORDER_ENABLED", "0") == "1":
-        want.append("playwright")
-        if sys.platform.startswith("linux"):
-            # Linux loopback = a pactl null-sink: instant, no download, no prompt.
-            # On Windows it's a driver install behind UAC → keep it manual.
-            want.append("audio_loopback")
+        # The loopback is just a pactl null-sink: instant, no download.
+        want += ["playwright", "audio_loopback"]
     if os.getenv("VTX_DIARIZATION", "0") == "1":
         want.append("diarization")   # ~2.5 GB, only when explicitly enabled
     return want

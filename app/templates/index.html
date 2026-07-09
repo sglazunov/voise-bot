@@ -741,7 +741,7 @@ async function onDiarizeToggle(){
           <span class="muted" id="hfTokenMsg"></span></div>
           <div class="muted" style="margin-top:4px">Токен — на huggingface.co/settings/tokens (тип Read),
           прими условия моделей pyannote/speaker-diarization-3.1 и pyannote/segmentation-3.0.
-          Хранится в памяти; для постоянного — пропиши <b>HF_TOKEN</b> в run.bat.</div></div>`;
+          Хранится в памяти; для постоянного — пропиши <b>HF_TOKEN</b> в <code>.env</code>.</div></div>`;
       }
       html+="<div style='margin-top:6px'>Можно оставить галочку: распознавание всё равно пройдёт, просто без разметки спикеров.</div>";
       box.innerHTML=html;
@@ -1232,7 +1232,7 @@ async function updateLive(){
         else if(pct===0){
           const big=/large|medium/.test(job.model||"");
           msg="⏳ Загрузка модели"+(job.model?" «"+esc(job.model)+"»":"")+"…"+
-              (big?" При первом выборе модель скачивается (large-v3 ~3 ГБ) — это может занять несколько минут. Прогресс скачивания виден в окне run.bat. Потом она кэшируется и грузится мгновенно.":"");
+              (big?" Модели скачиваются автоматически при запуске сервиса; прогресс виден здесь и в логах контейнера.":"");
         }else{msg="Анализ аудио, первые сегменты скоро появятся…";}
         $("live").innerHTML=`<div class="empty">${msg}</div>`;_segSig="";
       }else{

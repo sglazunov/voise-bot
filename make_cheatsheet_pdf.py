@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-"""Generate a clean one-page PDF of the cheat sheet (Cyrillic via Arial)."""
+"""Generate a clean one-page PDF of the cheat sheet (Cyrillic via a system font)."""
+import os
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_LEFT
 from reportlab.lib.pagesizes import A4
@@ -10,8 +11,24 @@ from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer, Table,
                                 TableStyle, HRFlowable)
 
-pdfmetrics.registerFont(TTFont("Arial", r"C:\Windows\Fonts\arial.ttf"))
-pdfmetrics.registerFont(TTFont("Arial-Bold", r"C:\Windows\Fonts\arialbd.ttf"))
+_FONT_DIRS = ("/usr/share/fonts/truetype/dejavu",
+              "/usr/share/fonts/truetype/liberation")
+
+
+def _font(*names: str) -> str:
+    """First matching TTF among the usual Linux font dirs."""
+    for d in _FONT_DIRS:
+        for n in names:
+            p = os.path.join(d, n)
+            if os.path.exists(p):
+                return p
+    raise SystemExit("Шрифт не найден. Установите: sudo apt install fonts-dejavu")
+
+
+pdfmetrics.registerFont(TTFont("Arial", _font("DejaVuSans.ttf",
+                                              "LiberationSans-Regular.ttf")))
+pdfmetrics.registerFont(TTFont("Arial-Bold", _font("DejaVuSans-Bold.ttf",
+                                                   "LiberationSans-Bold.ttf")))
 
 ACCENT = colors.HexColor("#0e7490")
 MUTED = colors.HexColor("#555f6b")

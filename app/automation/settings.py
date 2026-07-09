@@ -74,7 +74,7 @@ _DEFAULTS: dict[str, Any] = {
     "auth_mode": "guest",             # "guest" (link only) | "profile" (logged in)
     "browser_profile_dir": "",        # profile dir for auth_mode=profile; "" -> DATA_DIR/browser-profile
     "ffmpeg_path": "ffmpeg",          # ffmpeg binary (PATH or absolute)
-    "audio_device": "",               # Windows dshow audio device to capture (loopback/virtual cable)
+    "audio_device": "",               # PulseAudio source to record (default: meet<slot>.monitor)
     "capture_video": True,            # record the screen too (slides/screen-share)
     "join_timeout_sec": 60,           # how long to wait to get into the call
     "end_when_alone_sec": 90,         # stop after the room sits at/below the threshold this long
@@ -123,7 +123,7 @@ def _atomic_write(user: str, data: dict[str, Any]) -> None:
         try:
             os.chmod(path, 0o600)
         except OSError:
-            pass  # Windows / unsupported FS — best effort only
+            pass  # unsupported FS — best effort only
 
 
 def _read_raw(user: str) -> dict[str, Any]:

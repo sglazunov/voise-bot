@@ -1,13 +1,11 @@
-"""Screen + audio capture via ffmpeg (cross-platform).
+"""Screen + audio capture via ffmpeg (Linux).
 
-Linux (this deploy): grab the virtual display with `x11grab` (Xvfb on $DISPLAY)
-and the meeting audio from a PulseAudio monitor source. The browser plays the
-call into a null-sink (default sink "meet"); its monitor `meet.monitor` is what
-we record — the Linux equivalent of a Windows loopback/VB-CABLE.
+Grab the virtual display with `x11grab` (Xvfb on $DISPLAY) and the meeting audio
+from a PulseAudio monitor source: the browser plays the call into a null-sink
+(`meet0`, `meet1`, … one per recording slot) and we record its monitor
+(`meet0.monitor`) — the virtual "cable" that carries the meeting's sound.
 
-Windows (original): `gdigrab` for the desktop/window + `dshow` for a loopback
-device (Stereo Mix / VB-CABLE). Both backends sit behind the same
-`build_ffmpeg_cmd` / `FFmpegRecorder` interface.
+Everything sits behind `build_ffmpeg_cmd` / `FFmpegRecorder`.
 """
 from __future__ import annotations
 
@@ -15,13 +13,7 @@ import os
 import re
 import shutil
 import subprocess
-import sys
-import time
 from pathlib import Path
-
-
-def _is_linux() -> bool:
-    return sys.platform.startswith("linux")
 
 
 def _display() -> str:
@@ -47,50 +39,18 @@ def ffmpeg_available(ffmpeg: str = "ffmpeg") -> bool:
 
 
 def list_audio_devices(ffmpeg: str = "ffmpeg") -> list[str]:
-    """Audio capture sources: PulseAudio sources on Linux, dshow on Windows."""
-    if _is_linux():
-        try:
-            proc = subprocess.run(["pactl", "list", "short", "sources"],
-                                  capture_output=True, text=True, errors="replace")
-        except FileNotFoundError:
-            return []
-        names = []
-        for line in proc.stdout.splitlines():
-            cols = line.split("\t")
-            if len(cols) >= 2 and cols[1]:
-                names.append(cols[1])
-        return names
-    if sys.platform != "win32" or not ffmpeg_available(ffmpeg):
+    """PulseAudio sources ffmpeg can record from (the `*.monitor` ones carry the
+    meeting's sound)."""
+    try:
+        proc = subprocess.run(["pactl", "list", "short", "sources"],
+                              capture_output=True, text=True, errors="replace")
+    except FileNotFoundError:
         return []
-    proc = subprocess.run(
-        [ffmpeg, "-hide_banner", "-list_devices", "true", "-f", "dshow",
-         "-i", "dummy"],
-        capture_output=True, text=True, errors="replace")
-    return _parse_dshow_audio(proc.stderr)
-
-
-def _parse_dshow_audio(stderr: str) -> list[str]:
-    """Parse `ffmpeg -list_devices` output for audio device names.
-
-    ffmpeg prints lines like:  [dshow @ ...]  "CABLE Output (VB-Audio...)" (audio)
-    Older builds print a separate "DirectShow audio devices" section instead.
-    """
-    names, in_audio_section = [], False
-    for line in stderr.splitlines():
-        low = line.lower()
-        if "audio devices" in low:
-            in_audio_section = True
-            continue
-        if "video devices" in low:
-            in_audio_section = False
-            continue
-        m = re.search(r'"([^"]+)"', line)
-        if not m:
-            continue
-        if "(audio)" in low or (in_audio_section and "alternative name" not in low):
-            name = m.group(1)
-            if name not in names and not name.startswith("@device"):
-                names.append(name)
+    names = []
+    for line in proc.stdout.splitlines():
+        cols = line.split("\t")
+        if len(cols) >= 2 and cols[1]:
+            names.append(cols[1])
     return names
 
 
@@ -100,13 +60,8 @@ def test_audio_level(ffmpeg: str, device: str, seconds: int = 3) -> dict:
     Lets the UI tell the user whether the meeting's sound actually reaches the
     chosen device, instead of finding out only after a recording came out mute.
     """
-    if _is_linux():
-        device = device or os.environ.get("VTX_PULSE_MONITOR", "meet.monitor")
-        infmt = ["-f", "pulse", "-i", device]
-    elif not device:
-        return {"ok": False, "error": "Не выбрано аудио-устройство."}
-    else:
-        infmt = ["-f", "dshow", "-i", f"audio={device}"]
+    device = device or os.environ.get("VTX_PULSE_MONITOR", "meet0.monitor")
+    infmt = ["-f", "pulse", "-i", device]
     try:
         proc = subprocess.run(
             [ffmpeg, "-hide_banner", *infmt,
@@ -132,43 +87,25 @@ def build_ffmpeg_cmd(out_path: str, cfg: dict, window_title: str | None = None,
                      display: str | None = None, source: str | None = None) -> list[str]:
     """Build the ffmpeg capture command from settings.
 
-    On Linux `display`/`source` pin capture to a specific Xvfb display and
-    PulseAudio monitor (the parallel-recording slot); they default to the
-    single-slot values. Records into one mp4.
+    `display`/`source` pin capture to a specific Xvfb display and PulseAudio
+    monitor (the parallel-recording slot); they default to the single-slot values.
+    Records into one mp4. `window_title` is irrelevant on a headless display.
     """
     ffmpeg = cfg.get("ffmpeg_path") or "ffmpeg"
     capture_video = bool(cfg.get("capture_video", True))
+    disp = display or _display()
+    src = source or _pulse_source(cfg)
+
     cmd = [ffmpeg, "-y", "-hide_banner"]
-
-    if _is_linux():
-        disp = display or _display()
-        src = source or _pulse_source(cfg)
-        # Capture this slot's Xvfb display + the monitor of the sink the browser
-        # plays into. window_title is irrelevant headless.
-        if capture_video:
-            # -draw_mouse 0 hides the mouse cursor (Xvfb draws a bare "X" without
-            # a cursor theme) so it never appears in the recording.
-            cmd += ["-f", "x11grab", "-draw_mouse", "0", "-framerate", "10",
-                    "-video_size", _screen_size(), "-i", disp]
-        cmd += ["-f", "pulse", "-i", src]
-        if capture_video:
-            cmd += ["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p"]
-        cmd += ["-c:a", "aac", "-b:a", "128k", out_path]
-        return cmd
-
-    audio = (cfg.get("audio_device") or "").strip()
     if capture_video:
-        # Capture only the meeting's browser window (cleaner than the whole
-        # desktop); fall back to the full desktop if no title is known.
-        src = f"title={window_title}" if window_title else "desktop"
-        cmd += ["-f", "gdigrab", "-framerate", "10", "-i", src]
-    if audio:
-        cmd += ["-f", "dshow", "-i", f"audio={audio}"]
+        # -draw_mouse 0 hides the mouse cursor (Xvfb draws a bare "X" without a
+        # cursor theme) so it never appears in the recording.
+        cmd += ["-f", "x11grab", "-draw_mouse", "0", "-framerate", "10",
+                "-video_size", _screen_size(), "-i", disp]
+    cmd += ["-f", "pulse", "-i", src]
     if capture_video:
         cmd += ["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p"]
-    if audio:
-        cmd += ["-c:a", "aac", "-b:a", "128k"]
-    cmd += [out_path]
+    cmd += ["-c:a", "aac", "-b:a", "128k", out_path]
     return cmd
 
 
@@ -176,37 +113,18 @@ def readiness(cfg: dict) -> dict:
     ffmpeg = cfg.get("ffmpeg_path") or "ffmpeg"
     if not ffmpeg_available(ffmpeg):
         return {"ready": False,
-                "detail": "ffmpeg не найден. Установите ffmpeg и/или укажите путь."}
-    if _is_linux():
-        sources = list_audio_devices(ffmpeg)
-        monitors = [s for s in sources if s.startswith("meet") and s.endswith(".monitor")]
-        if not monitors:
-            return {"ready": False, "devices": sources,
-                    "detail": "Не найдено ни одного PulseAudio-монитора «meet*.monitor». "
-                              "Проверьте, что запущен с VTX_RECORDER_ENABLED=1 (null-sink'и "
-                              "создаются при старте)."}
-        import os as _os
-        slots = _os.getenv("VTX_MAX_CONCURRENT_RECORDINGS", "4")
-        return {"ready": True, "devices": monitors,
-                "detail": f"Linux: до {slots} параллельных записей "
-                          f"(экраны+звук {', '.join(monitors)})"}
-    audio = (cfg.get("audio_device") or "").strip()
-    if not audio:
-        devices = list_audio_devices(ffmpeg)
-        keys = ("cable", "voicemeeter", "stereo mix", "стерео микшер",
-                "loopback", "what u hear", "what you hear")
-        has_loop = any(any(k in d.lower() for k in keys) for d in devices)
-        if has_loop:
-            hint = f"Выберите аудио-устройство из списка (есть подходящее). Найдено: {devices}"
-        elif devices:
-            hint = ("Нет виртуального аудио-устройства для записи звука встречи. "
-                    "Нажмите «Установить виртуальное аудио (VB-CABLE)» ниже, "
-                    f"либо выберите подходящее вручную. Найдено: {devices}")
-        else:
-            hint = ("Нет ни одного аудио-устройства для захвата. Нажмите "
-                    "«Установить виртуальное аудио (VB-CABLE)» ниже.")
-        return {"ready": False, "detail": hint, "devices": devices}
-    return {"ready": True, "detail": f"ffmpeg + аудио: {audio}"}
+                "detail": "ffmpeg не найден. Установите: sudo apt install ffmpeg."}
+    sources = list_audio_devices(ffmpeg)
+    monitors = [s for s in sources if s.startswith("meet") and s.endswith(".monitor")]
+    if not monitors:
+        return {"ready": False, "devices": sources,
+                "detail": "Не найдено ни одного PulseAudio-монитора «meet*.monitor». "
+                          "Проверьте, что запущен с VTX_RECORDER_ENABLED=1 (null-sink'и "
+                          "создаются при старте)."}
+    slots = os.getenv("VTX_MAX_CONCURRENT_RECORDINGS", "4")
+    return {"ready": True, "devices": monitors,
+            "detail": f"До {slots} параллельных записей "
+                      f"(экраны+звук {', '.join(monitors)})"}
 
 
 class FFmpegRecorder:

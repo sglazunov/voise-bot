@@ -1,18 +1,23 @@
-"""On-demand install of optional dependencies — INTO THIS app's venv.
+"""On-demand install of optional dependencies — Linux only.
 
-The whole point: pip installs run via ``sys.executable -m pip``, so packages
-land in the SAME interpreter the app runs from (the project ``.venv``), not some
-global Python. This is the fix for the classic "I ran pip install but the app
-still says it's missing" — that happens when pip installs into a different
-Python than the one the app uses.
+The whole point of the pip part: installs run via ``sys.executable -m pip``, so
+packages land in the SAME interpreter the app runs from (the project ``.venv`` /
+the container's Python), not some other one. That is the fix for the classic
+"I ran pip install but the app still says it's missing".
 
-Mirrors ``ollama_setup.py``: ``status()`` / ``install(component)`` /
-``cancel(component)``, with progress polled by the UI. Components:
+System packages go through ``apt-get`` (needs root, or passwordless sudo).
 
-  playwright   -> pip install playwright  +  `playwright install chromium`
-  diarization  -> pip install torch pyannote.audio
-  ffmpeg       -> winget install Gyan.FFmpeg (a binary; its path is saved to
-                  the automation settings so the running server finds it).
+Mirrors ``ollama_setup.py``: ``status()`` / ``install(component)``, with progress
+polled by the UI. Components:
+
+  playwright     -> pip install playwright  +  `playwright install chromium`
+  diarization    -> pip install torch pyannote.audio  (~2.5 GB)
+  ffmpeg         -> apt install ffmpeg
+  ocr            -> pip Pillow/pytesseract/av + apt tesseract-ocr(+rus)
+  audio_loopback -> a PulseAudio null-sink (created by the container at startup)
+
+Normally you don't touch any of this: `autosetup.ensure_all()` runs it for you on
+first launch, and the Docker image already ships everything.
 """
 from __future__ import annotations
 
@@ -23,22 +28,15 @@ import shutil
 import subprocess
 import sys
 import threading
-import time
-
-_NOWINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 COMPONENTS = ("playwright", "diarization", "ffmpeg", "ocr", "audio_loopback")
 _LABELS = {
     "playwright": "Запись встреч (Playwright + Chromium)",
     "diarization": "«Кто говорил» (torch + pyannote.audio)",
     "ffmpeg": "ffmpeg (запись и конвертация видео/аудио)",
-    "ocr": "Текст с экрана (Pillow + pytesseract + Tesseract)",
-    "audio_loopback": "Виртуальное аудио для записи звука",
+    "ocr": "Текст с экрана и имена говорящих (Pillow + pytesseract + Tesseract)",
+    "audio_loopback": "Виртуальное аудио для записи звука (PulseAudio)",
 }
-
-# Audio devices that let ffmpeg capture the meeting's sound (system loopback).
-_LOOPBACK_KEYS = ("cable", "voicemeeter", "stereo mix", "стерео микшер",
-                  "loopback", "what u hear", "what you hear")
 
 _install = {c: {"state": "idle", "message": "", "ok": None} for c in COMPONENTS}
 _lock = threading.Lock()
@@ -52,25 +50,16 @@ def _has(mod: str) -> bool:
 
 
 def _chromium_installed() -> bool:
-    """Whether Playwright's Chromium is on disk. Checks every location Playwright
-    may use, so it doesn't report "not installed" when it actually is:
-      * PLAYWRIGHT_BROWSERS_PATH (e.g. /ms-playwright in Docker),
-      * the per-OS default cache (Windows LOCALAPPDATA / macOS / Linux ~/.cache).
-    Falls back to asking Playwright for the executable path."""
+    """Whether Playwright's Chromium is on disk — PLAYWRIGHT_BROWSERS_PATH (e.g.
+    /ms-playwright in the image) or the default ~/.cache/ms-playwright."""
     bases = []
     if os.environ.get("PLAYWRIGHT_BROWSERS_PATH"):
         bases.append(os.environ["PLAYWRIGHT_BROWSERS_PATH"])
-    if sys.platform == "win32":
-        bases.append(os.path.join(os.environ.get("LOCALAPPDATA", ""), "ms-playwright"))
-    elif sys.platform == "darwin":
-        bases.append(os.path.expanduser("~/Library/Caches/ms-playwright"))
-    else:
-        bases.append(os.path.expanduser("~/.cache/ms-playwright"))
+    bases.append(os.path.expanduser("~/.cache/ms-playwright"))
     for base in bases:
         if base and glob.glob(os.path.join(base, "chromium-*")):
             return True
-    # Definitive fallback: ask Playwright where the browser is (honours env too).
-    try:
+    try:  # definitive fallback: ask Playwright where the browser is
         from playwright.sync_api import sync_playwright
         with sync_playwright() as p:
             return bool(p.chromium.executable_path and
@@ -80,85 +69,24 @@ def _chromium_installed() -> bool:
 
 
 def find_ffmpeg() -> str | None:
-    """Locate ffmpeg: PATH first, then a winget/Gyan install location."""
-    p = shutil.which("ffmpeg")
-    if p:
-        return p
-    patterns = [
-        os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\WinGet\Links\ffmpeg.exe"),
-        os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\WinGet\Packages\Gyan.FFmpeg*\**\bin\ffmpeg.exe"),
-        os.path.expandvars(r"%ProgramFiles%\ffmpeg\bin\ffmpeg.exe"),
-    ]
-    for pat in patterns:
-        hits = glob.glob(pat, recursive=True)
-        if hits:
-            return hits[0]
-    return None
+    return shutil.which("ffmpeg")
 
 
 def find_tesseract() -> str | None:
-    """Locate the Tesseract OCR binary: PATH, then common install locations."""
-    p = shutil.which("tesseract")
-    if p:
-        return p
-    patterns = [
-        os.path.expandvars(r"%ProgramFiles%\Tesseract-OCR\tesseract.exe"),
-        os.path.expandvars(r"%LOCALAPPDATA%\Programs\Tesseract-OCR\tesseract.exe"),
-        os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\WinGet\Links\tesseract.exe"),
-    ]
-    for pat in patterns:
-        hits = glob.glob(pat)
-        if hits:
-            return hits[0]
-    return None
+    return shutil.which("tesseract")
 
 
-def _sys_pkg_install(linux_pkgs: list[str], winget_id: str | None,
-                     brew_pkgs: list[str] | None, timeout: int = 1800) -> bool:
-    """Install a SYSTEM package with whatever package manager this machine has:
-    apt-get (Linux, needs root or passwordless sudo), Homebrew (macOS) or winget
-    (Windows). Returns False when no usable manager is available — the caller then
-    reports what to install by hand."""
-    if sys.platform.startswith("linux"):
-        apt = shutil.which("apt-get")
-        if not apt:
-            return False
-        prefix: list[str] = []
-        if os.geteuid() != 0:                    # not root: try passwordless sudo
-            sudo = shutil.which("sudo")
-            if not sudo:
-                return False
-            prefix = [sudo, "-n"]
-        env_run = dict(os.environ, DEBIAN_FRONTEND="noninteractive")
-        try:
-            subprocess.run(prefix + [apt, "update"], capture_output=True,
-                           text=True, timeout=timeout, env=env_run)
-            r = subprocess.run(prefix + [apt, "install", "-y", "--no-install-recommends"]
-                               + linux_pkgs, capture_output=True, text=True,
-                               timeout=timeout, env=env_run)
-            return r.returncode == 0
-        except Exception:
-            return False
-    if sys.platform == "darwin":
-        brew = shutil.which("brew")
-        if not brew or not brew_pkgs:
-            return False
-        return _run([brew, "install"] + brew_pkgs, timeout).returncode == 0
-    winget = shutil.which("winget")
-    if not winget or not winget_id:
+def _loopback_device_present() -> bool:
+    """True when a PulseAudio monitor source exists — that's the "virtual cable"
+    ffmpeg records the meeting's sound from. The container creates the null-sinks
+    at startup (docker/run.sh)."""
+    try:
+        from .automation.recorder import capture
+        names = capture.list_audio_devices("ffmpeg")
+        target = os.environ.get("VTX_PULSE_MONITOR", "meet0.monitor")
+        return any(n == target or n.endswith(".monitor") for n in names)
+    except Exception:
         return False
-    _run([winget, "install", "--id", winget_id, "-e", "--silent",
-          "--accept-package-agreements", "--accept-source-agreements"], timeout)
-    return True
-
-
-def install_state(c: str) -> dict:
-    """Current install progress of one component (public view of _install)."""
-    return dict(_install.get(c, {"state": "idle", "message": "", "ok": None}))
-
-
-def label(c: str) -> str:
-    return _LABELS.get(c, c)
 
 
 def component_ready(c: str) -> bool:
@@ -178,22 +106,13 @@ def component_ready(c: str) -> bool:
     return False
 
 
-def _loopback_device_present() -> bool:
-    """True if there's a loopback/virtual audio device to capture meeting sound.
+def install_state(c: str) -> dict:
+    """Current install progress of one component (public view of _install)."""
+    return dict(_install.get(c, {"state": "idle", "message": "", "ok": None}))
 
-    On Linux the "virtual cable" is a PulseAudio monitor source (the container's
-    null-sink), created automatically at startup — any *.monitor counts. On
-    Windows it's VB-CABLE / Stereo Mix, matched by name.
-    """
-    try:
-        from .automation.recorder import capture
-        names = capture.list_audio_devices("ffmpeg")
-        if sys.platform.startswith("linux"):
-            target = os.environ.get("VTX_PULSE_MONITOR", "meet.monitor")
-            return any(n == target or n.endswith(".monitor") for n in names)
-        return any(any(k in n.lower() for k in _LOOPBACK_KEYS) for n in names)
-    except Exception:
-        return False
+
+def label(c: str) -> str:
+    return _LABELS.get(c, c)
 
 
 def status() -> dict:
@@ -222,19 +141,43 @@ def _set(c: str, state: str, message: str, ok=None, percent=None) -> None:
     _install[c] = {"state": state, "message": message, "ok": ok, "percent": percent}
 
 
-def _run(cmd: list[str], timeout: int) -> subprocess.CompletedProcess:
+def _run(cmd: list[str], timeout: int, env: dict | None = None):
     return subprocess.run(cmd, capture_output=True, text=True, errors="replace",
-                          timeout=timeout, creationflags=_NOWINDOW)
+                          timeout=timeout, env=env)
+
+
+def _apt_install(pkgs: list[str], timeout: int = 1800) -> bool:
+    """Install system packages with apt-get. Works as root (the usual case in a
+    container) or with passwordless sudo; otherwise reports failure so the caller
+    can print the exact command to run by hand."""
+    apt = shutil.which("apt-get")
+    if not apt:
+        return False
+    prefix: list[str] = []
+    if os.geteuid() != 0:
+        sudo = shutil.which("sudo")
+        if not sudo:
+            return False
+        prefix = [sudo, "-n"]
+    env = dict(os.environ, DEBIAN_FRONTEND="noninteractive")
+    try:
+        _run(prefix + [apt, "update"], timeout, env)
+        r = _run(prefix + [apt, "install", "-y", "--no-install-recommends"] + pkgs,
+                 timeout, env)
+        return r.returncode == 0
+    except Exception:
+        return False
 
 
 def _do_install(c: str) -> None:
     try:
         if c == "playwright":
-            _set(c, "running", "Устанавливаю playwright в .venv (pip)…")
-            r = _run([sys.executable, "-m", "pip", "install", "playwright"], 1800)
-            if r.returncode != 0:
-                _set(c, "error", "pip: " + (r.stderr or "")[-300:], ok=False)
-                return
+            if not _has("playwright"):
+                _set(c, "running", "Устанавливаю playwright (pip)…")
+                r = _run([sys.executable, "-m", "pip", "install", "playwright"], 1800)
+                if r.returncode != 0:
+                    _set(c, "error", "pip: " + (r.stderr or "")[-300:], ok=False)
+                    return
             _set(c, "running", "Скачиваю браузер Chromium (~150 МБ, один раз)…")
             r = _run([sys.executable, "-m", "playwright", "install", "chromium"], 1800)
             if r.returncode != 0:
@@ -243,7 +186,7 @@ def _do_install(c: str) -> None:
             _set(c, "done", "Готово — автоматическая запись встреч доступна.", ok=True)
 
         elif c == "diarization":
-            _set(c, "running", "Скачиваю torch + pyannote.audio в .venv (~2.5 ГБ, один раз)…")
+            _set(c, "running", "Скачиваю torch + pyannote.audio (~2.5 ГБ, один раз)…")
             r = _run([sys.executable, "-m", "pip", "install", "torch", "pyannote.audio"], 7200)
             if r.returncode != 0:
                 _set(c, "error", "pip: " + (r.stderr or "")[-300:], ok=False)
@@ -251,126 +194,56 @@ def _do_install(c: str) -> None:
             _set(c, "done", "Готово. Осталось задать токен HuggingFace для «кто говорил».", ok=True)
 
         elif c == "ffmpeg":
-            _set(c, "running", "Устанавливаю ffmpeg (пакетный менеджер системы)…")
-            _sys_pkg_install(["ffmpeg"], "Gyan.FFmpeg", ["ffmpeg"])
-            path = find_ffmpeg()
-            if not path:
-                _set(c, "error", "Не удалось установить ffmpeg автоматически. "
-                     "Поставьте его пакетным менеджером (apt install ffmpeg / brew install "
-                     "ffmpeg) или скачайте с ffmpeg.org и укажите путь в поле ниже.", ok=False)
+            _set(c, "running", "Устанавливаю ffmpeg (apt)…")
+            _apt_install(["ffmpeg"])
+            if not find_ffmpeg():
+                _set(c, "error", "Не удалось установить ffmpeg автоматически (нужен root "
+                     "или sudo без пароля). Выполните: sudo apt install ffmpeg", ok=False)
                 return
-            # Save the path so the running server uses it without a PATH refresh.
-            try:
-                from .automation import settings as auto_settings
-                cfg = auto_settings.load()
-                cfg["ffmpeg_path"] = path
-                auto_settings.save(cfg)
-            except Exception:
-                pass
-            _set(c, "done", f"Готово — ffmpeg установлен: {path}", ok=True)
+            _set(c, "done", f"Готово — ffmpeg: {find_ffmpeg()}", ok=True)
 
         elif c == "ocr":
             missing = [p for p, m in (("Pillow", "PIL"), ("pytesseract", "pytesseract"),
                                       ("av", "av")) if not _has(m)]
             if missing:
-                _set(c, "running", f"Устанавливаю {', '.join(missing)} в .venv (pip)…")
+                _set(c, "running", f"Устанавливаю {', '.join(missing)} (pip)…")
                 r = _run([sys.executable, "-m", "pip", "install", *missing], 1800)
                 if r.returncode != 0:
                     _set(c, "error", "pip: " + (r.stderr or "")[-300:], ok=False)
                     return
             if not find_tesseract():
                 _set(c, "running", "Устанавливаю движок Tesseract OCR (+ русский язык)…")
-                # Linux: apt · macOS: brew · Windows: winget. Russian data included.
-                _sys_pkg_install(["tesseract-ocr", "tesseract-ocr-rus"],
-                                 "UB-Mannheim.TesseractOCR", ["tesseract", "tesseract-lang"])
+                _apt_install(["tesseract-ocr", "tesseract-ocr-rus"])
             if not find_tesseract():
-                _set(c, "error", "Python-пакеты поставлены, но движок Tesseract не найден. "
-                     "Установите его: Linux — apt install tesseract-ocr tesseract-ocr-rus, "
-                     "macOS — brew install tesseract tesseract-lang, "
-                     "Windows — github.com/UB-Mannheim/tesseract (отметьте русский язык).",
-                     ok=False)
+                _set(c, "error", "Python-пакеты поставлены, но движок Tesseract не найден "
+                     "(нужен root или sudo без пароля). Выполните: "
+                     "sudo apt install tesseract-ocr tesseract-ocr-rus", ok=False)
                 return
             _set(c, "done", "Готово — распознавание текста/кода с экрана и имён "
                  "говорящих с видео доступно.", ok=True)
 
-        elif c == "audio_loopback" and sys.platform.startswith("linux"):
-            # Linux: the virtual "cable" is a PulseAudio null-sink, set up by the
-            # container automatically. No download — just ensure it exists.
+        elif c == "audio_loopback":
+            # The "virtual cable" is a PulseAudio null-sink; the container makes
+            # them at startup (docker/run.sh). Here we just create one if missing.
             _set(c, "running", "Проверяю виртуальное аудио (PulseAudio)…")
             if not _loopback_device_present():
-                try:
-                    subprocess.run(["pactl", "load-module", "module-null-sink",
-                                    "sink_name=meet",
-                                    "sink_properties=device.description=meet"],
-                                   capture_output=True, text=True)
-                    subprocess.run(["pactl", "set-default-sink", "meet"],
-                                   capture_output=True, text=True)
-                except FileNotFoundError:
-                    pass
+                pactl = shutil.which("pactl")
+                if pactl:
+                    try:
+                        _run([pactl, "load-module", "module-null-sink",
+                              "sink_name=meet0",
+                              "sink_properties=device.description=meet0"], 30)
+                        _run([pactl, "set-default-sink", "meet0"], 30)
+                    except Exception:
+                        pass
             if _loopback_device_present():
-                _set(c, "done", "Готово — виртуальное аудио настроено автоматически "
-                     "(PulseAudio null-sink «meet.monitor»). Отдельная установка на Linux "
-                     "не нужна.", ok=True)
+                _set(c, "done", "Готово — виртуальное аудио настроено "
+                     "(PulseAudio null-sink «meet0.monitor»).", ok=True)
             else:
-                _set(c, "error", "PulseAudio-монитор не найден. Убедитесь, что контейнер "
-                     "запущен с VTX_RECORDER_ENABLED=1 (тогда null-sink создаётся при старте).",
+                _set(c, "error", "PulseAudio-монитор не найден. Запустите контейнер с "
+                     "VTX_RECORDER_ENABLED=1 — тогда null-sink создаётся при старте.",
                      ok=False)
-            return
 
-        elif c == "audio_loopback":
-            import tempfile
-            import urllib.request
-            import zipfile
-            _set(c, "running", "Скачивание VB-CABLE с vb-audio.com…", percent=0)
-            tmp = tempfile.mkdtemp(prefix="vbcable_")
-            zip_path = os.path.join(tmp, "vbcable.zip")
-
-            def _hook(block, bsize, total):
-                if total and total > 0:
-                    pct = min(int(block * bsize * 100 / total), 100)
-                    _set(c, "running", f"Скачивание VB-CABLE… {pct}%", percent=pct)
-
-            urllib.request.urlretrieve(
-                "https://download.vb-audio.com/Download_CABLE/VBCABLE_Driver_Pack43.zip",
-                zip_path, reporthook=_hook)
-            with zipfile.ZipFile(zip_path) as z:
-                z.extractall(tmp)
-            setup = os.path.join(tmp, "VBCABLE_Setup_x64.exe")
-            if not os.path.exists(setup):
-                _set(c, "error", "Не нашёл установщик VB-CABLE в архиве. "
-                     "Установите вручную с vb-audio.com/Cable.", ok=False)
-                return
-            _set(c, "running", "Запускаю установщик драйвера ОТ ИМЕНИ АДМИНИСТРАТОРА — "
-                 "подтвердите запрос Windows (UAC), затем нажмите Install в окне VB-CABLE…")
-            # The VB-CABLE driver writes to the registry → needs admin. ShellExecute
-            # with the "runas" verb triggers the UAC elevation prompt.
-            elevated = False
-            try:
-                import ctypes
-                rc = ctypes.windll.shell32.ShellExecuteW(None, "runas", setup, "-i",
-                                                         os.path.dirname(setup), 1)
-                elevated = int(rc) > 32  # >32 = launched (user accepted UAC)
-            except Exception:
-                elevated = False
-            if not elevated:
-                _set(c, "error", "Нужны права администратора (вы отклонили запрос UAC?). "
-                     "Откройте папку " + tmp + " и запустите VBCABLE_Setup_x64.exe правой "
-                     "кнопкой → «Запуск от имени администратора» → Install.", ok=False)
-                return
-            # Wait a bit for the driver to register (or a reboot to be needed).
-            for _ in range(40):
-                if _loopback_device_present():
-                    break
-                time.sleep(1)
-            if _loopback_device_present():
-                _set(c, "done", "Готово — VB-CABLE установлен. Дальше: сделайте «CABLE Input» "
-                     "устройством вывода по умолчанию (Windows → Звук), и выберите "
-                     "«CABLE Output» в списке аудио-устройств здесь.", ok=True)
-            else:
-                _set(c, "done", "Установщик VB-CABLE запущен с правами админа. Если устройство "
-                     "не появилось — закончите установку в его окне (Install) и, скорее всего, "
-                     "ПЕРЕЗАГРУЗИТЕ компьютер. После: «CABLE Input» — устройство вывода по "
-                     "умолчанию, «CABLE Output» — выберите здесь.", ok=True)
     except subprocess.TimeoutExpired:
         _set(c, "error", "Превышено время установки. Попробуйте ещё раз.", ok=False)
     except Exception as e:  # noqa: BLE001

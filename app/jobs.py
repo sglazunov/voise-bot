@@ -214,7 +214,7 @@ class JobStore:
         """Per-engine Word document, so docs from different engines coexist.
 
         The provider can be like "ollama:qwen2.5:7b" — sanitise it so the
-        colon/slash don't produce an invalid Windows filename.
+        colon/slash don't produce an invalid filename.
         """
         safe = re.sub(r"[^A-Za-z0-9._-]", "-", provider or "engine")
         return config.RESULT_DIR / f"{job_id}__{safe}.docx"

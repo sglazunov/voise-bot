@@ -50,7 +50,7 @@ def readiness() -> dict:
                        "hint": "Получите токен на huggingface.co/settings/tokens, "
                                "примите условия моделей pyannote/speaker-diarization-3.1 "
                                "и pyannote/segmentation-3.0, затем задайте HF_TOKEN "
-                               "в run.bat и перезапустите."})
+                               "в .env и перезапустите."})
 
     return {"available": all(c["ok"] for c in checks), "checks": checks}
 

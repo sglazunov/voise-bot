@@ -41,14 +41,12 @@ Weeek task (ссылка + время) → scheduler ждёт T → recorder п�
 clouds.upload → jobs.submit(mp4, analyze=True) → docx-протокол →
 (опц.) комментарий со ссылкой в задачу Weeek.
 
-## Настройка рекордера на Windows (фаза 3)
-1. `pip install playwright` затем `playwright install chromium`.
+## Настройка рекордера на Linux (фаза 3)
+1. `pip install playwright` затем `playwright install chromium` (в образе уже есть).
 2. ffmpeg в PATH (или укажите `ffmpeg_path`). Проверка: `ffmpeg -version`.
-3. Звук встречи нужно отдать в loopback-устройство, которое пишет ffmpeg:
-   - вариант А: включить «Стерео микшер» (Stereo Mix) в устройствах записи;
-   - вариант Б: поставить VB-CABLE и сделать его устройством вывода по умолчанию.
-   Затем выбрать это устройство в настройке `audio_device`
-   (список — `GET /api/automation/recorder/audio-devices`).
+3. Звук встречи идёт в PulseAudio null-sink (`meet0…meetN`), а ffmpeg пишет его
+   монитор (`meet0.monitor`). Sink'и создаются при старте контейнера; выбирать
+   устройство вручную не нужно (список — `GET /api/automation/recorder/audio-devices`).
 4. Режим входа `auth_mode`: `guest` (по ссылке) или `profile`. Для `profile`
    один раз войдите в Яндекс: `POST /api/automation/recorder/login`.
 5. Проверка: `POST /api/automation/recorder/test {url, seconds}` — бот зайдёт и
@@ -90,8 +88,8 @@ clouds.upload → jobs.submit(mp4, analyze=True) → docx-протокол →
 - **Выбор встреч**: режим по умолчанию (`rec_default_on`) + точечные решения
   (`rec_decisions`), плюс фильтры по словам/времени/дням; ручной выбор главнее фильтров.
 - **Помощники в UI**: «Проверить звук» (volumedetect), «Получить токен» Я.Диска
-  (implicit-flow), «Мои проекты»/«Сбросить токен» Weeek, установка зависимостей и
-  VB-CABLE из интерфейса.
+  (implicit-flow), «Мои проекты»/«Сбросить токен» Weeek, установка зависимостей
+  из интерфейса (фолбэк к авто-установке при старте).
 - **Устойчивость к сети**: таймаут на шаге после загрузки (ссылка/комментарий) больше
   не валит задачу — запись считается успешной.
 - Новые эндпоинты: `/recorder/audio-test`, `/recorder/login-status`,

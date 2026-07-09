@@ -19,17 +19,14 @@ VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v"}
 
 
 def _point_pytesseract_at_binary() -> None:
-    """If Tesseract isn't on PATH but was installed (e.g. via winget from the
-    UI), point pytesseract at the discovered binary so OCR works without a
-    process restart (the running server's PATH won't have picked it up)."""
+    """If Tesseract was installed after the server started, its PATH may be stale.
+    Re-resolve the binary and point pytesseract at it, so OCR starts working
+    without a restart."""
     try:
         import shutil
-        if shutil.which("tesseract"):
-            return
-        import pytesseract
-        from .deps_setup import find_tesseract
-        exe = find_tesseract()
+        exe = shutil.which("tesseract")
         if exe:
+            import pytesseract
             pytesseract.pytesseract.tesseract_cmd = exe
     except Exception:
         pass
@@ -61,8 +58,7 @@ def readiness() -> dict:
     except Exception:
         checks.append({"name": "Программа Tesseract", "ok": False,
                        "hint": "Установите Tesseract: "
-                               "winget install UB-Mannheim.TesseractOCR "
-                               "(при установке отметьте русский язык)."})
+                               "sudo apt install tesseract-ocr tesseract-ocr-rus"})
 
     if tess_ok:
         try:
@@ -72,9 +68,8 @@ def readiness() -> dict:
                 checks.append({"name": "Русский язык OCR (rus)", "ok": True, "hint": ""})
             else:
                 checks.append({"name": "Русский язык OCR (rus)", "ok": False,
-                               "hint": "Доустановите русские данные Tesseract "
-                                       "(rus.traineddata) — в инсталляторе "
-                                       "UB-Mannheim отметьте Russian."})
+                               "hint": "Доустановите русские данные Tesseract: "
+                                       "sudo apt install tesseract-ocr-rus"})
         except Exception:
             checks.append({"name": "Русский язык OCR (rus)", "ok": False,
                            "hint": "Не удалось проверить языки Tesseract."})
