@@ -184,9 +184,16 @@ def _start_scheduler() -> None:
         scheduler.start()
     except Exception:
         pass
-    # Pre-download ALL recognition models in the background, so the user never
-    # has to fetch anything manually. Disable with VTX_PRELOAD_MODELS=0.
-    if os.getenv("VTX_PRELOAD_MODELS", "1") == "1":
+    # First-run auto-setup: install whatever this machine is missing (OCR engine,
+    # ffmpeg, Chromium for the bot) and pre-download all speech models — in the
+    # background, no clicks. Disable with VTX_AUTO_SETUP=0.
+    if os.getenv("VTX_AUTO_SETUP", "1") == "1":
+        try:
+            from . import autosetup
+            autosetup.ensure_all()
+        except Exception:
+            pass
+    elif os.getenv("VTX_PRELOAD_MODELS", "1") == "1":
         try:
             from . import whisper_setup
             whisper_setup.preload_all()
@@ -597,6 +604,14 @@ def ollama_install_cancel():
 
 
 # ---- Optional dependencies (install into the app's venv from the UI) -------
+@app.get("/api/setup/auto")
+def autosetup_status():
+    """Progress of the automatic first-run setup (OCR engine, ffmpeg, bot browser,
+    speech models) + per-component readiness."""
+    from . import autosetup
+    return autosetup.status()
+
+
 @app.get("/api/setup/deps")
 def deps_status():
     """Readiness + install progress of optional deps (playwright/diariz/ffmpeg)."""

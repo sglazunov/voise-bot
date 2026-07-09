@@ -113,6 +113,54 @@ def find_tesseract() -> str | None:
     return None
 
 
+def _sys_pkg_install(linux_pkgs: list[str], winget_id: str | None,
+                     brew_pkgs: list[str] | None, timeout: int = 1800) -> bool:
+    """Install a SYSTEM package with whatever package manager this machine has:
+    apt-get (Linux, needs root or passwordless sudo), Homebrew (macOS) or winget
+    (Windows). Returns False when no usable manager is available — the caller then
+    reports what to install by hand."""
+    if sys.platform.startswith("linux"):
+        apt = shutil.which("apt-get")
+        if not apt:
+            return False
+        prefix: list[str] = []
+        if os.geteuid() != 0:                    # not root: try passwordless sudo
+            sudo = shutil.which("sudo")
+            if not sudo:
+                return False
+            prefix = [sudo, "-n"]
+        env_run = dict(os.environ, DEBIAN_FRONTEND="noninteractive")
+        try:
+            subprocess.run(prefix + [apt, "update"], capture_output=True,
+                           text=True, timeout=timeout, env=env_run)
+            r = subprocess.run(prefix + [apt, "install", "-y", "--no-install-recommends"]
+                               + linux_pkgs, capture_output=True, text=True,
+                               timeout=timeout, env=env_run)
+            return r.returncode == 0
+        except Exception:
+            return False
+    if sys.platform == "darwin":
+        brew = shutil.which("brew")
+        if not brew or not brew_pkgs:
+            return False
+        return _run([brew, "install"] + brew_pkgs, timeout).returncode == 0
+    winget = shutil.which("winget")
+    if not winget or not winget_id:
+        return False
+    _run([winget, "install", "--id", winget_id, "-e", "--silent",
+          "--accept-package-agreements", "--accept-source-agreements"], timeout)
+    return True
+
+
+def install_state(c: str) -> dict:
+    """Current install progress of one component (public view of _install)."""
+    return dict(_install.get(c, {"state": "idle", "message": "", "ok": None}))
+
+
+def label(c: str) -> str:
+    return _LABELS.get(c, c)
+
+
 def component_ready(c: str) -> bool:
     if c == "playwright":
         return _has("playwright") and _chromium_installed()
@@ -121,7 +169,10 @@ def component_ready(c: str) -> bool:
     if c == "ffmpeg":
         return find_ffmpeg() is not None
     if c == "ocr":
-        return _has("PIL") and _has("pytesseract") and find_tesseract() is not None
+        # `av` decodes the video frames we OCR (screen text) and read speaker
+        # names from, so it's part of "OCR works" just like Pillow/Tesseract.
+        return (_has("PIL") and _has("pytesseract") and _has("av")
+                and find_tesseract() is not None)
     if c == "audio_loopback":
         return _loopback_device_present()
     return False
@@ -200,18 +251,13 @@ def _do_install(c: str) -> None:
             _set(c, "done", "Готово. Осталось задать токен HuggingFace для «кто говорил».", ok=True)
 
         elif c == "ffmpeg":
-            winget = shutil.which("winget")
-            if not winget:
-                _set(c, "error", "winget не найден. Скачайте ffmpeg с ffmpeg.org "
-                     "и укажите путь в поле ниже.", ok=False)
-                return
-            _set(c, "running", "Устанавливаю ffmpeg (winget)…")
-            _run([winget, "install", "--id", "Gyan.FFmpeg", "-e", "--silent",
-                  "--accept-package-agreements", "--accept-source-agreements"], 1800)
+            _set(c, "running", "Устанавливаю ffmpeg (пакетный менеджер системы)…")
+            _sys_pkg_install(["ffmpeg"], "Gyan.FFmpeg", ["ffmpeg"])
             path = find_ffmpeg()
             if not path:
                 _set(c, "error", "Не удалось установить ffmpeg автоматически. "
-                     "Скачайте с ffmpeg.org и укажите путь в поле ниже.", ok=False)
+                     "Поставьте его пакетным менеджером (apt install ffmpeg / brew install "
+                     "ffmpeg) или скачайте с ffmpeg.org и укажите путь в поле ниже.", ok=False)
                 return
             # Save the path so the running server uses it without a PATH refresh.
             try:
@@ -224,25 +270,28 @@ def _do_install(c: str) -> None:
             _set(c, "done", f"Готово — ffmpeg установлен: {path}", ok=True)
 
         elif c == "ocr":
-            _set(c, "running", "Устанавливаю Pillow + pytesseract в .venv (pip)…")
-            r = _run([sys.executable, "-m", "pip", "install", "Pillow", "pytesseract"], 1800)
-            if r.returncode != 0:
-                _set(c, "error", "pip: " + (r.stderr or "")[-300:], ok=False)
-                return
+            missing = [p for p, m in (("Pillow", "PIL"), ("pytesseract", "pytesseract"),
+                                      ("av", "av")) if not _has(m)]
+            if missing:
+                _set(c, "running", f"Устанавливаю {', '.join(missing)} в .venv (pip)…")
+                r = _run([sys.executable, "-m", "pip", "install", *missing], 1800)
+                if r.returncode != 0:
+                    _set(c, "error", "pip: " + (r.stderr or "")[-300:], ok=False)
+                    return
             if not find_tesseract():
-                winget = shutil.which("winget")
-                if winget:
-                    _set(c, "running", "Устанавливаю движок Tesseract OCR (winget)…")
-                    _run([winget, "install", "--id", "UB-Mannheim.TesseractOCR", "-e",
-                          "--silent", "--accept-package-agreements",
-                          "--accept-source-agreements"], 1800)
+                _set(c, "running", "Устанавливаю движок Tesseract OCR (+ русский язык)…")
+                # Linux: apt · macOS: brew · Windows: winget. Russian data included.
+                _sys_pkg_install(["tesseract-ocr", "tesseract-ocr-rus"],
+                                 "UB-Mannheim.TesseractOCR", ["tesseract", "tesseract-lang"])
             if not find_tesseract():
-                _set(c, "error", "Pillow/pytesseract поставлены, но движок Tesseract не найден. "
-                     "Установите Tesseract OCR (github.com/UB-Mannheim/tesseract) с русским языком.",
+                _set(c, "error", "Python-пакеты поставлены, но движок Tesseract не найден. "
+                     "Установите его: Linux — apt install tesseract-ocr tesseract-ocr-rus, "
+                     "macOS — brew install tesseract tesseract-lang, "
+                     "Windows — github.com/UB-Mannheim/tesseract (отметьте русский язык).",
                      ok=False)
                 return
-            _set(c, "done", "Готово — распознавание текста с экрана доступно "
-                 "(для русского нужен языковой пакет rus в Tesseract).", ok=True)
+            _set(c, "done", "Готово — распознавание текста/кода с экрана и имён "
+                 "говорящих с видео доступно.", ok=True)
 
         elif c == "audio_loopback" and sys.platform.startswith("linux"):
             # Linux: the virtual "cable" is a PulseAudio null-sink, set up by the
