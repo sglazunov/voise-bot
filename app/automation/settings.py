@@ -95,6 +95,7 @@ _DEFAULTS: dict[str, Any] = {
     "do_transcribe": True,            # run speech recognition on the recording
     "do_protocol": True,              # build the Word protocol (needs do_transcribe)
     "ocr_screen": True,               # recognise on-screen text (slides/code) too
+    "identify_speakers": True,        # read WHO spoke from the video (active-tile name)
     "analyze_provider": "auto",       # which LLM builds the protocol
     "post_back_to_weeek": True,       # attach protocol link as a task comment
     # --- write the recording link into a Weeek custom field of the task ---

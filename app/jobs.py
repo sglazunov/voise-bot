@@ -62,6 +62,7 @@ class Job:
     analysis_instructions: str = ""  # user's custom prompt additions
     analysis_prompt: str = ""        # expert mode: full prompt override
     capture_screen: bool = False     # OCR on-screen text from the video
+    identify_speakers: bool = False  # read WHO spoke from the video (active-tile name)
     delete_audio_when_done: bool = False  # delete the source media after processing
                                           # (recordings already sent to the UI's cloud)
     owner: str = ""                  # the login that owns this job (isolation)
@@ -74,6 +75,7 @@ class Job:
     duration: Optional[float] = None
     speakers: Optional[int] = None
     diarization_error: Optional[str] = None  # why "who spoke" didn't run, if asked
+    speaker_error: Optional[str] = None      # why video speaker-ID didn't run, if asked
     screen_error: Optional[str] = None       # why screen OCR didn't run, if asked
     screen_segments: int = 0                 # number of on-screen text snapshots
     analysis: Optional[dict] = None        # structured analysis result (latest)
@@ -139,7 +141,8 @@ class JobStore:
                initial_prompt: str = "", glossary: str = "",
                analyze: bool = False, provider: str = "auto",
                analysis_instructions: str = "", analysis_prompt: str = "",
-               capture_screen: bool = False, model: str = "",
+               capture_screen: bool = False, identify_speakers: bool = False,
+               model: str = "",
                delete_audio_when_done: bool = False, owner: str = "") -> Job:
         job = Job(
             id=uuid.uuid4().hex[:12],
@@ -155,6 +158,7 @@ class JobStore:
             analysis_instructions=analysis_instructions,
             analysis_prompt=analysis_prompt,
             capture_screen=capture_screen,
+            identify_speakers=identify_speakers,
             delete_audio_when_done=delete_audio_when_done,
             owner=owner,
         )
@@ -420,6 +424,28 @@ class JobStore:
                     diar_err = str(e)
                     meta["diarization_error"] = diar_err
 
+            # Read WHO spoke straight from the video (active-speaker tile + name).
+            # For Telemost recordings this is far more reliable than guessing from
+            # text, and the real names override diarization's "Спикер N".
+            speaker_err = None
+            if job.identify_speakers:
+                try:
+                    from . import speaker_id
+                    if speaker_id.is_video(job.audio_path):
+                        segments = speaker_id.identify_speakers(job.audio_path, segments)
+                        named = {s.speaker for s in segments if s.speaker}
+                        if named:
+                            n_speakers = len(named)
+                        else:
+                            speaker_err = ("Не удалось распознать имена говорящих с "
+                                           "видео (не найдена подсветка активного "
+                                           "участника). Проверьте запись/настройки.")
+                    else:
+                        speaker_err = "Файл не является видео — некому распознавать говорящих."
+                except Exception as e:  # best-effort; never break transcription
+                    speaker_err = str(e)
+                    meta["speaker_id_error"] = speaker_err
+
             # Write all output formats to disk.
             txt_content = formats.to_txt(segments)
             (self.result_path(job.id, "txt")).write_text(txt_content, encoding="utf-8")
@@ -498,6 +524,7 @@ class JobStore:
                 duration=meta.get("duration"),
                 speakers=n_speakers,
                 diarization_error=diar_err,
+                speaker_error=speaker_err,
                 screen_error=screen_err,
                 screen_segments=screen_segs,
                 analysis=analysis_result,

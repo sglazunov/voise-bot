@@ -253,6 +253,7 @@
     <div class="chk"><input id="do_transcribe" type="checkbox" onchange="stageDeps()"> Распознать речь (транскрипция)</div>
     <div class="chk"><input id="do_protocol" type="checkbox"> Собрать протокол встречи (Word)</div>
     <div class="chk"><input id="ocr_screen" type="checkbox"> Распознать текст с экрана (слайды/код на видео)</div>
+    <div class="chk"><input id="identify_speakers" type="checkbox"> Определять говорящего по видео (имя из кадра — точные ответственные)</div>
     <div class="note">Запись и выгрузка в облако делаются всегда. Если выключить распознавание —
       будет только видеофайл в облаке. Протокол и текст с экрана требуют включённого распознавания.</div>
 
@@ -391,7 +392,7 @@ async function loadAll(){
   setChk("upload_protocol", s.upload_protocol); setChk("weeek_set_protocol_field", s.weeek_set_protocol_field); setVal("weeek_protocol_field", s.weeek_protocol_field);
   setVal("protocol_folder", s.protocol_folder);
   setChk("do_transcribe", s.do_transcribe); setChk("do_protocol", s.do_protocol);
-  setChk("ocr_screen", s.ocr_screen); stageDeps();
+  setChk("ocr_screen", s.ocr_screen); setChk("identify_speakers", s.identify_speakers); stageDeps();
   // record filter
   setVal("rec_time_from", s.rec_time_from); setVal("rec_time_to", s.rec_time_to);
   setVal("rec_include", s.rec_include); setVal("rec_exclude", s.rec_exclude);
@@ -600,7 +601,7 @@ async function testRecord(){
 function stageDeps(){
   // Protocol and screen-OCR only make sense when transcription is on.
   const t=$("do_transcribe").checked;
-  for(const id of ["do_protocol","ocr_screen"]){ $(id).disabled=!t; if(!t) $(id).checked=false; }
+  for(const id of ["do_protocol","ocr_screen","identify_speakers"]){ $(id).disabled=!t; if(!t) $(id).checked=false; }
 }
 async function saveScheduler(){
   const b={poll_interval_sec:+$("poll_interval_sec").value, lookahead_min:+$("lookahead_min").value,
@@ -609,7 +610,7 @@ async function saveScheduler(){
     upload_protocol:$("upload_protocol").checked, weeek_set_protocol_field:$("weeek_set_protocol_field").checked, weeek_protocol_field:$("weeek_protocol_field").value||"Протокол встречи",
     protocol_folder:$("protocol_folder").value||"disk:/Телемост-протоколы",
     do_transcribe:$("do_transcribe").checked, do_protocol:$("do_protocol").checked,
-    ocr_screen:$("ocr_screen").checked,
+    ocr_screen:$("ocr_screen").checked, identify_speakers:$("identify_speakers").checked,
     rec_time_from:$("rec_time_from").value||"", rec_time_to:$("rec_time_to").value||"",
     rec_include:$("rec_include").value||"", rec_exclude:$("rec_exclude").value||"",
     rec_default_on:$("rec_default_on").value==="1",

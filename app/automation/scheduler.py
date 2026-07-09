@@ -312,6 +312,9 @@ class Scheduler:
                     analyze=do_protocol,
                     provider=cfg.get("analyze_provider") or "auto",
                     capture_screen=bool(cfg.get("ocr_screen", True)),
+                    # Telemost recordings always show the active speaker (green
+                    # tile) + names, so read WHO spoke straight from the video.
+                    identify_speakers=bool(cfg.get("identify_speakers", True)),
                     delete_audio_when_done=delivered_elsewhere,
                     owner=user)
                 st.job_id = job.id

@@ -232,6 +232,7 @@ async def create_job(
     instructions: str = Form(""),
     custom_prompt: str = Form(""),
     capture_screen: bool = Form(False),
+    identify_speakers: bool = Form(False),
     user: str = Depends(current_user),
 ):
     ext = Path(file.filename or "").suffix.lower()
@@ -258,7 +259,8 @@ async def create_job(
                        analyze=want_analyze, provider=provider,
                        analysis_instructions=instructions.strip(),
                        analysis_prompt=custom_prompt.strip(),
-                       capture_screen=capture_screen, model=model_sel,
+                       capture_screen=capture_screen,
+                       identify_speakers=identify_speakers, model=model_sel,
                        owner=user)
     return JSONResponse({"job_id": job.id, **job.to_public()}, status_code=201)
 
@@ -485,6 +487,13 @@ def diarization_token(body: HfToken):
 def screen_status():
     """What's needed for on-screen text capture (OCR) — for the UI toggle hints."""
     from .screen_ocr import readiness
+    return readiness()
+
+
+@app.get("/api/speakers/status")
+def speakers_status():
+    """What's needed to read WHO spoke from the video — for the UI toggle hints."""
+    from .speaker_id import readiness
     return readiness()
 
 

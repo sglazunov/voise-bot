@@ -396,6 +396,10 @@
         <input type="checkbox" id="capture_screen" onchange="onScreenToggle()">
         Фиксировать показ экрана (видео, OCR)
       </label>
+      <label class="chk">
+        <input type="checkbox" id="identify_speakers" onchange="onSpeakersToggle()">
+        Определять говорящего по видео (имя из кадра)
+      </label>
       <button class="go" id="go" disabled>Распознать</button>
     </div>
     <div id="modelHint" class="muted" style="margin-top:6px;font-size:12px;line-height:1.5"></div>
@@ -404,6 +408,9 @@
          border:1px solid #4a3200;border-radius:10px;padding:10px 12px;
          font-size:12px;color:var(--muted);line-height:1.5"></div>
     <div id="screenHints" class="hidden" style="margin-top:8px;background:#1c1208;
+         border:1px solid #4a3200;border-radius:10px;padding:10px 12px;
+         font-size:12px;color:var(--muted);line-height:1.5"></div>
+    <div id="speakerHints" class="hidden" style="margin-top:8px;background:#1c1208;
          border:1px solid #4a3200;border-radius:10px;padding:10px 12px;
          font-size:12px;color:var(--muted);line-height:1.5"></div>
 
@@ -665,6 +672,30 @@ async function onScreenToggle(){
     }
   }catch{box.innerHTML="Не удалось проверить готовность распознавания экрана.";}
 }
+async function onSpeakersToggle(){
+  const box=$("speakerHints");
+  if(!$("identify_speakers").checked){box.classList.add("hidden");return;}
+  box.classList.remove("hidden");
+  box.innerHTML="Проверяю готовность распознавания говорящих…";
+  try{
+    const s=await(await fetch("/api/speakers/status")).json();
+    if(s.available){
+      box.innerHTML="✓ Готово — имя говорящего берётся прямо из кадра (подсветка "+
+        "активного участника в Телемосте), поэтому реплики и ответственные "+
+        "привязываются к людям точно. Работает только для видео со встречей; "+
+        "на длинном видео занимает время.";
+    }else{
+      const items=(s.checks||[]).filter(c=>!c.ok)
+        .map(c=>`<li><b>${esc(c.name)}</b>: ${esc(c.hint)}</li>`).join("");
+      box.innerHTML="⚠ Для распознавания говорящих по видео не хватает:<ul style='margin:6px 0 0;padding-left:18px'>"+
+        items+"</ul>"+
+        `<div style="margin-top:8px"><button class="ghost" type="button" onclick="installOcr()">⤓ Установить OCR (Pillow + pytesseract + Tesseract)</button>
+          <span class="muted" id="ocrInstallMsg"></span></div>`+
+        "<div style='margin-top:6px'>Можно оставить галочку: распознавание речи "+
+        "всё равно пройдёт, просто без имён говорящих.</div>";
+    }
+  }catch{box.innerHTML="Не удалось проверить готовность распознавания говорящих.";}
+}
 let _ocrPoll=null;
 async function installOcr(){
   try{ await fetch("/api/setup/deps/ocr/install",{method:"POST"}); }catch{}
@@ -860,6 +891,7 @@ $("go").onclick=()=>{
   fd.append("model",($("model")&&$("model").value)||"");
   fd.append("diarize",$("diarize").checked?"true":"false");
   fd.append("capture_screen",($("capture_screen")&&$("capture_screen").checked)?"true":"false");
+  fd.append("identify_speakers",($("identify_speakers")&&$("identify_speakers").checked)?"true":"false");
   fd.append("analyze",curMode==='protocol'?"true":"false");
   fd.append("provider",($("provider")&&$("provider").value)||"auto");
   fd.append("hint",$("hint").value);
