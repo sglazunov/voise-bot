@@ -99,10 +99,41 @@ async def _auth_gate(request: Request, call_next):
     request.state.user = user
     path = request.url.path
     if user or path in _PUBLIC_PATHS:
-        return await call_next(request)
-    if path.startswith("/api/"):
-        return JSONResponse({"detail": "Требуется вход."}, status_code=401)
-    return RedirectResponse("/login", status_code=303)
+        resp = await call_next(request)
+    elif path.startswith("/api/"):
+        resp = JSONResponse({"detail": "Требуется вход."}, status_code=401)
+    else:
+        resp = RedirectResponse("/login", status_code=303)
+    # Baseline security headers on every response.
+    resp.headers.setdefault("X-Frame-Options", "DENY")           # clickjacking
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("Referrer-Policy", "same-origin")
+    if _SECURE_COOKIE:  # only meaningful once TLS is in front
+        resp.headers.setdefault("Strict-Transport-Security",
+                                "max-age=31536000; includeSubDomains")
+    return resp
+
+
+def _client_ip(request: Request) -> str:
+    """Client IP for rate limiting; honours the reverse proxy's X-Forwarded-For
+    only when explicitly trusted (VTX_TRUST_PROXY=1, set alongside the proxy)."""
+    if os.getenv("VTX_TRUST_PROXY", "0") == "1":
+        xff = request.headers.get("x-forwarded-for", "")
+        if xff:
+            return xff.split(",")[0].strip()
+    return request.client.host if request.client else "?"
+
+
+def require_admin(request: Request) -> str:
+    """Dependency for endpoints that change GLOBAL server state (installs,
+    server-wide tokens): only the administrator (first user) may call them."""
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(401, "Требуется вход.")
+    if not security.is_admin(user):
+        raise HTTPException(403, "Только администратор (первый пользователь) "
+                                 "может менять серверные настройки.")
+    return user
 
 
 def current_user(request: Request) -> str:
@@ -142,9 +173,14 @@ def register_page(request: Request):
 
 
 @app.post("/api/auth/register")
-def auth_register(body: Credentials):
+def auth_register(body: Credentials, request: Request):
+    ip = _client_ip(request)
+    wait = security.throttle_check(f"reg:{ip}")
+    if wait:
+        raise HTTPException(429, f"Слишком много попыток. Подождите {wait} с.")
     res = security.create_user(body.username, body.password, body.code)
     if not res.get("ok"):
+        security.throttle_fail(f"reg:{ip}")  # wrong/guessed registration codes
         raise HTTPException(400, res.get("error") or "Не удалось зарегистрироваться.")
     token = security.create_session(res["username"])
     resp = JSONResponse({"ok": True, "username": res["username"]})
@@ -153,11 +189,19 @@ def auth_register(body: Credentials):
 
 
 @app.post("/api/auth/login")
-def auth_login(body: Credentials):
+def auth_login(body: Credentials, request: Request):
+    ip = _client_ip(request)
+    uname = security.normalize_username(body.username)
+    keys = (f"login:{ip}", f"login:{ip}:{uname}")
+    wait = security.throttle_check(*keys)
+    if wait:
+        raise HTTPException(429, f"Слишком много неудачных попыток. Подождите {wait} с.")
     if not security.verify_user(body.username, body.password):
+        security.throttle_fail(*keys)
         raise HTTPException(401, "Неверный логин или пароль.")
+    security.throttle_clear(*keys)
     token = security.create_session(body.username)
-    resp = JSONResponse({"ok": True, "username": security.normalize_username(body.username)})
+    resp = JSONResponse({"ok": True, "username": uname})
     _set_session_cookie(resp, token)
     return resp
 
@@ -256,7 +300,10 @@ async def create_job(
     if ext not in ALLOWED_EXT:
         raise HTTPException(400, f"Неподдерживаемый формат: {ext or '?'}")
 
-    dest = config.UPLOAD_DIR / f"{_safe_stem(file.filename)}{ext}"
+    # Unique per upload: two users uploading files with the same name must not
+    # overwrite each other's source (job.filename keeps the original for display).
+    import uuid as _uuid
+    dest = config.UPLOAD_DIR / f"{_uuid.uuid4().hex[:10]}__{_safe_stem(file.filename)}{ext}"
     size = 0
     limit = config.MAX_UPLOAD_MB * 1024 * 1024
     with dest.open("wb") as out:
@@ -540,7 +587,7 @@ class HfToken(BaseModel):
 
 
 @app.post("/api/diarization/token")
-def diarization_token(body: HfToken):
+def diarization_token(body: HfToken, user: str = Depends(require_admin)):
     """Set the HuggingFace token (for diarization) at runtime; report readiness."""
     from .diarize import readiness
     token = body.token.strip()
@@ -590,14 +637,14 @@ def ollama_status():
 
 
 @app.post("/api/ollama/install")
-def ollama_install():
+def ollama_install(user: str = Depends(require_admin)):
     """Download & install Ollama + the protocol model on demand (background)."""
     from . import ollama_setup
     return ollama_setup.install()
 
 
 @app.post("/api/ollama/install/cancel")
-def ollama_install_cancel():
+def ollama_install_cancel(user: str = Depends(require_admin)):
     """Request cancellation of an in-progress Ollama install."""
     from . import ollama_setup
     return ollama_setup.cancel()
@@ -620,7 +667,7 @@ def deps_status():
 
 
 @app.post("/api/setup/deps/{component}/install")
-def deps_install(component: str):
+def deps_install(component: str, user: str = Depends(require_admin)):
     """Install one optional dependency into the app's venv (background)."""
     from . import deps_setup
     if component not in deps_setup.COMPONENTS:

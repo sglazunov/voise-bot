@@ -451,7 +451,7 @@ async function loadMeetings(silent){
       const dec = m.decision===true?"on":m.decision===false?"off":"default";
       const sel=v=>dec===v?" selected":"";
       return `<div class="mrow"><div><div class="t">${esc(m.title)}</div>
-        <div class="s">${m.start?fmt(m.start):"без времени"} · <a href="${m.url}" target="_blank">ссылка</a></div></div>
+        <div class="s">${m.start?fmt(m.start):"без времени"} · <a href="${esc(m.url)}" target="_blank">ссылка</a></div></div>
         <div class="row" style="gap:6px">
           <select onchange="setDecision('${esc(String(m.task_id))}', this.value)" title="Записывать эту встречу?">
             <option value="default"${sel("default")}>по умолчанию</option>
@@ -663,9 +663,9 @@ function meetingRow(m){
   const rf = m.record_flag===true?` · <span class="rf-on">Weeek: запись вкл</span>`
            : m.record_flag===false?` · <span class="rf-off">Weeek: запись выкл</span>`:"";
   return `<div class="mrow"><div><div class="t">${esc(m.title)} <span class="badge b-${m.state}">${esc(MSTATE[m.state]||m.state)}</span></div>
-    <div class="s">${m.start?fmt(m.start):"без времени"}${rf}${m.detail?" · "+esc(m.detail):""}${m.cloud_url?` · <a href="${m.cloud_url}" target="_blank">запись</a>`:""}</div></div>
-    ${m.state==="scheduled"?`<button class="ghost" onclick="runNow('${m.task_id}')">Сейчас</button>`:
-      m.state==="recording"?`<button class="ghost danger" onclick="stopOne('${m.task_id}')">■ Стоп</button>`:""}</div>`;
+    <div class="s">${m.start?fmt(m.start):"без времени"}${rf}${m.detail?" · "+esc(m.detail):""}${m.cloud_url?` · <a href="${esc(m.cloud_url)}" target="_blank">запись</a>`:""}</div></div>
+    ${m.state==="scheduled"?`<button class="ghost" onclick="runNow('${esc(String(m.task_id))}')">Сейчас</button>`:
+      m.state==="recording"?`<button class="ghost danger" onclick="stopOne('${esc(String(m.task_id))}')">■ Стоп</button>`:""}</div>`;
 }
 async function refreshStatus(){
   try{ const s=await api("GET","/api/automation/scheduler/status");

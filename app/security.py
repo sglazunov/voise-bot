@@ -221,6 +221,45 @@ def change_password(username: str, old: str, new: str) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# Brute-force protection (login / registration code)
+# --------------------------------------------------------------------------- #
+# Sliding window per key (client IP and IP+username): after N failures within
+# the window, further attempts are rejected until it cools down. In-memory —
+# resets on restart, which is fine for its purpose.
+_FAILED: dict[str, list[float]] = {}
+BRUTE_MAX_ATTEMPTS = int(os.getenv("VTX_LOGIN_MAX_ATTEMPTS", "8"))
+BRUTE_WINDOW_SEC = int(os.getenv("VTX_LOGIN_WINDOW_SEC", "900"))  # 15 мин
+
+
+def throttle_check(*keys: str) -> int:
+    """Seconds the caller must still wait, or 0 if the attempt is allowed."""
+    now = time.time()
+    with _LOCK:
+        worst = 0
+        for k in keys:
+            hits = [t for t in _FAILED.get(k, []) if now - t < BRUTE_WINDOW_SEC]
+            _FAILED[k] = hits
+            if len(hits) >= BRUTE_MAX_ATTEMPTS:
+                worst = max(worst, int(BRUTE_WINDOW_SEC - (now - hits[0])) + 1)
+        return worst
+
+
+def throttle_fail(*keys: str) -> None:
+    """Record a failed attempt for each key."""
+    now = time.time()
+    with _LOCK:
+        for k in keys:
+            _FAILED.setdefault(k, []).append(now)
+
+
+def throttle_clear(*keys: str) -> None:
+    """Forget failures (after a successful login)."""
+    with _LOCK:
+        for k in keys:
+            _FAILED.pop(k, None)
+
+
+# --------------------------------------------------------------------------- #
 # Sessions
 # --------------------------------------------------------------------------- #
 def _load_sessions() -> dict:
@@ -232,12 +271,19 @@ def _load_sessions() -> dict:
         return {}
 
 
+def _token_key(token: str) -> str:
+    """Sessions are stored under a HASH of the token, so a leaked/backup-copied
+    sessions.json cannot be replayed to hijack a session — the raw token exists
+    only in the user's cookie."""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
 def create_session(username: str) -> str:
     username = normalize_username(username)
     token = secrets.token_urlsafe(32)
     with _LOCK:
         sessions = _load_sessions()
-        sessions[token] = {"user": username, "exp": time.time() + SESSION_TTL}
+        sessions[_token_key(token)] = {"user": username, "exp": time.time() + SESSION_TTL}
         _prune(sessions)
         _atomic_write_json(_SESSIONS_FILE, sessions)
     return token
@@ -247,13 +293,14 @@ def session_user(token: str | None) -> str | None:
     """Return the username for a valid, unexpired session token, else None."""
     if not token:
         return None
+    key = _token_key(token)
     with _LOCK:
         sessions = _load_sessions()
-        s = sessions.get(token)
+        s = sessions.get(key)
         if not s:
             return None
         if s.get("exp", 0) < time.time():
-            sessions.pop(token, None)
+            sessions.pop(key, None)
             _atomic_write_json(_SESSIONS_FILE, sessions)
             return None
         return s.get("user")
@@ -264,9 +311,16 @@ def destroy_session(token: str | None) -> None:
         return
     with _LOCK:
         sessions = _load_sessions()
-        if token in sessions:
-            sessions.pop(token, None)
+        if sessions.pop(_token_key(token), None) is not None:
             _atomic_write_json(_SESSIONS_FILE, sessions)
+
+
+def is_admin(username: str | None) -> bool:
+    """Whether this login is the administrator (the first registered user)."""
+    if not username:
+        return False
+    rec = _load_users().get(normalize_username(username))
+    return bool(rec and rec.get("is_admin"))
 
 
 def _prune(sessions: dict) -> None:
