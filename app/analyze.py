@@ -17,7 +17,7 @@ import json
 import re
 import time
 
-from . import llm
+from . import config, llm
 
 # Single-pass threshold. Above this we chunk (map-reduce) so the WHOLE meeting
 # is analysed, not just the first part.
@@ -261,6 +261,21 @@ class AnalysisCancelled(RuntimeError):
     """Raised when the user cancels protocol generation mid-way."""
 
 
+def _fit_max_tokens(backend, prompt: str, want: int) -> int:
+    """Shrink the requested answer size so one request fits the provider's
+    per-minute token budget (input + requested output). Without this, asking for a
+    large protocol makes Groq reject the request outright with HTTP 413 — and no
+    amount of extra keys helps, since every account of that tier has the same cap.
+    Providers with no known budget (Ollama, Claude…) are left untouched."""
+    base = str(getattr(backend, "name", "")).split(":")[0]
+    tpm = config.PROVIDER_TPM.get(base)
+    if not tpm:
+        return want
+    est_input = len(prompt) // 3      # ~3 chars per token for mixed ru/en text
+    budget = tpm - est_input - 400    # safety margin for the system/prompt overhead
+    return max(1200, min(want, budget))
+
+
 def _stream_complete(backend, prompt, max_tokens, on_progress, stage,
                      force_json=True, cancel_check=None):
     """Call backend.complete, streaming tokens to on_progress when supported.
@@ -269,6 +284,7 @@ def _stream_complete(backend, prompt, max_tokens, on_progress, stage,
     still emit the stage so the UI shows what's happening). `cancel_check` lets a
     streaming (Ollama) generation be aborted mid-way, so «Отменить» is responsive
     even inside one long chunk — not only between chunks."""
+    max_tokens = _fit_max_tokens(backend, prompt, max_tokens)
     if on_progress:
         on_progress(stage, "")
     if isinstance(backend, llm.OllamaProvider):

@@ -127,6 +127,13 @@ PROVIDER_MODELS = {
 # Providers configurable from the UI by an API key (+ optional extra field).
 KEY_PROVIDERS = {"anthropic", "groq", "gemini", "yandex", "gigachat"}
 
+# Per-minute token budget (TPM) of a provider's free tier, counted per REQUEST as
+# input + the REQUESTED max_tokens. Asking for a big answer can therefore fail on
+# its own (HTTP 413 "Request too large"), no matter how many keys you have — every
+# account of the same tier has the same cap. We size each request to fit.
+# Extra keys still help: they multiply the per-MINUTE throughput (see llm.py).
+PROVIDER_TPM = {"groq": int(os.getenv("VTX_GROQ_TPM", "12000"))}
+
 
 def provider_creds(provider: str, user_keys: dict | None = None) -> list[tuple[str, str]]:
     """List of (api_key, extra) for a provider — ALL the user's keys (for

@@ -410,17 +410,38 @@ def _is_rate_limit(e: Exception) -> bool:
             or "resource_exhausted" in s or "insufficient_quota" in s)
 
 
+_KEY_COOLDOWN_SEC = 60.0   # a rate-limited key rests this long (Groq's TPM window)
+
+
+def _cooldown_from(e: Exception, default: float = _KEY_COOLDOWN_SEC) -> float:
+    """How long to rest a key that hit its limit — from the provider's own hint
+    ("Please try again in 12.34s") when it gives one."""
+    m = re.search(r"try again in ([\d.]+)\s*s", str(e))
+    if m:
+        try:
+            return min(max(float(m.group(1)) + 1.0, 5.0), 300.0)
+        except ValueError:
+            pass
+    return default
+
+
 class _RotatingProvider:
-    """Wraps a provider with a POOL of API keys. On a rate-limit error it moves to
-    the next key and retries the same request — so long protocol generation isn't
-    interrupted when one key is exhausted. Fails only if ALL keys are limited."""
+    """Wraps a provider with a POOL of API keys — possibly from DIFFERENT accounts.
+
+    Keys are used ROUND-ROBIN: every request goes to the next key, so the
+    per-minute budgets (TPM/RPM) of several accounts ADD UP instead of one key
+    carrying the whole job. A key that reports a rate limit is parked on a short
+    cooldown (taken from the provider's "try again in Xs" hint when present) and
+    skipped until it recovers. Only when every key is resting do we fail.
+    """
 
     def __init__(self, cls, model, creds: list[tuple[str, str]]):
         self._cls = cls
         self._model = model
         self._creds = creds
         self.name = getattr(cls, "name", "llm")
-        self._i = 0                 # current key index (sticks to a working one)
+        self._i = 0                             # round-robin cursor (next key to use)
+        self._cooldown: dict[int, float] = {}   # key index -> resting until (unix ts)
         self._instances: dict[int, object] = {}
 
     def _inst(self, i: int):
@@ -431,18 +452,26 @@ class _RotatingProvider:
 
     def complete(self, prompt: str, max_tokens: int = 2000, force_json: bool = True) -> str:
         n = len(self._creds)
+        now = time.time()
+        order = [(self._i + k) % n for k in range(n)]
+        ready = [i for i in order if self._cooldown.get(i, 0.0) <= now]
+        if not ready:
+            wait = max(int(min(self._cooldown.values()) - now) + 1, 1)
+            raise RuntimeError(
+                f"Все {n} ключа(ей) «{self.name}» сейчас упёрлись в лимит. "
+                f"Повторите через ~{wait} с, добавьте ещё ключ или выберите другой движок.")
         limited = []
-        for attempt in range(n):
-            i = (self._i + attempt) % n
+        for i in ready:
             try:
                 out = self._inst(i).complete(prompt, max_tokens, force_json)
-                self._i = i           # keep using this key for the next chunk
+                self._i = (i + 1) % n   # spread the NEXT request onto the next key
                 return out
-            except Exception as e:    # noqa: BLE001
+            except Exception as e:      # noqa: BLE001
                 if _is_rate_limit(e) and n > 1:
+                    self._cooldown[i] = time.time() + _cooldown_from(e)
                     limited.append(i + 1)
-                    continue          # try the next key
+                    continue            # this key rests; try the next one
                 raise
         raise RuntimeError(
             f"Все {n} API-ключа(ей) исчерпали лимит (ключи {limited}). "
-            "Добавьте ещё ключ или подождите сброса лимита.")
+            "Добавьте ещё ключ, подождите сброса лимита или выберите другой движок.")
