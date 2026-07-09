@@ -520,6 +520,9 @@ const $=id=>document.getElementById(id);
 let curMode='transcribe';
 let selected=null, activeId=null, viewId=null, startTs=null, elapsedTimer=null;
 let jobInProgress=false;  // true while a job is queued/running/analyzing
+// Кэш подписей отрисовки, чтобы не перерисовывать неизменившийся текст каждый
+// опрос (иначе большой блок мигает/«дёргается» раз в ~секунду).
+let _analysisSig="", _liveDoneId="", _segSig="";
 
 /* ---------- mode toggle ---------- */
 function setMode(m){
@@ -1022,15 +1025,21 @@ function taskHtml(t){const p=taskParts(t);
   return esc(p.text)+(p.owner?` — <i style="color:var(--muted)">${esc(p.owner)}</i>`:'');}
 function renderAnalysis(job){
   const block=$('analysisBlock');
-  if(!job.analyze){block.classList.add('hidden');return;}
+  if(!job.analyze){block.classList.add('hidden');_analysisSig="";return;}
 
   if(job.status==='analyzing'){
     // The live generation view is rendered in the transcript area; keep this
     // block hidden to avoid duplication.
-    block.classList.add('hidden');
+    block.classList.add('hidden');_analysisSig="";
     return;
   }
-  if(job.status!=='done'){block.classList.add('hidden');return;}
+  if(job.status!=='done'){block.classList.add('hidden');_analysisSig="";return;}
+
+  // Готовый протокол не меняется — перерисовываем ТОЛЬКО когда данные другие,
+  // иначе большой блок мигает каждый опрос.
+  const sig=job.id+"|"+(job.analysis_error||"")+"|"+(job.analysis?JSON.stringify(job.analysis):"0");
+  if(sig===_analysisSig){block.classList.remove('hidden');return;}
+  _analysisSig=sig;
 
   block.classList.remove('hidden');
   const a=job.analysis||{};
@@ -1119,6 +1128,7 @@ async function updateLive(){
   if(!job){$("livecard").classList.add("hidden");return;}
 
   $("livecard").classList.remove("hidden");
+  if(job.status!=="done" && _liveDoneId===viewId)_liveDoneId="";  // сброс после «Продолжить»
   $("livetitle").textContent=job.filename||"Распознавание";
   const sb=$("lstatus");sb.textContent=STATUS[job.status]||job.status;sb.className="badge "+job.status;
   const pct=Math.round((job.progress||0)*100);
@@ -1153,9 +1163,10 @@ async function updateLive(){
           msg="⏳ Загрузка модели"+(job.model?" «"+esc(job.model)+"»":"")+"…"+
               (big?" При первом выборе модель скачивается (large-v3 ~3 ГБ) — это может занять несколько минут. Прогресс скачивания виден в окне run.bat. Потом она кэшируется и грузится мгновенно.":"");
         }else{msg="Анализ аудио, первые сегменты скоро появятся…";}
-        $("live").innerHTML=`<div class="empty">${msg}</div>`;
+        $("live").innerHTML=`<div class="empty">${msg}</div>`;_segSig="";
       }else{
-        renderSegments($("live"),segs);
+        const sig=viewId+":"+segs.length;   // перерисовываем только при новых сегментах
+        if(sig!==_segSig){_segSig=sig;renderSegments($("live"),segs);}
       }
     }catch{}
     if(job.status==="paused"){
@@ -1173,26 +1184,34 @@ async function updateLive(){
     let a={};
     try{const p=await(await fetch(`/api/jobs/${viewId}/partial`)).json();a=p.analysis||{};}catch{}
     const stage=a.stage||"Анализирую транскрипцию…";
-    let html=`<div class="gen-stage"><span class="spinner"></span>${esc(stage)}</div>`;
-    html+=`<div class="gen-meta">`+
-          (a.chars?`сгенерировано ~${a.chars.toLocaleString('ru')} симв.`:"модель думает, первые слова скоро появятся…")+
-          `</div>`;
-    if(a.text){
-      // Live stream of what the model is writing (raw — formatted nicely once done).
-      html+=`<div class="gen-text" id="genText">${esc(a.text)}</div>`;
+    // Строим каркас ОДИН раз, дальше обновляем только текст — иначе блок и
+    // спиннер пересоздаются каждый опрос и «дёргаются».
+    if(!$("genText")){
+      $("live").innerHTML=`<div class="gen-stage"><span class="spinner"></span><span id="genStage"></span></div>`+
+        `<div class="gen-meta" id="genMeta"></div>`+
+        `<div class="gen-text" id="genText"></div>`;
     }
-    $("live").innerHTML=html;
-    const gt=$("genText");if(gt)gt.scrollTop=gt.scrollHeight;
+    $("genStage").textContent=stage;
+    $("genMeta").textContent=a.chars?`сгенерировано ~${a.chars.toLocaleString('ru')} симв.`:"модель думает, первые слова скоро появятся…";
+    const gt=$("genText");
+    if(gt && gt.textContent!==(a.text||"")){
+      const atBottom=gt.scrollHeight-gt.scrollTop-gt.clientHeight<40;
+      gt.textContent=a.text||"";
+      if(atBottom)gt.scrollTop=gt.scrollHeight;
+    }
     $("ltools").innerHTML=`<button class="ghost" onclick="cancelProtocol()">✖ Отменить сборку протокола</button>`;
 
   }else if(job.status==="done"){
     stopTimer();
-    try{
-      const txt=await(await fetch(`/api/jobs/${viewId}/result?format=txt`)).text();
-      $("live").innerHTML="";
-      const pre=document.createElement("div");pre.style.whiteSpace="pre-wrap";pre.textContent=txt;
-      $("live").appendChild(pre);
-    }catch{}
+    if(_liveDoneId!==viewId){          // текст готов и не меняется — грузим один раз
+      _liveDoneId=viewId;
+      try{
+        const txt=await(await fetch(`/api/jobs/${viewId}/result?format=txt`)).text();
+        $("live").innerHTML="";
+        const pre=document.createElement("div");pre.style.whiteSpace="pre-wrap";pre.textContent=txt;
+        $("live").appendChild(pre);
+      }catch{_liveDoneId="";}
+    }
     let tools=`<button class="ghost" onclick="copyText()">📋 Копировать</button>
       <a class="dl" href="/api/jobs/${viewId}/result?format=txt" target="_blank">TXT</a>
       <a class="dl" href="/api/jobs/${viewId}/result?format=srt">SRT</a>
