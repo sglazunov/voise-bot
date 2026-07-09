@@ -184,6 +184,14 @@ def _start_scheduler() -> None:
         scheduler.start()
     except Exception:
         pass
+    # Pre-download ALL recognition models in the background, so the user never
+    # has to fetch anything manually. Disable with VTX_PRELOAD_MODELS=0.
+    if os.getenv("VTX_PRELOAD_MODELS", "1") == "1":
+        try:
+            from . import whisper_setup
+            whisper_setup.preload_all()
+        except Exception:
+            pass
 
 ALLOWED_EXT = {".mp3", ".wav", ".m4a", ".ogg", ".oga", ".opus", ".flac", ".aac",
                ".mp4", ".mkv", ".webm", ".mov", ".wma", ".amr"}

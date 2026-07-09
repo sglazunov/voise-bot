@@ -54,7 +54,9 @@ RUN chmod +x docker/*.sh
 RUN useradd -m -u 1000 app && mkdir -p /data && chown -R app:app /data
 
 ENV VTX_DATA_DIR=/data \
-    VTX_MODEL=small \
+    VTX_MODEL=large-v3-turbo \
+    VTX_PRELOAD_MODELS=1 \
+    HF_HOME=/data/hf \
     VTX_COMPUTE_TYPE=int8 \
     VTX_CPU_THREADS=4 \
     VTX_BEAM_SIZE=5 \

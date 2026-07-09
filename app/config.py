@@ -15,10 +15,11 @@ UPLOAD_DIR = DATA_DIR / "uploads"
 RESULT_DIR = DATA_DIR / "results"
 JOBS_FILE = DATA_DIR / "jobs.json"
 
-# Whisper model. "medium" gives clearly better Russian than "small" and fits
-# comfortably in 14 GB at int8 (~1.5 GB). Drop to "small" if you want it faster,
-# or try "large-v3" if you don't mind it running ~2x slower on this CPU.
-MODEL = os.getenv("VTX_MODEL", "medium")
+# Whisper model. Default "large-v3-turbo": near large-v3 quality but much faster,
+# ~2 GB at int8 — fits comfortably in 14 GB. All offered models are pre-downloaded
+# in the background at startup (see whisper_setup.preload_all), so nothing is
+# fetched manually. Override per job in the UI or globally with VTX_MODEL.
+MODEL = os.getenv("VTX_MODEL", "large-v3-turbo")
 DEVICE = os.getenv("VTX_DEVICE", "cpu")          # no CUDA GPU on the 5500U
 COMPUTE_TYPE = os.getenv("VTX_COMPUTE_TYPE", "int8")
 # CTranslate2 scales best with PHYSICAL cores. The 5500U has 6 — using 6 keeps

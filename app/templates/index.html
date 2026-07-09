@@ -679,8 +679,8 @@ function onModelChange(){
   el.textContent=MODEL_INFO[v]||MODEL_INFO[""];
   refreshModelDownload(v);
 }
-/* Show a "download model" button when the chosen recognition model isn't cached
-   yet — so it can be fetched without attaching a file first. */
+/* Models install AUTOMATICALLY (preloaded at startup + on selection). This just
+   shows the status of the chosen model — no manual download needed. */
 let _modelPoll=null;
 async function refreshModelDownload(v){
   const box=$("modelDownload"); if(!box) return;
@@ -688,18 +688,21 @@ async function refreshModelDownload(v){
   let s; try{ s=await(await fetch("/api/model/status?name="+encodeURIComponent(v||""))).json(); }catch{ box.innerHTML=""; return; }
   const ins=s.download||{};
   if(s.downloaded && ins.state!=="running"){
-    box.innerHTML='<span class="muted" style="font-size:12px;color:#22c55e">✓ Модель '+esc(s.name)+' скачана</span>';
+    box.innerHTML='<span class="muted" style="font-size:12px;color:#22c55e">✓ Модель '+esc(s.name)+' готова</span>';
     return;
   }
-  if(ins.state==="running"){
-    const pct=(ins.percent!=null)?(" "+ins.percent+"%"):"";
-    box.innerHTML='<div class="muted" style="font-size:12px"><span class="spinner"></span>'+esc(ins.message||("Скачивание"+pct))+'</div>';
-    _modelPoll=setTimeout(()=>refreshModelDownload(v),1500);
+  if(ins.state==="error"){
+    box.innerHTML=`<div class="warn" style="font-size:12px">${esc(ins.message||"ошибка загрузки модели")}</div>`+
+      `<button class="ghost" type="button" onclick="downloadModel('${esc(s.name)}')" style="margin-top:4px">↻ Повторить загрузку</button>`;
+    _modelPoll=setTimeout(()=>refreshModelDownload(v),3000);
     return;
   }
-  const err=ins.state==="error"?`<div class="warn" style="font-size:12px;margin-bottom:4px">${esc(ins.message||"ошибка")}</div>`:"";
-  box.innerHTML=err+`<button class="ghost" type="button" onclick="downloadModel('${esc(s.name)}')">⤓ Скачать модель ${esc(s.name)}${s.size_hint?(" ("+esc(s.size_hint)+")"):""}</button>
-    <div class="muted" style="font-size:11px;margin-top:3px">Иначе модель скачается при первом «Распознать».</div>`;
+  // Not ready yet — ensure this model is downloading (it's automatic).
+  if(ins.state!=="running"){ try{ await fetch("/api/model/download?name="+encodeURIComponent(v||""),{method:"POST"}); }catch{} }
+  const pct=(ins.percent!=null)?(" "+ins.percent+"%"):"";
+  box.innerHTML='<div class="muted" style="font-size:12px"><span class="spinner"></span>'+
+    esc(ins.message||("Модель "+s.name+" загружается автоматически"+pct))+'</div>';
+  _modelPoll=setTimeout(()=>refreshModelDownload(v),1500);
 }
 async function downloadModel(name){
   const v=$("model")?$("model").value:"";

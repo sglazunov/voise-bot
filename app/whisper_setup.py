@@ -50,6 +50,45 @@ def status(name: str) -> dict:
     }
 
 
+# Models offered in the UI — preloaded automatically so nothing is manual.
+PRELOAD_MODELS = ["small", "medium", "large-v3", "large-v3-turbo"]
+_preload_started = False
+
+
+def preload_all(models: list[str] | None = None) -> None:
+    """Download ALL offered recognition models in the BACKGROUND at startup, so
+    the user never has to fetch anything by hand. Sequential (one at a time) to
+    avoid saturating bandwidth/disk; the default model goes first so it's ready
+    soonest. Idempotent — safe to call once per process."""
+    global _preload_started
+    with _lock:
+        if _preload_started:
+            return
+        _preload_started = True
+    default = _eff(None)
+    wanted = models or PRELOAD_MODELS
+    ordered, seen = [], set()
+    for m in [default] + list(wanted):   # default first, keep order, de-dupe
+        if m and m not in seen:
+            seen.add(m)
+            ordered.append(m)
+
+    def run() -> None:
+        for m in ordered:
+            try:
+                if is_downloaded(m):
+                    _dl[_eff(m)] = {"state": "done", "percent": 100, "ok": True,
+                                    "message": f"Модель {m} готова."}
+                    continue
+                download(m)  # starts a background _do_download that fills _dl[m]
+                while _dl.get(_eff(m), {}).get("state") == "running":
+                    time.sleep(1)
+            except Exception:  # one model's failure must not stop the rest
+                continue
+
+    threading.Thread(target=run, daemon=True, name="vtx-model-preload").start()
+
+
 def download(name: str) -> dict:
     """Kick off a background download of one model (idempotent while running)."""
     eff = _eff(name)
