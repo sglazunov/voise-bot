@@ -1261,7 +1261,13 @@ loadProviders();
 onApiProviderChange();
 onModelChange();
 refresh();
-setInterval(refresh,1500);
+// Live job list without page reload; pause when the tab is hidden, refresh at
+// once when it comes back into view.
+let _jobsTick=setInterval(refresh,1500);
+document.addEventListener("visibilitychange",()=>{
+  if(document.hidden){ if(_jobsTick){clearInterval(_jobsTick); _jobsTick=null;} }
+  else{ refresh(); if(!_jobsTick) _jobsTick=setInterval(refresh,1500); }
+});
 </script>
 </body>
 </html>

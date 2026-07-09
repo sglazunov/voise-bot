@@ -400,6 +400,7 @@ async function loadAll(){
   (s.rec_days||[]).forEach(d=>{const c=document.querySelector('.recday[value="'+d+'"]'); if(c)c.checked=true;});
   // set audio device after list loads
   cloudStatus(); recorderStatus(); refreshStatus(); loadAudioDevices(s.audio_device); checkLogin();
+  if(s.weeek_token) loadMeetings(true);  // auto-show upcoming meetings, no click needed
 }
 
 /* ---- Weeek ---- */
@@ -415,8 +416,11 @@ async function resetWeeekToken(){
        $("weeek_token").value=""; $("weeek_token").placeholder="вставьте токен";
        toast("Токен Weeek сброшен"); loadAll(); }catch(e){ toast(e.message,true); }
 }
-async function loadMeetings(){
-  $("weeek_status").innerHTML="загрузка…";
+async function loadMeetings(silent){
+  // `silent` = a background auto-refresh: don't flash "загрузка…", don't clobber
+  // a dropdown the user is currently interacting with, and swallow errors.
+  if(silent && document.activeElement && $("meetings").contains(document.activeElement)) return;
+  if(!silent) $("weeek_status").innerHTML="загрузка…";
   try{
     const d=await api("GET","/api/automation/meetings");
     const defOn = d.default_on!==false;
@@ -434,7 +438,7 @@ async function loadMeetings(){
           </select>
           <button class="ghost" onclick="runNow('${esc(String(m.task_id))}')">Записать сейчас</button>
         </div></div>`;}).join("");
-  }catch(e){ $("weeek_status").innerHTML="<span class='bad'>"+esc(e.message)+"</span>"; }
+  }catch(e){ if(!silent) $("weeek_status").innerHTML="<span class='bad'>"+esc(e.message)+"</span>"; }
 }
 async function setDecision(id, val){
   const record = val==="on"?true : val==="off"?false : null;
@@ -658,7 +662,24 @@ function esc(s){return String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","
 function fmt(iso){ try{return new Date(iso).toLocaleString("ru-RU",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"});}catch{return iso;} }
 
 loadAll();
-setInterval(refreshStatus, 5000);
+
+// --- live updates: keep the interface in sync without a page reload ---------
+// Scheduler state (recording → recognition → protocol → done) is cheap and polls
+// often; the Weeek meeting picker hits the API, so it refreshes more gently.
+let _statusTick=null, _meetTick=null;
+function startLive(){
+  if(!_statusTick) _statusTick=setInterval(refreshStatus, 4000);
+  if(!_meetTick)   _meetTick=setInterval(()=>loadMeetings(true), 30000);
+}
+function stopLive(){
+  clearInterval(_statusTick); clearInterval(_meetTick); _statusTick=_meetTick=null;
+}
+// Pause polling while the tab is hidden; refresh at once when it comes back.
+document.addEventListener("visibilitychange", ()=>{
+  if(document.hidden){ stopLive(); }
+  else{ refreshStatus(); loadMeetings(true); startLive(); }
+});
+startLive();
 </script>
 </body>
 </html>
