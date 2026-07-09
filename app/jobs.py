@@ -268,6 +268,9 @@ class JobStore:
         txt_path = self.result_path(job_id, "txt")
         if not txt_path.exists():
             raise ValueError("Нет транскрипции для анализа.")
+        # Prefer the continuous, timestamp-free text (cleaner input for the LLM).
+        plain_path = self.result_path(job_id, "plain")
+        src_path = plain_path if plain_path.exists() else txt_path
         if not self._reanalyze_lock.acquire(blocking=False):
             raise ValueError("Анализ уже выполняется, подождите.")
         if provider:
@@ -283,7 +286,7 @@ class JobStore:
         job.protocol_cloud_url = None  # regenerate → re-deliver fresh
         job.analyze = True
         threading.Thread(target=self._do_reanalyze,
-                         args=(job, txt_path.read_text(encoding="utf-8")),
+                         args=(job, src_path.read_text(encoding="utf-8")),
                          daemon=True).start()
         return job
 
@@ -408,7 +411,7 @@ class JobStore:
                 self._save()
 
     def _delete_job_files(self, job: Job) -> None:
-        for fmt in ("txt", "srt", "json", "docx", "screen.txt"):
+        for fmt in ("txt", "plain", "srt", "json", "docx", "screen.txt"):
             self.result_path(job.id, fmt).unlink(missing_ok=True)
         for p in config.RESULT_DIR.glob(f"{job.id}__*.docx"):  # per-engine docs
             p.unlink(missing_ok=True)
@@ -523,6 +526,10 @@ class JobStore:
             # Write all output formats to disk.
             txt_content = formats.to_txt(segments)
             (self.result_path(job.id, "txt")).write_text(txt_content, encoding="utf-8")
+            # Continuous, timestamp-free text — the readable on-screen view and the
+            # clean input the protocol LLM analyses (fewer tokens, less noise).
+            plain_content = formats.to_plain(segments)
+            (self.result_path(job.id, "plain")).write_text(plain_content, encoding="utf-8")
             (self.result_path(job.id, "srt")).write_text(
                 formats.to_srt(segments), encoding="utf-8")
             (self.result_path(job.id, "json")).write_text(
@@ -547,8 +554,9 @@ class JobStore:
                 except Exception as e:
                     screen_err = str(e)
 
-            # Text fed to the protocol analysis = speech + on-screen text.
-            analysis_input = txt_content + (("\n\n" + screen_block) if screen_block else "")
+            # Text fed to the protocol analysis = continuous speech (no timestamps)
+            # + on-screen text. Cleaner prose → a more accurate protocol.
+            analysis_input = plain_content + (("\n\n" + screen_block) if screen_block else "")
 
             # AI analysis + Word document (optional, requires ANTHROPIC_API_KEY)
             analysis_result = None

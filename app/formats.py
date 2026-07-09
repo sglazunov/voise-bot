@@ -39,6 +39,46 @@ def to_txt(segments: List[Segment]) -> str:
     return "\n".join(lines).strip() + "\n"
 
 
+def to_plain(segments: List[Segment]) -> str:
+    """Flowing, readable transcript WITHOUT per-segment timestamps — for the
+    on-screen view and as clean input to the protocol LLM (fewer tokens, less
+    noise). Speaker labels are kept (they help attribution): each speaker's turn
+    becomes one paragraph «Имя: …». Without speakers, text is grouped into short
+    paragraphs so it isn't one giant wall."""
+    paras: List[str] = []
+    has_speakers = any(getattr(s, "speaker", None) for s in segments)
+    if has_speakers:
+        cur = object()
+        buf: List[str] = []
+
+        def flush() -> None:
+            if not buf:
+                return
+            label = f"{cur}: " if isinstance(cur, str) and cur.strip() else ""
+            paras.append(label + " ".join(buf).strip())
+
+        for seg in segments:
+            if seg.speaker != cur:
+                flush()
+                buf = []
+                cur = seg.speaker
+            if seg.text.strip():
+                buf.append(seg.text.strip())
+        flush()
+    else:
+        buf = []
+        for seg in segments:
+            t = seg.text.strip()
+            if t:
+                buf.append(t)
+            if len(buf) >= 5:            # ~5 сегментов на абзац — читабельно
+                paras.append(" ".join(buf))
+                buf = []
+        if buf:
+            paras.append(" ".join(buf))
+    return "\n\n".join(p for p in paras if p).strip() + "\n"
+
+
 def to_srt(segments: List[Segment]) -> str:
     blocks = []
     for i, seg in enumerate(segments, 1):

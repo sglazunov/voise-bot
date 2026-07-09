@@ -479,8 +479,8 @@ def get_partial(job_id: str, user: str = Depends(current_user)):
 def get_result(job_id: str, format: str = "txt", provider: str = "",
                user: str = Depends(current_user)):
     job = _require_owned(job_id, user)
-    if format not in {"txt", "srt", "json", "docx", "screen"}:
-        raise HTTPException(400, "format должен быть txt | srt | json | docx | screen")
+    if format not in {"txt", "plain", "srt", "json", "docx", "screen"}:
+        raise HTTPException(400, "format должен быть txt | plain | srt | json | docx | screen")
 
     # Word protocol: one document per engine. Pick the requested provider, or
     # default to the most recently generated one.
@@ -502,11 +502,13 @@ def get_result(job_id: str, format: str = "txt", provider: str = "",
     # simply have no file yet and fall through to 404 below.
     fmt_file = "screen.txt" if format == "screen" else format
     path = store.result_path(job_id, fmt_file)
+    if format == "plain" and not path.exists():
+        path = store.result_path(job_id, "txt")  # fallback for jobs made before plain existed
     if not path.exists():
         if job.status not in {STATUS_DONE, STATUS_CANCELLED}:
             raise HTTPException(409, f"Задача ещё не готова (статус: {job.status})")
         raise HTTPException(404, "Результат отсутствует")
-    if format in ("txt", "screen"):
+    if format in ("txt", "plain", "screen"):
         return PlainTextResponse(path.read_text(encoding="utf-8"))
     media = "application/json" if format == "json" else "text/plain"
     return FileResponse(path, media_type=media,
