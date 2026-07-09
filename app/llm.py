@@ -24,6 +24,11 @@ from typing import Protocol
 from . import config
 
 
+class GenerationCancelled(Exception):
+    """Raised from inside a streaming generation when the caller asks to stop,
+    so cancellation is responsive mid-stream (not only between chunks)."""
+
+
 class LLMProvider(Protocol):
     name: str
 
@@ -139,7 +144,7 @@ class OllamaProvider:
         self.name = f"ollama:{self.model}"
 
     def complete(self, prompt: str, max_tokens: int = 2000, force_json: bool = True,
-                 on_token=None) -> str:
+                 on_token=None, should_stop=None) -> str:
         url = config.OLLAMA_URL.rstrip("/") + "/api/generate"
         payload = {
             "model": self.model,
@@ -160,6 +165,10 @@ class OllamaProvider:
         try:
             with urllib.request.urlopen(req, timeout=600) as resp:
                 for line in resp:
+                    # Check cancellation on every NDJSON line so «Отменить» is
+                    # responsive mid-generation, not only between chunks.
+                    if should_stop and should_stop():
+                        raise GenerationCancelled()
                     line = line.strip()
                     if not line:
                         continue

@@ -261,17 +261,24 @@ class AnalysisCancelled(RuntimeError):
     """Raised when the user cancels protocol generation mid-way."""
 
 
-def _stream_complete(backend, prompt, max_tokens, on_progress, stage, force_json=True):
+def _stream_complete(backend, prompt, max_tokens, on_progress, stage,
+                     force_json=True, cancel_check=None):
     """Call backend.complete, streaming tokens to on_progress when supported.
 
     Only Ollama streams; other providers return the full text in one shot (we
-    still emit the stage so the UI shows what's happening)."""
+    still emit the stage so the UI shows what's happening). `cancel_check` lets a
+    streaming (Ollama) generation be aborted mid-way, so «Отменить» is responsive
+    even inside one long chunk — not only between chunks."""
     if on_progress:
         on_progress(stage, "")
-    if on_progress and isinstance(backend, llm.OllamaProvider):
-        return backend.complete(
-            prompt, max_tokens=max_tokens, force_json=force_json,
-            on_token=lambda full: on_progress(stage, full))
+    if isinstance(backend, llm.OllamaProvider):
+        try:
+            return backend.complete(
+                prompt, max_tokens=max_tokens, force_json=force_json,
+                on_token=(lambda full: on_progress(stage, full)) if on_progress else None,
+                should_stop=cancel_check)
+        except llm.GenerationCancelled:
+            raise AnalysisCancelled()
     return backend.complete(prompt, max_tokens=max_tokens, force_json=force_json)
 
 
@@ -306,7 +313,8 @@ def analyze_transcript(transcript_text: str, provider: str | None = None,
         else:
             prompt = _PROMPT_TEMPLATE.format(transcript=text)
         raw = _stream_complete(backend, _with_extra(prompt, extra_instructions),
-                               10000, on_progress, "Генерация протокола…")
+                               10000, on_progress, "Генерация протокола…",
+                               cancel_check=cancel_check)
     else:
         chunks = _split_chunks(text)
         notes_parts = []
@@ -315,7 +323,7 @@ def analyze_transcript(transcript_text: str, provider: str | None = None,
             note = _stream_complete(
                 backend, _MAP_TEMPLATE.format(i=i, n=len(chunks), chunk=chunk),
                 3500, on_progress, f"Читаю встречу: часть {i} из {len(chunks)}…",
-                force_json=False)
+                force_json=False, cancel_check=cancel_check)
             notes_parts.append(f"=== Часть {i} ===\n{note.strip()}")
             # Free cloud tiers rate-limit easily; pace the chunk calls a bit.
             if backend.name == "groq" and i < len(chunks):
@@ -328,7 +336,8 @@ def analyze_transcript(transcript_text: str, provider: str | None = None,
         else:
             prompt = _REDUCE_TEMPLATE.format(notes=notes)
         raw = _stream_complete(backend, _with_extra(prompt, extra_instructions),
-                               10000, on_progress, "Свожу протокол…")
+                               10000, on_progress, "Свожу протокол…",
+                               cancel_check=cancel_check)
 
     result = _extract_json(raw)
 
