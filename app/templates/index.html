@@ -57,6 +57,28 @@
     .queued{background:#334155}.running{background:#0369a1}.analyzing{background:#7c3aed}
     .paused{background:#a16207}.cancelled{background:#6b7280}
     .done{background:#15803d}.error{background:#7f1d1d}
+    /* История задачи (модалка) */
+    .modal{position:fixed;inset:0;background:rgba(3,7,18,.72);display:flex;align-items:center;
+           justify-content:center;z-index:50;padding:16px}
+    .modal.hidden{display:none}
+    .modal-box{background:var(--card);border:1px solid var(--line);border-radius:16px;
+               width:min(620px,96vw);max-height:88vh;overflow:auto;padding:18px 20px;
+               box-shadow:0 20px 60px rgba(0,0,0,.5)}
+    .modal-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
+    .modal-head h3{margin:0;font-size:16px}
+    .modal-x{background:none;border:none;color:var(--muted);font-size:18px;cursor:pointer;line-height:1}
+    .modal-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}
+    .hrow{display:grid;grid-template-columns:150px 22px 1fr;gap:8px;align-items:start;
+          padding:8px 0;border-top:1px solid var(--line);font-size:13px}
+    .hrow:first-child{border-top:none}
+    .hlbl{color:var(--muted)}
+    .hstate{font-weight:800;text-align:center}
+    .hstate.ok{color:#4ade80}.hstate.err{color:#f87171}.hstate.wait{color:#38bdf8}.hstate.skip{color:#94a3b8}
+    .hdet{color:var(--txt);word-break:break-word}
+    .hwhy{margin-top:12px;background:#2a0f0f;border:1px solid #7f1d1d;border-radius:10px;
+          padding:10px 12px;font-size:13px;line-height:1.5;color:#fecaca}
+    .hwhy.ok{background:#0f2a17;border-color:#15803d;color:#bbf7d0}
+    .hts{margin-top:10px;font-size:12px;color:var(--muted)}
     .live{margin-top:14px;background:var(--card2);border:1px solid var(--line);border-radius:12px;
           padding:12px;max-height:300px;overflow:auto;font-size:14px;line-height:1.6}
     .seg{margin:0 0 6px}.seg .t{color:var(--accent);font-variant-numeric:tabular-nums;
@@ -462,6 +484,18 @@
   </div>
   </div><!-- /dcol-right -->
   </div><!-- /dash -->
+</div>
+
+<!-- История задачи (что произошло и почему) -->
+<div id="histModal" class="modal hidden" onclick="if(event.target===this)closeHist()">
+  <div class="modal-box">
+    <div class="modal-head">
+      <h3 id="histTitle">История задачи</h3>
+      <button class="modal-x" onclick="closeHist()">✕</button>
+    </div>
+    <div id="histBody"></div>
+    <div id="histActions" class="modal-actions"></div>
+  </div>
 </div>
 
 <script>
@@ -1210,6 +1244,71 @@ async function makeProtocol(){
   reanalyzeJob();  // runs analysis on the stored transcript with the chosen engine
 }
 
+/* ---------- История задачи (что произошло и почему) ---------- */
+function fmtTs(t){ if(!t) return "—"; try{return new Date(t*1000).toLocaleString("ru-RU");}catch{return "—";} }
+async function showHistory(id){
+  let j; try{ j=await(await fetch(`/api/jobs/${id}`)).json(); }catch{ alert("Не удалось загрузить историю задачи."); return; }
+  $("histTitle").textContent="История: "+(j.filename||"задача");
+  const last=s=>esc((String(s||"").split("\n").filter(x=>x.trim()).pop()||"").trim());
+  const row=(label,state,detail)=>`<div class="hrow"><span class="hlbl">${esc(label)}</span>`+
+    `<span class="hstate ${state}">${({ok:"✓",err:"✕",wait:"…",skip:"—"})[state]||""}</span>`+
+    `<span class="hdet">${detail||""}</span></div>`;
+  let rows=row("Файл получен","ok",esc(j.filename||""));
+  // Распознавание речи
+  if(["queued","running","paused"].includes(j.status))
+    rows+=row("Распознавание речи","wait","идёт… "+Math.round((j.progress||0)*100)+"%");
+  else if(j.status==="error") rows+=row("Распознавание речи","err",last(j.error)||"сбой распознавания");
+  else if(j.status==="cancelled") rows+=row("Распознавание речи","skip","отменено пользователем");
+  else rows+=row("Распознавание речи","ok","готово"+(j.duration?" · "+human(j.duration):""));
+  // Доп. шаги
+  if(j.identify_speakers) rows+=row("Кто говорил (видео)", j.speaker_error?"err":"ok", j.speaker_error?last(j.speaker_error):"имена определены");
+  if(j.diarize) rows+=row("Диаризация", j.diarization_error?"err":"ok", j.diarization_error?last(j.diarization_error):"выполнено");
+  if(j.capture_screen) rows+=row("Текст с экрана (OCR)", j.screen_error?"err":"ok", j.screen_error?last(j.screen_error):("фрагментов: "+(j.screen_segments||0)));
+  // Протокол
+  if(j.analyze){
+    if(j.status==="analyzing") rows+=row("Протокол (ИИ)","wait","идёт…");
+    else if(j.analysis_error) rows+=row("Протокол (ИИ)","err",last(j.analysis_error));
+    else if(j.analysis) rows+=row("Протокол (ИИ)","ok","собран"+(j.docx_providers&&j.docx_providers.length?" · "+esc(j.docx_providers.join(", ")):""));
+    else rows+=row("Протокол (ИИ)","skip","не собран");
+  } else rows+=row("Протокол (ИИ)","skip","не запрашивался");
+  // Причина / итог
+  let why="";
+  if(j.error) why=`<div class="hwhy"><b>Почему остановилось:</b><br>${esc(j.error)}</div>`;
+  else if(j.analysis_error) why=`<div class="hwhy"><b>Протокол не собрался:</b><br>${esc(j.analysis_error)}<br><span class="muted">Частая причина — не выбран движок протокола или исчерпан лимит ключа. Добавьте ключ/выберите движок и нажмите «Собрать протокол».</span></div>`;
+  else if(j.status==="done") why=`<div class="hwhy ok">✓ Всё выполнено${(j.analyze&&j.analysis)?": распознавание и протокол готовы.":": распознавание готово."}</div>`;
+  const ts=`<div class="hts">Создано: ${fmtTs(j.created_at)} · начато: ${fmtTs(j.started_at)} · завершено: ${fmtTs(j.finished_at)}</div>`;
+  $("histBody").innerHTML=rows+why+ts;
+  // Действия «Продолжить»
+  let acts="";
+  if(j.status==="error"||j.status==="cancelled") acts+=`<button class="go" onclick="retryJob('${id}')">↻ Продолжить распознавание</button>`;
+  if(j.status==="done" && (j.analysis_error || !j.analysis)) acts+=`<button class="go" onclick="continueProtocol('${id}')">📄 Собрать протокол</button>`;
+  acts+=`<button class="ghost" onclick="closeHist()">Закрыть</button>`;
+  $("histActions").innerHTML=acts;
+  $("histModal").classList.remove("hidden");
+}
+function closeHist(){ $("histModal").classList.add("hidden"); }
+async function retryJob(id){
+  closeHist();
+  try{ const r=await fetch(`/api/jobs/${id}/retry`,{method:"POST"});
+       if(!r.ok){const d=await r.json().catch(()=>({})); alert(d.detail||"Не удалось продолжить распознавание."); return;} }
+  catch{ return; }
+  viewId=id; startTs=null; refresh();
+}
+async function continueProtocol(id){
+  closeHist();
+  viewId=id;
+  if(curMode!=='protocol') setMode('protocol');
+  await loadProviders();
+  const v=$("provider")?$("provider").value:"";
+  if(!v || v==='ollama-setup'){
+    onEngineChange();
+    window.scrollTo({top:0,behavior:"smooth"});
+    alert("Выберите движок протокола вверху (локальный Ollama установите кнопкой, либо подключите API по ключу), затем нажмите «Продолжить» ещё раз.");
+    return;
+  }
+  reanalyzeJob();  // собирает протокол по уже готовому тексту выбранным движком
+}
+
 /* ---------- history table ---------- */
 async function refresh(){
   let jobs=[];
@@ -1222,19 +1321,24 @@ async function refresh(){
   $("jobs").innerHTML=jobs.map(j=>{
     const pct=Math.round((j.progress||0)*100);
     let act="";
+    const protoFailed = j.status==="done" && (j.analysis_error || (j.analyze && !j.analysis));
     if(j.status==="done"){
       act=`<a class="dl" onclick="openJob('${j.id}')">Показать</a>
            <a class="dl" href="/api/jobs/${j.id}/result?format=txt" target="_blank">TXT</a>
            <a class="dl" href="/api/jobs/${j.id}/result?format=srt">SRT</a>`;
       if(j.analyze&&j.analysis&&!j.analysis_error)
         act+=`<a class="dl" href="/api/jobs/${j.id}/result?format=docx">Word</a>`;
+      if(protoFailed)
+        act+=`<a class="dl" onclick="continueProtocol('${j.id}')">📄 Продолжить</a>`;
     }else if(j.status==="error"){
-      act=`<span class="muted" title="${esc((j.error||'').replace(/"/g,'&quot;'))}">ошибка</span>`;
+      act=`<a class="dl" onclick="retryJob('${j.id}')">↻ Продолжить</a>`;
     }else if(j.status==="cancelled"){
-      act=`<a class="dl" onclick="openJob('${j.id}')">Показать</a>`;
+      act=`<a class="dl" onclick="openJob('${j.id}')">Показать</a>
+           <a class="dl" onclick="retryJob('${j.id}')">↻ Продолжить</a>`;
     }else{
       act=`<a class="dl" onclick="openJob('${j.id}')">Следить</a>`;
     }
+    act+=`<a class="dl" onclick="showHistory('${j.id}')">История</a>`;
     const modeIcon=j.analyze?'📄 ':'🎙 ';
     return `<tr>
       <td>${modeIcon}${esc(j.filename||"")}

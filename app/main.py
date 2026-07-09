@@ -367,6 +367,19 @@ def cancel_job(job_id: str, user: str = Depends(current_user)):
     return _control(job_id, "cancel", user)
 
 
+@app.post("/api/jobs/{job_id}/retry")
+def retry_job(job_id: str, user: str = Depends(current_user)):
+    """Re-run a failed/cancelled recognition job from scratch (same file+options)."""
+    _require_owned(job_id, user)
+    try:
+        job = store.retry(job_id)
+    except KeyError:
+        raise HTTPException(404, "Задача не найдена")
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+    return job.to_public()
+
+
 class ReanalyzeBody(BaseModel):
     provider: str = "auto"
     instructions: str | None = None

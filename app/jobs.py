@@ -315,6 +315,24 @@ class JobStore:
         finally:
             self._reanalyze_lock.release()
 
+    # ---- re-run a failed/cancelled job from scratch ------------------------
+    def retry(self, job_id: str) -> Job:
+        """Re-run recognition (and its options + optional protocol) for a failed
+        or cancelled job, reusing the originally uploaded file if it still exists.
+        Recognition can't resume mid-way, so this restarts the pipeline cleanly."""
+        job = self._require(job_id)
+        if job.status not in (STATUS_ERROR, STATUS_CANCELLED):
+            raise ValueError("Продолжить можно только задачу с ошибкой или отменённую.")
+        if not job.audio_path or not Path(job.audio_path).exists():
+            raise ValueError("Исходный файл больше недоступен — загрузите его заново.")
+        self._control.pop(job_id, None)
+        self._analysis.pop(job_id, None)
+        self._partial[job_id] = []
+        self._set(job, status=STATUS_QUEUED, progress=0.0, error=None,
+                  analysis_error=None, started_at=None, finished_at=None)
+        self._queue.put(job_id)
+        return job
+
     # ---- retention / cleanup -----------------------------------------------
     def _purge_old(self) -> None:
         """Delete jobs (and their files) older than the retention window."""
