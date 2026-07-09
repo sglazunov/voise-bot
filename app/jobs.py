@@ -63,6 +63,8 @@ class Job:
     analysis_prompt: str = ""        # expert mode: full prompt override
     capture_screen: bool = False     # OCR on-screen text from the video
     identify_speakers: bool = False  # read WHO spoke from the video (active-tile name)
+    deliver_protocol_cloud: bool = False  # upload the .docx protocol to the user's cloud
+    deliver_weeek_task: str = ""     # Weeek task id/URL to attach the protocol link to
     delete_audio_when_done: bool = False  # delete the source media after processing
                                           # (recordings already sent to the UI's cloud)
     owner: str = ""                  # the login that owns this job (isolation)
@@ -77,6 +79,8 @@ class Job:
     diarization_error: Optional[str] = None  # why "who spoke" didn't run, if asked
     speaker_error: Optional[str] = None      # why video speaker-ID didn't run, if asked
     screen_error: Optional[str] = None       # why screen OCR didn't run, if asked
+    protocol_cloud_url: Optional[str] = None  # cloud link of the delivered protocol
+    delivery_error: Optional[str] = None     # why cloud/Weeek delivery didn't happen
     screen_segments: int = 0                 # number of on-screen text snapshots
     analysis: Optional[dict] = None        # structured analysis result (latest)
     analysis_error: Optional[str] = None   # error message if analysis failed
@@ -142,6 +146,7 @@ class JobStore:
                analyze: bool = False, provider: str = "auto",
                analysis_instructions: str = "", analysis_prompt: str = "",
                capture_screen: bool = False, identify_speakers: bool = False,
+               deliver_protocol_cloud: bool = False, deliver_weeek_task: str = "",
                model: str = "",
                delete_audio_when_done: bool = False, owner: str = "") -> Job:
         job = Job(
@@ -159,6 +164,8 @@ class JobStore:
             analysis_prompt=analysis_prompt,
             capture_screen=capture_screen,
             identify_speakers=identify_speakers,
+            deliver_protocol_cloud=deliver_protocol_cloud,
+            deliver_weeek_task=(deliver_weeek_task or "").strip(),
             delete_audio_when_done=delete_audio_when_done,
             owner=owner,
         )
@@ -248,7 +255,9 @@ class JobStore:
     # ---- re-run analysis on an already-transcribed job ---------------------
     def reanalyze(self, job_id: str, provider: str | None = None,
                   instructions: str | None = None,
-                  custom_prompt: str | None = None) -> Job:
+                  custom_prompt: str | None = None,
+                  deliver_protocol_cloud: bool | None = None,
+                  deliver_weeek_task: str | None = None) -> Job:
         """Re-run the LLM protocol on the stored transcript (no re-transcribe).
 
         `provider` (optional) switches the engine for this retry. `instructions`
@@ -267,6 +276,11 @@ class JobStore:
             job.analysis_instructions = instructions
         if custom_prompt is not None:
             job.analysis_prompt = custom_prompt
+        if deliver_protocol_cloud is not None:
+            job.deliver_protocol_cloud = deliver_protocol_cloud
+        if deliver_weeek_task is not None:
+            job.deliver_weeek_task = (deliver_weeek_task or "").strip()
+        job.protocol_cloud_url = None  # regenerate → re-deliver fresh
         job.analyze = True
         threading.Thread(target=self._do_reanalyze,
                          args=(job, txt_path.read_text(encoding="utf-8")),
@@ -302,6 +316,7 @@ class JobStore:
             )
             if prov not in job.docx_providers:
                 job.docx_providers.append(prov)
+            self._deliver_protocol(job, self.docx_path(job.id, prov))
             self._set(job, status=STATUS_DONE, analysis=result,
                       analysis_error=None, docx_providers=job.docx_providers)
         except AnalysisCancelled:
@@ -329,9 +344,50 @@ class JobStore:
         self._analysis.pop(job_id, None)
         self._partial[job_id] = []
         self._set(job, status=STATUS_QUEUED, progress=0.0, error=None,
-                  analysis_error=None, started_at=None, finished_at=None)
+                  analysis_error=None, started_at=None, finished_at=None,
+                  protocol_cloud_url=None, delivery_error=None)
         self._queue.put(job_id)
         return job
+
+    # ---- deliver the protocol to cloud + Weeek (manual jobs) ---------------
+    def _deliver_protocol(self, job: Job, docx_path: Path) -> None:
+        """Best-effort: upload the .docx protocol to the user's cloud (as set up
+        in «Автоматизация») and attach the link to a Weeek task, if the job asked
+        for it. Never raises — problems are recorded in job.delivery_error."""
+        if not (job.deliver_protocol_cloud or job.deliver_weeek_task):
+            return
+        try:
+            from .automation import settings as auto_settings, clouds, weeek
+            cfg = auto_settings.load(job.owner)
+            self._set(job, delivery_error=None)
+            url = job.protocol_cloud_url
+            # A Weeek link needs a public URL, so uploading is required either way.
+            if not url:
+                base = Path(job.filename or "protocol").stem
+                up = clouds.upload(str(docx_path), f"{base} - протокол.docx", cfg,
+                                   folder=(cfg.get("protocol_folder") or "").strip() or None)
+                if up.get("ok") and up.get("url"):
+                    url = up["url"]
+                    self._set(job, protocol_cloud_url=url)
+                else:
+                    self._set(job, delivery_error=(up.get("error")
+                              or "Не удалось выгрузить протокол в облако. Проверьте облако в «Автоматизации»."))
+                    return
+            if job.deliver_weeek_task:
+                token = cfg.get("weeek_token")
+                if not token:
+                    self._set(job, delivery_error="Не задан токен Weeek — задайте его в «Автоматизации».")
+                    return
+                tid = _weeek_task_id(job.deliver_weeek_task)
+                field = (cfg.get("weeek_protocol_field") or "Протокол встречи").strip()
+                res = weeek.set_custom_field(token, tid, field, url)
+                if not res.get("ok"):
+                    # Fall back to a comment if the custom field write fails.
+                    if not weeek.add_comment(token, tid, f"📄 Протокол встречи: {url}"):
+                        self._set(job, delivery_error=(res.get("error")
+                                  or "Не удалось записать ссылку в задачу Weeek."))
+        except Exception as e:  # noqa: BLE001 — delivery must never break a job
+            self._set(job, delivery_error=str(e))
 
     # ---- retention / cleanup -----------------------------------------------
     def _purge_old(self) -> None:
@@ -526,6 +582,8 @@ class JobStore:
                     )
                     if prov not in job.docx_providers:
                         job.docx_providers.append(prov)
+                    # Optionally push the protocol to cloud + Weeek (best-effort).
+                    self._deliver_protocol(job, self.docx_path(job.id, prov))
                 except AnalysisCancelled:
                     # Transcript (txt/srt/json) is already saved; just stop here.
                     self._control.pop(job.id, None)
@@ -592,6 +650,16 @@ class JobStore:
                 pass
         self._control.pop(job.id, None)
         self._set(job, status=STATUS_CANCELLED, finished_at=time.time())
+
+
+def _weeek_task_id(raw: str) -> str:
+    """Accept either a bare Weeek task id or a task URL and return the id.
+    Task URLs end with the numeric id (e.g. .../task/12345)."""
+    s = (raw or "").strip()
+    nums = re.findall(r"\d+", s)
+    if ("http" in s or "/" in s) and nums:
+        return nums[-1]
+    return s
 
 
 def _ensure_wav(audio_path: str) -> str:

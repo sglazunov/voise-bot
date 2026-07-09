@@ -233,6 +233,8 @@ async def create_job(
     custom_prompt: str = Form(""),
     capture_screen: bool = Form(False),
     identify_speakers: bool = Form(False),
+    deliver_protocol_cloud: bool = Form(False),
+    deliver_weeek_task: str = Form(""),
     user: str = Depends(current_user),
 ):
     ext = Path(file.filename or "").suffix.lower()
@@ -260,7 +262,9 @@ async def create_job(
                        analysis_instructions=instructions.strip(),
                        analysis_prompt=custom_prompt.strip(),
                        capture_screen=capture_screen,
-                       identify_speakers=identify_speakers, model=model_sel,
+                       identify_speakers=identify_speakers,
+                       deliver_protocol_cloud=deliver_protocol_cloud,
+                       deliver_weeek_task=deliver_weeek_task, model=model_sel,
                        owner=user)
     return JSONResponse({"job_id": job.id, **job.to_public()}, status_code=201)
 
@@ -384,6 +388,8 @@ class ReanalyzeBody(BaseModel):
     provider: str = "auto"
     instructions: str | None = None
     custom_prompt: str | None = None
+    deliver_protocol_cloud: bool | None = None
+    deliver_weeek_task: str | None = None
 
 
 @app.post("/api/jobs/{job_id}/reanalyze")
@@ -392,7 +398,9 @@ def reanalyze_job(job_id: str, body: ReanalyzeBody, user: str = Depends(current_
     try:
         job = store.reanalyze(job_id, provider=body.provider,
                               instructions=body.instructions,
-                              custom_prompt=body.custom_prompt)
+                              custom_prompt=body.custom_prompt,
+                              deliver_protocol_cloud=body.deliver_protocol_cloud,
+                              deliver_weeek_task=body.deliver_weeek_task)
     except KeyError:
         raise HTTPException(404, "Задача не найдена")
     except ValueError as e:
@@ -508,6 +516,24 @@ def speakers_status():
     """What's needed to read WHO spoke from the video — for the UI toggle hints."""
     from .speaker_id import readiness
     return readiness()
+
+
+@app.get("/api/protocol-delivery/status")
+def protocol_delivery_status(user: str = Depends(current_user)):
+    """Whether the manual page can push a protocol to cloud + Weeek. Reuses the
+    settings configured on the «Автоматизация» page (cloud + Weeek token)."""
+    from .automation import settings as auto_settings, clouds
+    cfg = auto_settings.load(user)
+    cl = clouds.readiness(cfg)
+    selected = cl.get("selected") or "local"
+    backend = (cl.get("backends") or {}).get(selected) or {}
+    return {
+        "cloud_ready": bool(backend.get("ready")),
+        "cloud_name": backend.get("label") or selected,
+        "weeek_ready": bool(cfg.get("weeek_token")),
+        "protocol_folder": cfg.get("protocol_folder") or "",
+        "protocol_field": cfg.get("weeek_protocol_field") or "Протокол встречи",
+    }
 
 
 @app.get("/api/ollama/status")

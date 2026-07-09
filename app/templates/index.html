@@ -381,6 +381,22 @@
         <textarea id="expertPrompt" rows="12" spellcheck="false"
                   placeholder="Пусто = стандартный промпт. Нажмите «Загрузить стандартный», чтобы отредактировать его."></textarea>
       </details>
+
+      <details class="adv" style="margin-top:10px" id="deliveryBox">
+        <summary>📤 Выгрузка протокола (Я.Диск + Weeek)</summary>
+        <label class="chk" style="margin-top:8px">
+          <input type="checkbox" id="deliver_cloud" onchange="onDeliverToggle()">
+          Выгрузить готовый протокол на Яндекс.Диск
+        </label>
+        <label class="chk">
+          <input type="checkbox" id="deliver_weeek" onchange="onDeliverToggle()">
+          Прикрепить ссылку на протокол в задачу Weeek
+        </label>
+        <input id="weeek_task" class="hidden" type="text" autocomplete="off" spellcheck="false"
+               placeholder="ID или ссылка задачи Weeek" style="width:100%;padding:10px;border-radius:10px;
+               border:1px solid var(--line);background:#0b1220;color:var(--txt);margin-top:8px">
+        <div class="muted" id="deliverHint" style="margin-top:8px;font-size:12px;line-height:1.5"></div>
+      </details>
     </div>
 
     <div id="drop" style="margin-top:14px">
@@ -512,7 +528,35 @@ function setMode(m){
   $('modeProtocol').classList.toggle('active',m==='protocol');
   const pw=$('providerWrap');
   if(pw)pw.classList.toggle('hidden',m!=='protocol');
-  if(m==='protocol')loadProviders();
+  if(m==='protocol'){loadProviders();loadDeliveryStatus();}
+}
+
+/* ---------- Выгрузка протокола (Я.Диск + Weeek) ---------- */
+function onDeliverToggle(){
+  const w=$("deliver_weeek");
+  $("weeek_task").classList.toggle("hidden", !(w&&w.checked));
+}
+async function loadDeliveryStatus(){
+  const box=$("deliverHint"); if(!box) return;
+  try{
+    const s=await(await fetch("/api/protocol-delivery/status")).json();
+    const cloud = s.cloud_ready
+      ? `✓ Облако готово: <b>${esc(s.cloud_name||"")}</b>`+(s.protocol_folder?` · папка <code>${esc(s.protocol_folder)}</code>`:"")
+      : "⚠ Облако не настроено";
+    const weeek = s.weeek_ready
+      ? `✓ Weeek подключён · поле <b>${esc(s.protocol_field||"Протокол встречи")}</b>`
+      : "⚠ Weeek не подключён";
+    box.innerHTML = `${cloud}<br>${weeek}<br>`+
+      `<span class="muted">Настройки берутся со страницы <a href="/automation">Автоматизация встреч</a> `+
+      `(облако и токен Weeek). Для ссылки в Weeek протокол сначала выгружается на Я.Диск.</span>`;
+  }catch{ box.textContent="Не удалось проверить готовность выгрузки."; }
+}
+function deliveryFields(){
+  const cloud=$("deliver_cloud")&&$("deliver_cloud").checked;
+  const weeek=$("deliver_weeek")&&$("deliver_weeek").checked;
+  const task=weeek?(($("weeek_task")&&$("weeek_task").value||"").trim()):"";
+  // Attaching to Weeek implies a cloud upload (a link needs a public URL).
+  return {deliver_protocol_cloud: !!(cloud||weeek), deliver_weeek_task: task};
 }
 
 /* ---------- LLM providers: engine list + paid-API key connect ---------- */
@@ -932,6 +976,11 @@ $("go").onclick=()=>{
   fd.append("glossary",$("glossary").value);
   fd.append("instructions",($("instructions")&&$("instructions").value)||"");
   fd.append("custom_prompt",($("expertPrompt")&&$("expertPrompt").value)||"");
+  if(curMode==='protocol'){
+    const d=deliveryFields();
+    fd.append("deliver_protocol_cloud", d.deliver_protocol_cloud?"true":"false");
+    fd.append("deliver_weeek_task", d.deliver_weeek_task);
+  }
   const xhr=new XMLHttpRequest();
   xhr.open("POST","/api/jobs");
   $("upwrap").classList.remove("hidden");$("go").disabled=true;
@@ -1211,10 +1260,13 @@ async function reanalyzeJob(){
   if(!viewId) return;
   // Use whichever engine is currently selected, so a rate-limited Groq job can
   // be retried with e.g. local Ollama by just switching the dropdown first.
+  const d=deliveryFields();
   const body={
     provider:($("provider")&&$("provider").value)||"auto",
     instructions:($("instructions")&&$("instructions").value)||"",
     custom_prompt:($("expertPrompt")&&$("expertPrompt").value)||"",
+    deliver_protocol_cloud:d.deliver_protocol_cloud,
+    deliver_weeek_task:d.deliver_weeek_task,
   };
   try{ const r=await fetch(`/api/jobs/${viewId}/reanalyze`,{method:"POST",
         headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
@@ -1271,8 +1323,17 @@ async function showHistory(id){
     else if(j.analysis) rows+=row("Протокол (ИИ)","ok","собран"+(j.docx_providers&&j.docx_providers.length?" · "+esc(j.docx_providers.join(", ")):""));
     else rows+=row("Протокол (ИИ)","skip","не собран");
   } else rows+=row("Протокол (ИИ)","skip","не запрашивался");
+  // Выгрузка протокола (Я.Диск + Weeek)
+  if(j.deliver_protocol_cloud || j.deliver_weeek_task){
+    if(j.delivery_error) rows+=row("Выгрузка протокола","err",last(j.delivery_error));
+    else if(j.protocol_cloud_url) rows+=row("Выгрузка протокола","ok",
+      `<a href="${esc(j.protocol_cloud_url)}" target="_blank">ссылка в облаке</a>`+(j.deliver_weeek_task?" · ссылка в Weeek":""));
+    else if(["queued","running","paused","analyzing"].includes(j.status)) rows+=row("Выгрузка протокола","wait","ожидает протокол…");
+    else rows+=row("Выгрузка протокола","skip","не выполнена");
+  }
   // Причина / итог
   let why="";
+  if(j.delivery_error) why=`<div class="hwhy"><b>Протокол не выгрузился:</b><br>${esc(j.delivery_error)}<br><span class="muted">Проверьте облако и токен Weeek на странице «Автоматизация встреч».</span></div>`;else
   if(j.error) why=`<div class="hwhy"><b>Почему остановилось:</b><br>${esc(j.error)}</div>`;
   else if(j.analysis_error) why=`<div class="hwhy"><b>Протокол не собрался:</b><br>${esc(j.analysis_error)}<br><span class="muted">Частая причина — не выбран движок протокола или исчерпан лимит ключа. Добавьте ключ/выберите движок и нажмите «Собрать протокол».</span></div>`;
   else if(j.status==="done") why=`<div class="hwhy ok">✓ Всё выполнено${(j.analyze&&j.analysis)?": распознавание и протокол готовы.":": распознавание готово."}</div>`;
