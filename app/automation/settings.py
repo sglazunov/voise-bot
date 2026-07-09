@@ -97,6 +97,9 @@ _DEFAULTS: dict[str, Any] = {
     "ocr_screen": True,               # recognise on-screen text (slides/code) too
     "identify_speakers": True,        # read WHO spoke from the video (active-tile name)
     "analyze_provider": "auto",       # which LLM builds the protocol
+    # --- Weeek checkbox that decides whether to record this meeting ---
+    "weeek_use_record_field": True,   # let a Weeek toggle decide record / skip
+    "weeek_record_field": "Запись встречи",  # name of that checkbox custom field
     "post_back_to_weeek": True,       # attach protocol link as a task comment
     # --- write the recording link into a Weeek custom field of the task ---
     "weeek_set_video_field": True,    # put the cloud link into a custom field

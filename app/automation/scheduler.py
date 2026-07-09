@@ -41,6 +41,7 @@ class MeetingState:
     job_id: str | None = None
     cloud_url: str | None = None
     do_protocol: bool = False         # whether this meeting also builds a protocol
+    record_flag: bool | None = None   # Weeek checkbox «Запись встречи»: True/False/unset
     stop_flag: bool = False           # manual "stop this recording"
     logs: list = field(default_factory=list)
 
@@ -49,7 +50,7 @@ class MeetingState:
                 "start": self.start.isoformat() if self.start else None,
                 "state": self.state, "detail": self.detail,
                 "job_id": self.job_id, "cloud_url": self.cloud_url,
-                "do_protocol": self.do_protocol}
+                "do_protocol": self.do_protocol, "record_flag": self.record_flag}
 
 
 class Scheduler:
@@ -146,18 +147,25 @@ class Scheduler:
     def _poll(self, user: str, cfg: dict) -> None:
         meetings = weeek.upcoming_meetings(
             cfg.get("weeek_token"), cfg.get("weeek_project_id"), self._tz(cfg))
+        rec_field = cfg.get("weeek_record_field") or "Запись встречи"
         with self._lock:
             for m in meetings:
+                # The Weeek «Запись встречи» checkbox (True=record, False=skip,
+                # None=field absent → fall back to filters). Re-read every poll so
+                # toggling it in Weeek takes effect before the meeting starts.
+                flag = weeek.custom_field_bool(m.raw, rec_field)
                 key = f"{user}:{m.task_id}:{m.start.isoformat() if m.start else 'no-time'}"
                 st = self._states.get(key)
                 if st is None:
                     st = MeetingState(key=key, task_id=m.task_id, title=m.title,
-                                      url=m.url, start=m.start, owner=user)
+                                      url=m.url, start=m.start, owner=user,
+                                      record_flag=flag)
                     if m.start is None:
                         st.state, st.detail = "no_time", "В задаче не указано время встречи."
                     self._states[key] = st
                 elif st.state == "scheduled":
                     st.url, st.title, st.start = m.url, m.title, m.start
+                    st.record_flag = flag
 
     @staticmethod
     def _kw(raw) -> list[str]:
@@ -176,6 +184,13 @@ class Scheduler:
             return True, ""
         if dec is False:
             return False, "выключена вручную"
+        # Weeek checkbox «Запись встречи»: an explicit toggle wins over the default
+        # mode and keyword/time filters (but a manual override above still wins).
+        if cfg.get("weeek_use_record_field", True) and st.record_flag is not None:
+            if st.record_flag:
+                return True, ""
+            fname = cfg.get("weeek_record_field") or "Запись встречи"
+            return False, f"выключено в Weeek (поле «{fname}»)"
         if not cfg.get("rec_default_on", True):
             return False, "режим «только выбранные» — не отмечена"
         title = (st.title or "").lower()

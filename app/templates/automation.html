@@ -70,11 +70,15 @@
     .badge{font-size:11px;padding:3px 9px;border-radius:999px;font-weight:600;background:#334155}
     .b-scheduled{background:#334155}.b-recording{background:#0369a1}.b-uploading{background:#7c3aed}
     .b-transcribing{background:#6d28d9}.b-analyzing{background:#0e7490}.b-done{background:#15803d}.b-error{background:#7f1d1d}
-    .b-missed{background:#6b7280}.b-no_time{background:#a16207}
+    .b-missed{background:#6b7280}.b-no_time{background:#a16207}.b-skipped{background:#4b5563}
     .mlist{margin-top:12px}
     .mhead{margin-top:16px;margin-bottom:2px;font-size:12px;font-weight:700;letter-spacing:.02em;
            color:var(--muted);text-transform:uppercase}
     .mempty{font-size:12px;color:var(--muted);padding:8px 2px}
+    details.allmeet{margin-top:16px}
+    details.allmeet>summary{cursor:pointer;font-size:12px;font-weight:700;letter-spacing:.02em;
+           color:var(--muted);text-transform:uppercase;list-style:revert;padding:2px 0}
+    .rf-on{color:#4ade80}.rf-off{color:#f87171}
     .mrow{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:10px 12px;
           border:1px solid var(--line);border-radius:10px;background:var(--card2);margin-bottom:8px}
     .mrow .t{font-size:13px}.mrow .s{font-size:11px;color:var(--muted)}
@@ -260,6 +264,15 @@
     <div class="note">Запись и выгрузка в облако делаются всегда. Если выключить распознавание —
       будет только видеофайл в облаке. Протокол и текст с экрана требуют включённого распознавания.</div>
 
+    <div class="chk" style="margin-top:16px"><input id="weeek_use_record_field" type="checkbox">
+      Управлять записью галочкой в Weeek</div>
+    <div class="subfield">
+      <label>Имя чекбокс-поля в Weeek</label>
+      <input id="weeek_record_field" type="text" placeholder="Запись встречи">
+      <div class="note">В задаче Weeek держите чекбокс-поле (напр. «Запись встречи»): включён — бот
+        запишет встречу, выключен — не зайдёт и не запишет. Ручной выбор ниже всё равно главнее.</div>
+    </div>
+
     <details class="filterbox" style="margin-top:14px">
       <summary>🎯 Какие встречи записывать <span class="muted">(по умолчанию — все)</span></summary>
       <div class="grid2" style="margin-top:10px">
@@ -335,8 +348,9 @@
     <div id="sched_status" class="statusline"></div>
     <div class="mhead">📅 Сегодня</div>
     <div id="today_meetings" class="mlist"></div>
-    <div class="mhead">Все встречи</div>
-    <div id="sched_meetings" class="mlist"></div>
+    <details class="allmeet"><summary>Все встречи</summary>
+      <div id="sched_meetings" class="mlist"></div>
+    </details>
   </div>
   </div><!-- /.tabpanels -->
 </div>
@@ -399,6 +413,7 @@ async function loadAll(){
   setVal("protocol_folder", s.protocol_folder);
   setChk("do_transcribe", s.do_transcribe); setChk("do_protocol", s.do_protocol);
   setChk("ocr_screen", s.ocr_screen); setChk("identify_speakers", s.identify_speakers); stageDeps();
+  setChk("weeek_use_record_field", s.weeek_use_record_field); setVal("weeek_record_field", s.weeek_record_field);
   // record filter
   setVal("rec_time_from", s.rec_time_from); setVal("rec_time_to", s.rec_time_to);
   setVal("rec_include", s.rec_include); setVal("rec_exclude", s.rec_exclude);
@@ -621,6 +636,7 @@ async function saveScheduler(){
     protocol_folder:$("protocol_folder").value||"disk:/Телемост-протоколы",
     do_transcribe:$("do_transcribe").checked, do_protocol:$("do_protocol").checked,
     ocr_screen:$("ocr_screen").checked, identify_speakers:$("identify_speakers").checked,
+    weeek_use_record_field:$("weeek_use_record_field").checked, weeek_record_field:$("weeek_record_field").value||"Запись встречи",
     rec_time_from:$("rec_time_from").value||"", rec_time_to:$("rec_time_to").value||"",
     rec_include:$("rec_include").value||"", rec_exclude:$("rec_exclude").value||"",
     rec_default_on:$("rec_default_on").value==="1",
@@ -635,15 +651,18 @@ async function toggleEnabled(){
 }
 const MSTATE={scheduled:"запланирована",no_time:"без времени",missed:"пропущена",
   recording:"идёт запись",uploading:"загрузка в облако",transcribing:"распознавание видео",
-  analyzing:"генерация протокола",done:"готово",error:"ошибка",cancelled:"отменено"};
+  analyzing:"генерация протокола",done:"готово",error:"ошибка",cancelled:"отменено",
+  skipped:"не записываем"};
 function isToday(iso){
   if(!iso) return false;
   const d=new Date(iso), n=new Date();
   return d.getFullYear()===n.getFullYear()&&d.getMonth()===n.getMonth()&&d.getDate()===n.getDate();
 }
 function meetingRow(m){
+  const rf = m.record_flag===true?` · <span class="rf-on">Weeek: запись вкл</span>`
+           : m.record_flag===false?` · <span class="rf-off">Weeek: запись выкл</span>`:"";
   return `<div class="mrow"><div><div class="t">${esc(m.title)} <span class="badge b-${m.state}">${esc(MSTATE[m.state]||m.state)}</span></div>
-    <div class="s">${m.start?fmt(m.start):"без времени"}${m.detail?" · "+esc(m.detail):""}${m.cloud_url?` · <a href="${m.cloud_url}" target="_blank">запись</a>`:""}</div></div>
+    <div class="s">${m.start?fmt(m.start):"без времени"}${rf}${m.detail?" · "+esc(m.detail):""}${m.cloud_url?` · <a href="${m.cloud_url}" target="_blank">запись</a>`:""}</div></div>
     ${m.state==="scheduled"?`<button class="ghost" onclick="runNow('${m.task_id}')">Сейчас</button>`:
       m.state==="recording"?`<button class="ghost danger" onclick="stopOne('${m.task_id}')">■ Стоп</button>`:""}</div>`;
 }

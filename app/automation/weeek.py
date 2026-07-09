@@ -261,6 +261,44 @@ def _customfield_values(task: dict) -> list[str]:
     return links + others
 
 
+def _as_bool(v: Any) -> bool | None:
+    """Interpret a checkbox custom-field value as True/False, or None if unclear."""
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return v != 0
+    if isinstance(v, str):
+        s = v.strip().lower()
+        if s in ("1", "true", "yes", "on", "да", "вкл", "checked", "y"):
+            return True
+        if s in ("0", "false", "no", "off", "нет", "выкл", "", "n"):
+            return False
+        return None
+    if isinstance(v, dict):
+        for k in ("value", "checked", "enabled", "state", "isChecked"):
+            if k in v:
+                return _as_bool(v[k])
+    return None
+
+
+def custom_field_bool(task: dict, field_name: str) -> bool | None:
+    """Value of a checkbox/toggle custom field by (case-insensitive, then partial)
+    name — e.g. «Запись встречи». Returns True/False, or None if the field is
+    absent or its value can't be read as a boolean."""
+    name = (field_name or "").strip().lower()
+    if not name:
+        return None
+    fields = task.get("customFields") or []
+    cf = next((c for c in fields if isinstance(c, dict)
+               and str(c.get("name", "")).strip().lower() == name), None)
+    if cf is None:  # partial-name fallback
+        cf = next((c for c in fields if isinstance(c, dict)
+                   and name in str(c.get("name", "")).lower()), None)
+    if cf is None:
+        return None
+    return _as_bool(cf.get("value"))
+
+
 def task_to_meeting(task: dict, local_tz: tzinfo = timezone.utc) -> Meeting | None:
     """Convert a raw task to a Meeting if it carries a Telemost link.
 
