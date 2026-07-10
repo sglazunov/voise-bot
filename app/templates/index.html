@@ -270,7 +270,9 @@
 </head>
 <body>
 <div style="position:fixed;top:10px;right:14px;z-index:50;font:13px system-ui;color:#8aa0bd">
-  {% if username %}<span title="Вы вошли как">👤 {{ username }}</span> · {% endif %}
+  {% if username %}<a href="/profile" title="Профиль: телефон и пароль"
+     style="color:inherit;text-decoration:none">👤 {{ username }}</a> · {% endif %}
+  <a href="/profile" style="color:#3aa0ff;text-decoration:none">Профиль</a> ·
   <a href="#" onclick="fetch('/api/auth/logout',{method:'POST'}).then(()=>location='/login');return false"
      style="color:#3aa0ff;text-decoration:none">Выйти</a>
 </div>

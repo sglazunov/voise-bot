@@ -32,6 +32,7 @@ def _wipe_state() -> None:
     if udir.exists():
         shutil.rmtree(udir, ignore_errors=True)
     store._jobs.clear()
+    security._FAILED.clear()   # brute-force windows must not leak between tests
 
 
 @pytest.fixture(autouse=True)
@@ -47,9 +48,11 @@ def client():
     return TestClient(app, raise_server_exceptions=True)
 
 
-def register(client, username="alice", password="password123", code=""):
+def register(client, username="alice", password="password123", code="",
+             phone="+7 999 000-00-00"):
     return client.post("/api/auth/register",
-                       json={"username": username, "password": password, "code": code})
+                       json={"username": username, "password": password,
+                             "code": code, "phone": phone})
 
 
 def login(client, username="alice", password="password123"):

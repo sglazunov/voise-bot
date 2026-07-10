@@ -84,8 +84,8 @@ templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 # Authentication gate
 # ===========================================================================
 # Paths reachable WITHOUT a session. Everything else requires login.
-_PUBLIC_PATHS = {"/login", "/register", "/healthz",
-                 "/api/auth/login", "/api/auth/register"}
+_PUBLIC_PATHS = {"/login", "/register", "/recover", "/healthz",
+                 "/api/auth/login", "/api/auth/register", "/api/auth/recover"}
 _SECURE_COOKIE = os.getenv("VTX_HTTPS", "0") == "1"
 
 
@@ -154,6 +154,7 @@ class Credentials(BaseModel):
     username: str
     password: str
     code: str = ""
+    phone: str = ""   # required at registration; used for password recovery
 
 
 @app.get("/login", response_class=HTMLResponse)
@@ -178,7 +179,7 @@ def auth_register(body: Credentials, request: Request):
     wait = security.throttle_check(f"reg:{ip}")
     if wait:
         raise HTTPException(429, f"Слишком много попыток. Подождите {wait} с.")
-    res = security.create_user(body.username, body.password, body.code)
+    res = security.create_user(body.username, body.password, body.code, body.phone)
     if not res.get("ok"):
         security.throttle_fail(f"reg:{ip}")  # wrong/guessed registration codes
         raise HTTPException(400, res.get("error") or "Не удалось зарегистрироваться.")
@@ -217,6 +218,81 @@ def auth_logout(request: Request):
 @app.get("/api/auth/me")
 def auth_me(user: str = Depends(current_user)):
     return {"username": user}
+
+
+# ---- Password recovery by phone (public, heavily throttled) ---------------
+@app.get("/recover", response_class=HTMLResponse)
+def recover_page(request: Request):
+    return templates.TemplateResponse(
+        "login.html", {"request": request, "mode": "recover", "first_run": False})
+
+
+class RecoverBody(BaseModel):
+    username: str
+    phone: str
+    new_password: str
+
+
+@app.post("/api/auth/recover")
+def auth_recover(body: RecoverBody, request: Request):
+    """Reset the password when login + registered phone match. Every failure
+    counts against the brute-force window (phone numbers are guessable, so the
+    throttle is what makes this safe on a public domain)."""
+    ip = _client_ip(request)
+    uname = security.normalize_username(body.username)
+    keys = (f"rec:{ip}", f"rec:{ip}:{uname}")
+    wait = security.throttle_check(*keys)
+    if wait:
+        raise HTTPException(429, f"Слишком много попыток. Подождите {wait} с.")
+    res = security.reset_password_by_phone(body.username, body.phone, body.new_password)
+    if not res.get("ok"):
+        security.throttle_fail(*keys)
+        raise HTTPException(400, res.get("error") or "Не удалось восстановить пароль.")
+    security.throttle_clear(*keys)
+    return {"ok": True, "detail": "Пароль изменён — войдите с новым паролем."}
+
+
+# ---- Profile (phone + password management) ---------------------------------
+@app.get("/profile", response_class=HTMLResponse)
+def profile_page(request: Request, user: str = Depends(current_user)):
+    return templates.TemplateResponse("profile.html", {"request": request})
+
+
+@app.get("/api/profile")
+def profile_info(user: str = Depends(current_user)):
+    return {"username": user, "phone_masked": security.masked_phone(user),
+            "is_admin": security.is_admin(user)}
+
+
+class PhoneChange(BaseModel):
+    password: str
+    phone: str
+
+
+@app.post("/api/profile/phone")
+def profile_change_phone(body: PhoneChange, user: str = Depends(current_user)):
+    """Change the recovery phone; requires the CURRENT password."""
+    res = security.set_phone(user, body.password, body.phone)
+    if not res.get("ok"):
+        raise HTTPException(400, res.get("error"))
+    return {"ok": True, "phone_masked": security.masked_phone(user)}
+
+
+class PasswordChange(BaseModel):
+    new_password: str
+    old_password: str = ""
+    phone: str = ""
+
+
+@app.post("/api/profile/password")
+def profile_change_password(body: PasswordChange, user: str = Depends(current_user)):
+    """Change the password, confirming identity by old password OR by phone."""
+    res = security.change_password(user, body.new_password,
+                                   old=body.old_password or None,
+                                   phone=body.phone or None)
+    if not res.get("ok"):
+        raise HTTPException(400, res.get("error"))
+    return {"ok": True}
 
 
 @app.on_event("startup")

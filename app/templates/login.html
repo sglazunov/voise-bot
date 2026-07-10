@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{{ "Регистрация" if mode == "register" else "Вход" }} · Voice Transcriber</title>
+  <title>{{ "Регистрация" if mode == "register" else ("Восстановление пароля" if mode == "recover" else "Вход") }} · Voice Transcriber</title>
   <style>
     :root { --bg:#0b1220; --card:#121a2b; --line:#22304a; --fg:#e6edf6; --muted:#8aa0bd;
             --accent:#3aa0ff; --bad:#fecaca; --badbg:#3a1620; }
@@ -34,6 +34,9 @@
     {% if mode == "register" %}
       <h1>Создать аккаунт</h1>
       <p class="sub">{% if first_run %}Первый аккаунт станет администратором.{% else %}Регистрация нового пользователя.{% endif %}</p>
+    {% elif mode == "recover" %}
+      <h1>Восстановление пароля</h1>
+      <p class="sub">Укажите логин и номер телефона, заданный при регистрации, — и новый пароль.</p>
     {% else %}
       <h1>Вход</h1>
       <p class="sub">Личный кабинет — ваши данные и токены доступны только вам.</p>
@@ -43,47 +46,61 @@
       <label for="username">Логин</label>
       <input id="username" name="username" autocomplete="username" autofocus
              placeholder="например, sergey">
-      <label for="password">Пароль</label>
+      {% if mode == "register" or mode == "recover" %}
+      <label for="phone">Номер телефона</label>
+      <input id="phone" name="phone" type="tel" autocomplete="tel"
+             placeholder="+7 999 123-45-67">
+      {% endif %}
+      <label for="password">{{ "Новый пароль" if mode == "recover" else "Пароль" }}</label>
       <input id="password" name="password" type="password"
-             autocomplete="{{ 'new-password' if mode == 'register' else 'current-password' }}"
-             placeholder="{{ 'не короче 8 символов' if mode == 'register' else 'ваш пароль' }}">
+             autocomplete="{{ 'current-password' if mode == 'login' else 'new-password' }}"
+             placeholder="{{ 'ваш пароль' if mode == 'login' else 'не короче 8 символов' }}">
       {% if mode == "register" and not first_run %}
       <label for="code">Код регистрации</label>
       <input id="code" name="code" placeholder="выдаётся администратором">
       {% endif %}
-      <button id="btn" type="submit">{{ "Зарегистрироваться" if mode == "register" else "Войти" }}</button>
+      <button id="btn" type="submit">{{ "Зарегистрироваться" if mode == "register" else ("Сменить пароль" if mode == "recover" else "Войти") }}</button>
       <div id="err" class="err"></div>
     </form>
 
     {% if mode == "register" %}
       <div class="alt">Уже есть аккаунт? <a href="/login">Войти</a></div>
+    {% elif mode == "recover" %}
+      <div class="alt"><a href="/login">← Ко входу</a></div>
     {% else %}
-      <div class="alt">Нет аккаунта? <a href="/register">Регистрация</a></div>
+      <div class="alt">Нет аккаунта? <a href="/register">Регистрация</a> · <a href="/recover">Забыли пароль?</a></div>
     {% endif %}
     <div class="note">🔒 Пароли хранятся как PBKDF2-хеши, токены — зашифрованы под вашим логином.</div>
   </div>
 
   <script>
-    const MODE = {{ 'true' if mode == 'register' else 'false' }} ? "register" : "login";
+    const MODE = "{{ mode }}";   // login | register | recover
     const f = document.getElementById('f');
     const err = document.getElementById('err');
     const btn = document.getElementById('btn');
     f.addEventListener('submit', async (e) => {
       e.preventDefault();
       err.style.display = 'none'; btn.disabled = true;
-      const body = {
-        username: document.getElementById('username').value.trim(),
-        password: document.getElementById('password').value,
-        code: (document.getElementById('code')||{}).value || ""
-      };
+      const username = document.getElementById('username').value.trim();
+      const password = document.getElementById('password').value;
+      const phone = (document.getElementById('phone')||{}).value || "";
+      let url, body;
+      if (MODE === 'recover') {
+        url = '/api/auth/recover';
+        body = { username, phone, new_password: password };
+      } else {
+        url = '/api/auth/' + MODE;
+        body = { username, password, phone,
+                 code: (document.getElementById('code')||{}).value || "" };
+      }
       try {
-        const r = await fetch('/api/auth/' + MODE, {
+        const r = await fetch(url, {
           method: 'POST', headers: {'Content-Type':'application/json'},
           body: JSON.stringify(body)
         });
         const data = await r.json().catch(()=>({}));
         if (!r.ok) throw new Error(data.detail || 'Ошибка');
-        window.location.href = '/';
+        window.location.href = (MODE === 'recover') ? '/login' : '/';
       } catch (ex) {
         err.textContent = ex.message; err.style.display = 'block'; btn.disabled = false;
       }

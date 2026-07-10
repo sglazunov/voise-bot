@@ -159,6 +159,69 @@ def user_dir(username: str) -> Path:
     return d
 
 
+# --------------------------------------------------------------------------- #
+# Phone number (registration requirement + password recovery)
+# --------------------------------------------------------------------------- #
+def normalize_phone(raw: str | None) -> str:
+    """Digits-only phone, «8XXXXXXXXXX» → «7XXXXXXXXXX». "" if implausible."""
+    digits = re.sub(r"\D", "", raw or "")
+    if len(digits) == 11 and digits.startswith("8"):
+        digits = "7" + digits[1:]
+    return digits if 10 <= len(digits) <= 15 else ""
+
+
+def masked_phone(username: str) -> str:
+    """Phone for display: all but the last 2 digits hidden («+7•••••••••45»)."""
+    rec = _load_users().get(normalize_username(username)) or {}
+    p = rec.get("phone", "")
+    return f"+{p[0]}{'•' * (len(p) - 3)}{p[-2:]}" if len(p) >= 10 else ""
+
+
+def verify_phone(username: str, phone: str) -> bool:
+    """Constant-time check that `phone` matches the user's registered one."""
+    rec = _load_users().get(normalize_username(username)) or {}
+    stored = rec.get("phone", "")
+    given = normalize_phone(phone)
+    return bool(stored) and bool(given) and hmac.compare_digest(stored, given)
+
+
+def set_phone(username: str, password: str, new_phone: str) -> dict:
+    """Change the phone; requires the CURRENT password (so a stolen session
+    can't silently re-point recovery to the attacker's number)."""
+    username = normalize_username(username)
+    if not verify_user(username, password):
+        return {"ok": False, "error": "Текущий пароль неверный."}
+    phone = normalize_phone(new_phone)
+    if not phone:
+        return {"ok": False, "error": "Укажите корректный номер телефона (10–15 цифр)."}
+    with _LOCK:
+        users = _load_users()
+        users[username]["phone"] = phone
+        _atomic_write_json(_USERS_FILE, users)
+    return {"ok": True}
+
+
+def _set_password(username: str, new: str) -> None:
+    with _LOCK:
+        users = _load_users()
+        users[username]["pw"] = hash_password(new)
+        _atomic_write_json(_USERS_FILE, users)
+
+
+def reset_password_by_phone(username: str, phone: str, new_password: str) -> dict:
+    """Password recovery: login + registered phone must match. On success the
+    password is replaced and EVERY existing session of the user is revoked."""
+    username = normalize_username(username)
+    if len(new_password or "") < MIN_PASSWORD_LEN:
+        return {"ok": False, "error": f"Пароль не короче {MIN_PASSWORD_LEN} символов."}
+    # One generic error for «no such user» and «wrong phone» — no enumeration.
+    if not verify_phone(username, phone):
+        return {"ok": False, "error": "Логин и номер телефона не совпадают."}
+    _set_password(username, new_password)
+    destroy_user_sessions(username)
+    return {"ok": True}
+
+
 def registration_allowed(code: str | None) -> tuple[bool, str]:
     """Policy: the first user bootstraps freely; afterwards a registration code
     (VTX_REGISTRATION_CODE) is required, unless VTX_ALLOW_OPEN_REGISTRATION=1."""
@@ -175,13 +238,18 @@ def registration_allowed(code: str | None) -> tuple[bool, str]:
     return False, "Регистрация закрыта администратором."
 
 
-def create_user(username: str, password: str, code: str | None = None) -> dict:
+def create_user(username: str, password: str, code: str | None = None,
+                phone: str | None = None) -> dict:
     username = normalize_username(username)
     if not _USERNAME_RE.match(username):
         return {"ok": False, "error": "Логин: 3–32 символа, латиница/цифры/._-, "
                 "начинается с буквы или цифры."}
     if len(password or "") < MIN_PASSWORD_LEN:
         return {"ok": False, "error": f"Пароль не короче {MIN_PASSWORD_LEN} символов."}
+    norm_phone = normalize_phone(phone)
+    if not norm_phone:
+        return {"ok": False, "error": "Укажите номер телефона (10–15 цифр) — "
+                "он нужен для восстановления пароля."}
     ok, why = registration_allowed(code)
     if not ok:
         return {"ok": False, "error": why}
@@ -190,6 +258,7 @@ def create_user(username: str, password: str, code: str | None = None) -> dict:
         if username in users:
             return {"ok": False, "error": "Такой логин уже существует."}
         users[username] = {"pw": hash_password(password), "created_at": time.time(),
+                           "phone": norm_phone,
                            "is_admin": not bool(users)}  # first user = admin
         _atomic_write_json(_USERS_FILE, users)
     user_dir(username)  # create their private dir up-front
@@ -207,16 +276,22 @@ def verify_user(username: str, password: str) -> bool:
     return verify_password(password, rec.get("pw", ""))
 
 
-def change_password(username: str, old: str, new: str) -> dict:
+def change_password(username: str, new: str, old: str | None = None,
+                    phone: str | None = None) -> dict:
+    """Change the password from the profile. The user proves it's them with
+    EITHER the current password OR the registered phone number."""
     username = normalize_username(username)
-    if not verify_user(username, old):
-        return {"ok": False, "error": "Текущий пароль неверный."}
     if len(new or "") < MIN_PASSWORD_LEN:
         return {"ok": False, "error": f"Пароль не короче {MIN_PASSWORD_LEN} символов."}
-    with _LOCK:
-        users = _load_users()
-        users[username]["pw"] = hash_password(new)
-        _atomic_write_json(_USERS_FILE, users)
+    if old:
+        if not verify_user(username, old):
+            return {"ok": False, "error": "Текущий пароль неверный."}
+    elif phone:
+        if not verify_phone(username, phone):
+            return {"ok": False, "error": "Номер телефона не совпадает."}
+    else:
+        return {"ok": False, "error": "Подтвердите личность: текущий пароль или телефон."}
+    _set_password(username, new)
     return {"ok": True}
 
 
@@ -312,6 +387,19 @@ def destroy_session(token: str | None) -> None:
     with _LOCK:
         sessions = _load_sessions()
         if sessions.pop(_token_key(token), None) is not None:
+            _atomic_write_json(_SESSIONS_FILE, sessions)
+
+
+def destroy_user_sessions(username: str) -> None:
+    """Revoke EVERY session of a user (called after a password recovery, so a
+    possibly-compromised old session dies with the old password)."""
+    username = normalize_username(username)
+    with _LOCK:
+        sessions = _load_sessions()
+        stale = [k for k, s in sessions.items() if s.get("user") == username]
+        for k in stale:
+            sessions.pop(k, None)
+        if stale:
             _atomic_write_json(_SESSIONS_FILE, sessions)
 
 

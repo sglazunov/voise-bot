@@ -191,3 +191,74 @@ class TestCryptoPrimitives:
     def test_empty_secret_stays_empty(self):
         assert security.encrypt_secret("alice", "") == ""
         assert security.decrypt_secret("alice", "") == ""
+
+
+class TestPhoneRecovery:
+    """Password recovery by login+phone, plus the profile phone/password flows."""
+
+    def test_registration_requires_phone(self, client):
+        assert register(client, phone="").status_code == 400
+        assert register(client, phone="12345").status_code == 400   # implausible
+        assert register(client, phone="+7 999 000-00-00").status_code == 200
+
+    def test_recover_with_correct_phone_resets_password(self, client):
+        register(client, "alice", phone="8 (999) 000-00-00")  # 8XXX == +7XXX
+        client.post("/api/auth/logout")
+        r = client.post("/api/auth/recover", json={
+            "username": "alice", "phone": "+79990000000",
+            "new_password": "brand-new-pass1"})
+        assert r.status_code == 200
+        assert login(client, "alice", "password123").status_code == 401  # old dead
+        assert login(client, "alice", "brand-new-pass1").status_code == 200
+
+    def test_recover_with_wrong_phone_rejected(self, client):
+        register(client, "alice")
+        client.post("/api/auth/logout")
+        r = client.post("/api/auth/recover", json={
+            "username": "alice", "phone": "+79995554433",
+            "new_password": "brand-new-pass1"})
+        assert r.status_code == 400
+        assert login(client, "alice", "password123").status_code == 200  # unchanged
+
+    def test_recover_revokes_existing_sessions(self, client):
+        register(client, "alice")                       # logged in via cookie
+        assert client.get("/api/auth/me").status_code == 200
+        from starlette.testclient import TestClient
+        from app.main import app
+        client2 = TestClient(app)
+        client2.post("/api/auth/recover", json={
+            "username": "alice", "phone": "+79990000000",
+            "new_password": "brand-new-pass1"})
+        # the old session cookie must be dead after the reset
+        assert client.get("/api/auth/me").status_code == 401
+
+    def test_profile_change_phone_needs_password(self, client):
+        register(client, "alice")
+        bad = client.post("/api/profile/phone",
+                          json={"password": "wrong", "phone": "+79991112233"})
+        assert bad.status_code == 400
+        ok = client.post("/api/profile/phone",
+                         json={"password": "password123", "phone": "+79991112233"})
+        assert ok.status_code == 200
+        client.post("/api/auth/logout")
+        # recovery now works only with the NEW phone
+        assert client.post("/api/auth/recover", json={
+            "username": "alice", "phone": "+79990000000",
+            "new_password": "brand-new-pass1"}).status_code == 400
+        assert client.post("/api/auth/recover", json={
+            "username": "alice", "phone": "+79991112233",
+            "new_password": "brand-new-pass1"}).status_code == 200
+
+    def test_profile_change_password_by_phone(self, client):
+        register(client, "alice")
+        r = client.post("/api/profile/password", json={
+            "new_password": "changed-by-phone1", "phone": "+79990000000"})
+        assert r.status_code == 200
+        client.post("/api/auth/logout")
+        assert login(client, "alice", "changed-by-phone1").status_code == 200
+
+    def test_profile_masks_phone(self, client):
+        register(client, "alice", phone="+79991234567")
+        d = client.get("/api/profile").json()
+        assert d["phone_masked"].endswith("67")
+        assert "9991234" not in d["phone_masked"]   # middle digits hidden
