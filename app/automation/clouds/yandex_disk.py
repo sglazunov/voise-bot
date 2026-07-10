@@ -73,8 +73,14 @@ def upload(file_path: str, name: str, cfg: dict) -> dict:
         if not href:
             raise CloudError(f"Яндекс.Диск не дал ссылку на загрузку: {info}")
 
-        # Big recordings take a while — give the upload a generous timeout.
-        put_status, _ = request("PUT", href, data=src.read_bytes(), timeout=1800)
+        # Big recordings take a while — stream from disk (an hour of video is
+        # hundreds of MB; read_bytes() would hold it all in RAM) with a
+        # generous timeout.
+        with src.open("rb") as f:
+            put_status, _ = request(
+                "PUT", href, data=f,
+                headers={"Content-Length": str(src.stat().st_size)},
+                timeout=3600)
         if put_status not in (201, 202):
             raise CloudError(f"Загрузка не удалась (HTTP {put_status}).")
 

@@ -13,11 +13,15 @@ class CloudError(RuntimeError):
 
 
 def request(method: str, url: str, *, headers: dict | None = None,
-            params: dict | None = None, data: bytes | None = None,
+            params: dict | None = None, data: Any = None,
             timeout: int = 120) -> tuple[int, bytes]:
     """Raw HTTP request. Returns (status, body). Raises CloudError on transport
     errors; HTTP error statuses are returned (so callers can treat e.g. 409 as
-    'already exists')."""
+    'already exists').
+
+    `data` may be bytes OR a file-like object — pass an open file plus a
+    Content-Length header to STREAM a big upload instead of holding the whole
+    recording in RAM."""
     if params:
         url += "?" + urllib.parse.urlencode(
             {k: v for k, v in params.items() if v is not None})

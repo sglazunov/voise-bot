@@ -40,6 +40,7 @@ class MeetingState:
     detail: str = ""
     job_id: str | None = None
     cloud_url: str | None = None
+    upload_error: str | None = None   # why the video didn't reach the cloud (retrying)
     do_protocol: bool = False         # whether this meeting also builds a protocol
     record_flag: bool | None = None   # Weeek checkbox «Запись встречи»: True/False/unset
     stop_flag: bool = False           # manual "stop this recording"
@@ -50,6 +51,7 @@ class MeetingState:
                 "start": self.start.isoformat() if self.start else None,
                 "state": self.state, "detail": self.detail,
                 "job_id": self.job_id, "cloud_url": self.cloud_url,
+                "upload_error": self.upload_error,
                 "do_protocol": self.do_protocol, "record_flag": self.record_flag}
 
 
@@ -301,15 +303,20 @@ class Scheduler:
                 return
             out = res.get("path") or out  # telemost mode may save .webm, not .mp4
 
-            # Upload to the chosen cloud (best effort — failure isn't fatal).
+            # Upload to the chosen cloud. Recordings must NOT live on this
+            # server — the local file is only a staging copy, so a failed upload
+            # retries here and then keeps retrying in the background until the
+            # video lands in the cloud (see _late_upload).
             self._set(st, "uploading", "Выгружаю запись в облако…")
-            up = clouds.upload(out, Path(out).name, cfg)
+            up = self._upload_with_retry(out, cfg, log)
             if up.get("ok"):
                 st.cloud_url = up.get("url")  # public share link (or None)
+                st.upload_error = None
                 if up.get("public_note"):
                     log(up["public_note"])
             else:
-                log(f"Облако: {up.get('error')}")
+                st.upload_error = up.get("error") or "облако недоступно"
+                log(f"Облако: {st.upload_error}")
 
             # Write the recording link into the task's «Видео встречи» custom field.
             field = (cfg.get("weeek_video_field") or "").strip()
@@ -324,16 +331,7 @@ class Scheduler:
             # dir), the staging copy in data/recordings is redundant and must not
             # linger inside the server. We delete it after the pipeline is done
             # (transcription still needs to read it first).
-            delivered_elsewhere = False
-            if up.get("ok"):
-                if up.get("backend") != "local":
-                    delivered_elsewhere = True
-                else:
-                    try:
-                        delivered_elsewhere = (Path(up.get("path") or "").resolve()
-                                               != Path(out).resolve())
-                    except OSError:
-                        delivered_elsewhere = False
+            delivered_elsewhere = self._delivered_elsewhere(up, out)
 
             # Optionally hand off to the transcription / protocol pipeline.
             # Recording always happens; transcription and protocol are separate
@@ -373,6 +371,13 @@ class Scheduler:
                     except OSError:
                         pass
 
+            # The cloud didn't take the video: keep retrying in the background
+            # until it does — recordings must not be stored on this server.
+            if not up.get("ok"):
+                threading.Thread(target=self._late_upload,
+                                 args=(user, st, cfg, out),
+                                 daemon=True, name="vtx-late-upload").start()
+
             # Post the cloud link back to Weeek (protocol is produced later).
             if cfg.get("post_back_to_weeek") and st.cloud_url:
                 tail = (f"\nРаспознавание/протокол: job {job.id}." if job
@@ -382,7 +387,9 @@ class Scheduler:
                     f"🎥 Запись встречи: {st.cloud_url}{tail}")
                 log(f"Комментарий в Weeek: {'ок' if ok else 'не удалось'}")
 
-            where = "в облаке" if st.cloud_url else "локально"
+            where = ("в облаке" if st.cloud_url else
+                     "пока локально — облако не приняло, выгружаю в фоне"
+                     if st.upload_error else "локально")
             if not do_transcribe:
                 self._set(st, "done", f"Готово. Запись {where} (распознавание отключено).")
             else:
@@ -396,6 +403,73 @@ class Scheduler:
             self._set(st, "error", f"Сбой: {e}")
         finally:
             recorder.release_slot(slot)
+
+    # -- recording delivery: the local file is only a staging copy ----------
+    def _upload_with_retry(self, out: str, cfg: dict, log, attempts: int = 3) -> dict:
+        """Upload the recording, retrying a few times with a pause — one network
+        hiccup must not leave a meeting's video stranded on the server."""
+        last: dict = {}
+        for i in range(attempts):
+            if i:
+                log(f"Облако: повтор выгрузки {i + 1}/{attempts}…")
+                time.sleep(20 * i)
+            try:
+                last = clouds.upload(out, Path(out).name, cfg)
+            except Exception as e:  # noqa: BLE001 — an uploader bug isn't fatal
+                last = {"ok": False, "error": str(e)}
+            if last.get("ok"):
+                return last
+            log(f"Облако (попытка {i + 1}/{attempts}): {last.get('error')}")
+        return last or {"ok": False, "error": "облако недоступно"}
+
+    @staticmethod
+    def _delivered_elsewhere(up: dict, out: str) -> bool:
+        """True when the upload put the file somewhere OTHER than the staging
+        path — then the local copy is redundant and must be deleted."""
+        if not up.get("ok"):
+            return False
+        if up.get("backend") != "local":
+            return True
+        try:
+            return Path(up.get("path") or "").resolve() != Path(out).resolve()
+        except OSError:
+            return False
+
+    def _late_upload(self, user: str, st: MeetingState, cfg: dict, out: str) -> None:
+        """The cloud refused the video at recording time. Keep retrying (every
+        5 min, up to 4 h): on success fill the Weeek field/comment exactly like
+        the normal path would have, then get rid of the local copy — videos are
+        not stored on this server."""
+        deadline = time.time() + 4 * 3600
+        while time.time() < deadline and not self._stop.is_set():
+            time.sleep(300)
+            if not Path(out).exists():
+                return  # purged (retention) — nothing left to deliver
+            up = self._upload_with_retry(out, cfg, lambda *_: None, attempts=1)
+            if not up.get("ok"):
+                st.upload_error = up.get("error") or "облако недоступно"
+                continue
+            st.cloud_url = up.get("url")
+            st.upload_error = None
+            token = cfg.get("weeek_token")
+            field = (cfg.get("weeek_video_field") or "").strip()
+            if cfg.get("weeek_set_video_field", True) and st.cloud_url and field:
+                weeek.set_custom_field(token, st.task_id, field, st.cloud_url)
+            if cfg.get("post_back_to_weeek") and st.cloud_url:
+                weeek.add_comment(token, st.task_id,
+                                  f"🎥 Запись встречи: {st.cloud_url}")
+            if self._delivered_elsewhere(up, out):
+                job = store.get(st.job_id) if st.job_id else None
+                if job and job.status in ("queued", "running", "paused", "analyzing"):
+                    # Recognition still reads the file — it deletes it on finish.
+                    job.delete_audio_when_done = True
+                else:
+                    for p in (out, out + ".ffmpeg.log"):
+                        try:
+                            Path(p).unlink(missing_ok=True)
+                        except OSError:
+                            pass
+            return
 
     def _await_and_upload_protocol(self, user: str, task_id, job_id: str,
                                    cfg: dict, base_name: str) -> None:
@@ -418,8 +492,16 @@ class Scheduler:
         if not docx.exists():
             return
         # Protocols go into their OWN cloud folder (separate from the recordings).
-        up = clouds.upload(str(docx), f"{base_name} - протокол.docx", cfg,
-                           folder=(cfg.get("protocol_folder") or "").strip() or None)
+        # Same rule as the video: one network hiccup must not lose the delivery.
+        folder = (cfg.get("protocol_folder") or "").strip() or None
+        up = {}
+        for i in range(3):
+            if i:
+                time.sleep(20 * i)
+            up = clouds.upload(str(docx), f"{base_name} - протокол.docx", cfg,
+                               folder=folder)
+            if up.get("ok"):
+                break
         if not (up.get("ok") and up.get("url")):
             return
         field = (cfg.get("weeek_protocol_field") or "").strip()
@@ -435,7 +517,9 @@ class Scheduler:
         job = store.get(jid)
         if job is None:
             return
-        where = "в облаке" if m.get("cloud_url") else "локально"
+        where = ("в облаке" if m.get("cloud_url") else
+                 "⚠ пока локально — выгружаю в облако повторно"
+                 if m.get("upload_error") else "локально")
         dp = m.get("do_protocol")
         st = job.status
         if st in ("queued", "running", "paused"):
