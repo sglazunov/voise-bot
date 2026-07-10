@@ -30,6 +30,10 @@ CPU_THREADS = int(os.getenv("VTX_CPU_THREADS", "6"))
 BEAM_SIZE = int(os.getenv("VTX_BEAM_SIZE", "5"))
 DEFAULT_LANGUAGE = os.getenv("VTX_LANGUAGE", "ru")
 VAD_FILTER = os.getenv("VTX_VAD", "1") == "1"
+# Feed the previous window's text back as context. OFF by default: it makes one
+# recognition error snowball into "guessed" phrases over a long meeting; with it
+# off every window is decoded strictly from its own audio.
+CONDITION_PREV_TEXT = os.getenv("VTX_CONDITION_PREV", "0") == "1"
 
 # Max upload size in MB. 2 GB by default so 1 GB videos go through comfortably.
 MAX_UPLOAD_MB = int(os.getenv("VTX_MAX_UPLOAD_MB", "2048"))

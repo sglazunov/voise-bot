@@ -483,9 +483,25 @@ class JobStore:
                 if total > 0:
                     self._set(job, persist=False, progress=min(seg.end / total, 0.999))
 
+            # Video sharpens recognition: read the participants' names off the
+            # Telemost tiles FIRST and hand them to Whisper as a prompt — real
+            # names are then written as shown on screen, not guessed by sound.
+            initial_prompt = job.initial_prompt
+            if job.identify_speakers:
+                try:
+                    from . import speaker_id
+                    if speaker_id.is_video(job.audio_path):
+                        names = speaker_id.scan_names(job.audio_path)
+                        if names:
+                            initial_prompt = (f"{initial_prompt} "
+                                              f"Участники встречи: {', '.join(names)}."
+                                              ).strip()
+                except Exception:  # a video quirk must not block transcription
+                    pass
+
             segments, meta = transcribe_file(
                 job.audio_path, language=job.language, on_segment=on_segment,
-                on_start=on_start, initial_prompt=job.initial_prompt,
+                on_start=on_start, initial_prompt=initial_prompt,
                 model_name=job.model or None,
             )
 

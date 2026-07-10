@@ -72,9 +72,16 @@ def transcribe_file(
         audio_path,
         language=language or config.DEFAULT_LANGUAGE,
         vad_filter=config.VAD_FILTER,
+        # Finer VAD (0.5 s of silence instead of the 2 s default) trims the
+        # quiet gaps where Whisper likes to "dream up" words that weren't said.
+        vad_parameters={"min_silence_duration_ms": 500},
         beam_size=config.BEAM_SIZE,
+        best_of=config.BEAM_SIZE,
         initial_prompt=initial_prompt or None,
-        condition_on_previous_text=True,
+        # OFF by default: carrying the previous window's text as context lets one
+        # mis-heard word snowball into invented phrases across a long meeting.
+        # With it off, every window is transcribed strictly from its own audio.
+        condition_on_previous_text=config.CONDITION_PREV_TEXT,
     )
 
     total = float(getattr(info, "duration", 0.0) or 0.0)

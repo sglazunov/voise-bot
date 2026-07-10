@@ -221,6 +221,33 @@ def _canonicalise(names: List[str]) -> dict:
     return canon
 
 
+def scan_names(video_path: str, every_sec: float = 20.0,
+               max_frames: int = 90) -> List[str]:
+    """Quick pre-pass BEFORE transcription: collect the participants' names from
+    the Telemost tiles (the green active-speaker frame + its label).
+
+    The names are fed to Whisper as an initial prompt, so real names are WRITTEN
+    AS ON SCREEN instead of being guessed by sound («Кирилл» stays «Кирилл», not
+    «Кирил»/«Кириллл»). Coarse sampling keeps it fast on hour-long videos."""
+    seen_raw: List[str] = []
+    for _t, arr, img in _sample_frames(video_path, every_sec, max_frames):
+        bbox = _active_bbox(arr)
+        if bbox is None:
+            continue
+        name = _read_name(img, bbox)
+        if name:
+            seen_raw.append(name)
+    if not seen_raw:
+        return []
+    canon = _canonicalise(seen_raw)
+    out: List[str] = []
+    for n in seen_raw:
+        c = canon.get(n)
+        if c and c not in out:
+            out.append(c)
+    return out
+
+
 def identify_speakers(video_path: str, segments: List[Segment]) -> List[Segment]:
     """Detect the active speaker per moment from the video and label each
     transcript segment in place with the speaker's name. Returns `segments`.
