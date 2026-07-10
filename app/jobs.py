@@ -81,6 +81,7 @@ class Job:
     screen_error: Optional[str] = None       # why screen OCR didn't run, if asked
     protocol_cloud_url: Optional[str] = None  # cloud link of the delivered protocol
     delivery_error: Optional[str] = None     # why cloud/Weeek delivery didn't happen
+    video_participants: list = field(default_factory=list)  # names read off the call grid
     screen_segments: int = 0                 # number of on-screen text snapshots
     analysis: Optional[dict] = None        # structured analysis result (latest)
     analysis_error: Optional[str] = None   # error message if analysis failed
@@ -291,6 +292,8 @@ class JobStore:
         return job
 
     def _do_reanalyze(self, job: Job, txt: str) -> None:
+        if "УЧАСТНИКИ ЗВОНКА" not in txt:
+            txt += _participants_block(job)
         self._analysis[job.id] = {"stage": "Готовлю анализ…", "text": "", "chars": 0}
         self._set(job, status=STATUS_ANALYZING, analysis_error=None)
         try:
@@ -486,13 +489,17 @@ class JobStore:
             # Video sharpens recognition: read the participants' names off the
             # Telemost tiles FIRST and hand them to Whisper as a prompt — real
             # names are then written as shown on screen, not guessed by sound.
+            # The full grid scan is also the AUTHORITATIVE participants list for
+            # the protocol (everyone connected to the call, no LLM guessing).
             initial_prompt = job.initial_prompt
             if job.identify_speakers:
                 try:
                     from . import speaker_id
                     if speaker_id.is_video(job.audio_path):
-                        names = speaker_id.scan_names(job.audio_path)
+                        names = (speaker_id.scan_participants(job.audio_path)
+                                 or speaker_id.scan_names(job.audio_path))
                         if names:
+                            job.video_participants = names
                             initial_prompt = (f"{initial_prompt} "
                                               f"Участники встречи: {', '.join(names)}."
                                               ).strip()
@@ -571,8 +578,9 @@ class JobStore:
                     screen_err = str(e)
 
             # Text fed to the protocol analysis = continuous speech (no timestamps)
-            # + on-screen text. Cleaner prose → a more accurate protocol.
+            # + on-screen text + the participants read off the call grid.
             analysis_input = plain_content + (("\n\n" + screen_block) if screen_block else "")
+            analysis_input += _participants_block(job)
 
             # AI analysis + Word document (optional, requires ANTHROPIC_API_KEY)
             analysis_result = None
@@ -674,6 +682,16 @@ class JobStore:
                 pass
         self._control.pop(job.id, None)
         self._set(job, status=STATUS_CANCELLED, finished_at=time.time())
+
+
+def _participants_block(job: "Job") -> str:
+    """The «who is on the call» block for the LLM — names read off the video
+    grid are authoritative, so the protocol lists exactly these people."""
+    names = getattr(job, "video_participants", None) or []
+    if not names:
+        return ""
+    return ("\n\n=== УЧАСТНИКИ ЗВОНКА (распознано с видео) ===\n"
+            + ", ".join(names))
 
 
 def _weeek_task_id(raw: str) -> str:

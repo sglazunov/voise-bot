@@ -11,6 +11,7 @@ gated by the `enabled` setting so the user controls it from the UI.
 """
 from __future__ import annotations
 
+import json
 import os
 import threading
 import time
@@ -164,6 +165,10 @@ class Scheduler:
                                       record_flag=flag)
                     if m.start is None:
                         st.state, st.detail = "no_time", "В задаче не указано время встречи."
+                    # A restart wipes the in-memory states; without this, a
+                    # meeting the PREVIOUS process already recorded would come
+                    # back as «пропущена». Restore its real outcome from disk.
+                    self._restore_snapshot(st)
                     self._states[key] = st
                 elif st.state == "scheduled":
                     st.url, st.title, st.start = m.url, m.title, m.start
@@ -355,6 +360,7 @@ class Scheduler:
                     delete_audio_when_done=delivered_elsewhere,
                     owner=user)
                 st.job_id = job.id
+                self._save_state(st)  # remember the job across restarts
                 # Once the protocol (.docx) is built, upload it to the same cloud
                 # and link it in Weeek — in a background waiter so the recording
                 # lock isn't held during transcription.
@@ -458,6 +464,7 @@ class Scheduler:
             if cfg.get("post_back_to_weeek") and st.cloud_url:
                 weeek.add_comment(token, st.task_id,
                                   f"🎥 Запись встречи: {st.cloud_url}")
+            self._save_state(st)  # the late-delivered cloud link survives restarts
             if self._delivered_elsewhere(up, out):
                 job = store.get(st.job_id) if st.job_id else None
                 if job and job.status in ("queued", "running", "paused", "analyzing"):
@@ -542,9 +549,63 @@ class Scheduler:
             m["state"] = "done"
             m["detail"] = f"Распознавание отменено — запись {where}, job {jid}."
 
+    # -- meeting-state persistence (survives restarts) -----------------------
+    # Deploys restart the process, wiping the in-memory states; these snapshots
+    # keep the outcome of already-handled meetings, so they don't come back as
+    # «пропущена» after every `docker compose up -d --build`.
+    _PERSIST_STATES = {"recording", "uploading", "transcribing", "analyzing",
+                       "done", "error"}
+
+    def _snap_path(self, user: str) -> Path:
+        return security.user_dir(user) / "meetings.json"
+
+    def _load_snaps(self, user: str) -> dict:
+        try:
+            return json.loads(self._snap_path(user).read_text(encoding="utf-8")) or {}
+        except (OSError, ValueError):
+            return {}
+
+    def _save_state(self, st: MeetingState) -> None:
+        try:
+            snaps = self._load_snaps(st.owner)
+            snaps[st.key] = {"state": st.state, "detail": st.detail,
+                             "job_id": st.job_id, "cloud_url": st.cloud_url,
+                             "do_protocol": st.do_protocol,
+                             "saved_at": time.time()}
+            if len(snaps) > 200:  # keep the newest 200
+                for k in sorted(snaps, key=lambda k: snaps[k].get("saved_at", 0))[:-200]:
+                    snaps.pop(k, None)
+            p = self._snap_path(st.owner)
+            tmp = p.with_suffix(".tmp")
+            tmp.write_text(json.dumps(snaps, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, p)
+        except Exception:  # persistence is best-effort, never breaks the loop
+            pass
+
+    def _restore_snapshot(self, st: MeetingState) -> None:
+        """Fill a freshly discovered MeetingState from its saved outcome."""
+        snap = self._load_snaps(st.owner).get(st.key)
+        if not snap:
+            return
+        st.job_id = snap.get("job_id")
+        st.cloud_url = snap.get("cloud_url")
+        st.do_protocol = bool(snap.get("do_protocol"))
+        state = snap.get("state")
+        if state in ("done", "error"):
+            st.state, st.detail = state, snap.get("detail", "")
+        else:
+            # The restart caught it mid-pipeline. The recording itself finished
+            # or not — judge by whether the cloud already has the video.
+            st.state = "done" if st.cloud_url else "error"
+            st.detail = ("Прервано перезапуском сервиса — запись в облаке."
+                         if st.cloud_url else
+                         "Прервано перезапуском сервиса.")
+
     def _set(self, st: MeetingState, state: str, detail: str) -> None:
         with self._lock:
             st.state, st.detail = state, detail
+        if state in self._PERSIST_STATES:
+            self._save_state(st)
 
     def stop_recording(self, user: str | None = None, task_id=None) -> dict:
         """Stop recording(s) in progress. With `task_id` — just that meeting;

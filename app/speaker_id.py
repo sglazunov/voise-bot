@@ -124,43 +124,98 @@ def _green_mask(arr):
             & (r <= _R_MAX) & (b <= _B_MAX))
 
 
+def _green_components(mask, step_target: int = 320):
+    """Connected components of the green mask, as full-res bounding boxes.
+
+    Needed because a real Telemost frame has MORE green than the highlight: the
+    recording bot's avatar circle is green, someone's photo may be green. A
+    global bounding box over all green pixels would merge them into nonsense —
+    each blob must be judged on its own. Downsampling uses block-OR so the thin
+    highlight border survives, then a simple BFS labels the blobs."""
+    import numpy as np
+    from collections import deque
+
+    H, W = mask.shape
+    step = max(1, int(max(H, W) / step_target))
+    h2, w2 = H - H % step, W - W % step
+    small = mask[:h2, :w2].reshape(h2 // step, step, w2 // step, step).any(axis=(1, 3))
+
+    lbl = np.zeros(small.shape, dtype=np.int32)
+    comps = []
+    nh, nw = small.shape
+    cur = 0
+    for i in range(nh):
+        for j in range(nw):
+            if not small[i, j] or lbl[i, j]:
+                continue
+            cur += 1
+            lbl[i, j] = cur
+            q = deque([(i, j)])
+            r0 = r1 = i
+            c0 = c1 = j
+            while q:
+                y, x = q.popleft()
+                r0, r1 = min(r0, y), max(r1, y)
+                c0, c1 = min(c0, x), max(c1, x)
+                for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    yy, xx = y + dy, x + dx
+                    if 0 <= yy < nh and 0 <= xx < nw and small[yy, xx] and not lbl[yy, xx]:
+                        lbl[yy, xx] = cur
+                        q.append((yy, xx))
+            comps.append((r0 * step, min((r1 + 1) * step - 1, H - 1),
+                          c0 * step, min((c1 + 1) * step - 1, W - 1)))
+    return comps
+
+
+def _is_border_rect(mask, bbox, H, W) -> bool:
+    """Does this blob look like a RECTANGLE BORDER around a non-green tile?
+    Rejects solid blobs (green avatars/clothing) and scattered green."""
+    r0, r1, c0, c1 = bbox
+    h, w = r1 - r0 + 1, c1 - c0 + 1
+    if h < _MIN_TILE * H or w < _MIN_TILE * W:
+        return False
+    sub = mask[r0:r1 + 1, c0:c1 + 1]
+    # A solid blob (the bot's green avatar circle, a green shirt) fills its
+    # bbox; a highlight frame is hollow.
+    if sub.sum() / float(h * w) > _FILL_MAX:
+        return False
+    # All four edges must be substantially green — a full rectangle frame.
+    bw = max(2, int(0.012 * min(H, W)))
+    top = sub[:bw, :].any(axis=0).mean()
+    bot = sub[-bw:, :].any(axis=0).mean()
+    left = sub[:, :bw].any(axis=1).mean()
+    right = sub[:, -bw:].any(axis=1).mean()
+    return min(top, bot, left, right) >= _EDGE_MIN
+
+
 def _active_bbox(arr) -> Optional[Tuple[int, int, int, int]]:
     """Bounding box (r0, r1, c0, c1) of the green active-speaker frame, or None.
 
-    Accepts only a shape that looks like a *rectangle border* around an
-    otherwise non-green tile — this rejects green clothing/plants/backgrounds
-    (solid blobs) and stray green pixels (no full frame)."""
-    import numpy as np
+    Looks at every green blob SEPARATELY (see _green_components) and returns the
+    largest one shaped like a rectangle border — so the bot's green avatar or a
+    green photo elsewhere in the grid can't break the detection."""
     H, W = arr.shape[:2]
     mask = _green_mask(arr)
     if mask.sum() < 200:  # basically no green — no active highlight
         return None
+    best, best_area = None, 0
+    for bbox in _green_components(mask):
+        if not _is_border_rect(mask, bbox, H, W):
+            continue
+        area = (bbox[1] - bbox[0]) * (bbox[3] - bbox[2])
+        if area > best_area:
+            best, best_area = bbox, area
+    return best
 
-    rows = np.where(mask.any(axis=1))[0]
-    cols = np.where(mask.any(axis=0))[0]
-    if rows.size == 0 or cols.size == 0:
-        return None
-    r0, r1 = int(rows[0]), int(rows[-1])
-    c0, c1 = int(cols[0]), int(cols[-1])
-    h, w = r1 - r0 + 1, c1 - c0 + 1
-    if h < _MIN_TILE * H or w < _MIN_TILE * W:
-        return None
 
-    # Solid green blob (e.g. a green shirt) fills its bbox; a frame does not.
-    fill = mask.sum() / float(h * w)
-    if fill > _FILL_MAX:
-        return None
-
-    # Require all four edges to be substantially covered by green — i.e. a full
-    # rectangle frame, not an L-shape or scattered green.
-    bw = max(2, int(0.012 * min(H, W)))
-    top = mask[r0:r0 + bw, c0:c1 + 1].any(axis=0).mean()
-    bot = mask[r1 - bw + 1:r1 + 1, c0:c1 + 1].any(axis=0).mean()
-    left = mask[r0:r1 + 1, c0:c0 + bw].any(axis=1).mean()
-    right = mask[r0:r1 + 1, c1 - bw + 1:c1 + 1].any(axis=1).mean()
-    if min(top, bot, left, right) < _EDGE_MIN:
-        return None
-    return r0, r1, c0, c1
+def _clean_line(line: str) -> str:
+    """Normalise one OCR line into a plausible display name ('' if junk)."""
+    line = re.sub(r"[^0-9A-Za-zА-Яа-яЁё .\-]", " ", line)
+    line = re.sub(r"\s+", " ", line).strip(" .-")
+    letters = sum(ch.isalpha() for ch in line)
+    if letters < 2 or len(line) > 40:
+        return ""
+    return line
 
 
 def _clean_name(raw: str) -> str:
@@ -169,12 +224,7 @@ def _clean_name(raw: str) -> str:
     if not lines:
         return ""
     # The line with the most letters is the name (icons/mic glyphs OCR as junk).
-    line = max(lines, key=lambda ln: sum(ch.isalpha() for ch in ln))
-    line = re.sub(r"[^0-9A-Za-zА-Яа-яЁё .\-]", " ", line)
-    line = re.sub(r"\s+", " ", line).strip(" .-")
-    if sum(ch.isalpha() for ch in line) < 2:
-        return ""
-    return line[:40].strip()
+    return _clean_line(max(lines, key=lambda ln: sum(ch.isalpha() for ch in ln)))
 
 
 def _read_name(img, bbox) -> str:
@@ -245,6 +295,52 @@ def scan_names(video_path: str, every_sec: float = 20.0,
         c = canon.get(n)
         if c and c not in out:
             out.append(c)
+    return out
+
+
+def scan_participants(video_path: str, every_sec: float = 60.0,
+                      max_frames: int = 8, min_seen: int = 2) -> List[str]:
+    """Read the name labels of EVERY tile in the call grid — the people actually
+    connected to the call, exactly as Telemost prints them under the tiles.
+
+    A few frames spread across the meeting are OCR'd whole (labels persist from
+    frame to frame; OCR noise doesn't — so a name must show up in at least
+    `min_seen` frames). The recording bot's own tile is dropped. The result is
+    the AUTHORITATIVE participants list for the protocol: no guessing from
+    speech."""
+    import pytesseract
+    from collections import Counter
+    from . import screen_ocr
+    screen_ocr._point_pytesseract_at_binary()
+
+    counts: Counter = Counter()
+    frames = 0
+    for _t, _arr, img in _sample_frames(video_path, every_sec, max_frames):
+        frames += 1
+        big = img.resize((img.width * 2, img.height * 2))  # labels are tiny
+        try:
+            raw = pytesseract.image_to_string(big, lang="rus+eng", config="--psm 11")
+        except Exception:
+            continue
+        seen_here = set()
+        for ln in raw.splitlines():
+            name = _clean_line(ln.strip())
+            if name and sum(ch.isalpha() for ch in name) >= 3:
+                seen_here.add(name)
+        counts.update(seen_here)
+    if not counts:
+        return []
+    need = min_seen if frames >= min_seen else 1
+    stable = [n for n, c in counts.items() if c >= need]
+    canon = _canonicalise(stable)
+    out: List[str] = []
+    for n in stable:
+        c = canon.get(n)
+        if not c or c in out:
+            continue
+        if re.search(r"\b(бот|bot)\b", c.lower()):  # the recorder itself
+            continue
+        out.append(c)
     return out
 
 
