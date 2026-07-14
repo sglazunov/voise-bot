@@ -285,6 +285,13 @@ class Scheduler:
                     self._set(st, "recording", msg)
 
             self._set(st, "recording", "Бот заходит на встречу…")
+            # A RECURRING Weeek task carries the PREVIOUS occurrence's links in
+            # its custom fields (the task is duplicated with old values). Wipe
+            # «Видео встречи»/«Протокол встречи» at recording start, so the task
+            # never shows last week's video/protocol as if they were today's;
+            # the fresh links are written below as they become ready.
+            threading.Thread(target=self._wipe_stale_links,
+                             args=(st, cfg, log), daemon=True).start()
             # Human-readable file name: «ДД.ММ.ГГГГ, ЧЧ:ММ. - <название задачи>»
             # in the workspace timezone.
             when = (st.start.astimezone(self._tz(cfg)) if st.start
@@ -326,10 +333,8 @@ class Scheduler:
             # Write the recording link into the task's «Видео встречи» custom field.
             field = (cfg.get("weeek_video_field") or "").strip()
             if cfg.get("weeek_set_video_field", True) and st.cloud_url and field:
-                res = weeek.set_custom_field(cfg.get("weeek_token"), st.task_id,
-                                             field, st.cloud_url)
-                log(f"Поле «{field}» в Weeek: "
-                    + ("заполнено ✓" if res.get("ok") else f"не удалось — {res.get('error')}"))
+                self._write_weeek_field(cfg.get("weeek_token"), st.task_id,
+                                        field, st.cloud_url, log)
 
             # Keep the video ONLY where the UI points. If it was delivered
             # elsewhere (a remote cloud, or a local folder other than the staging
@@ -410,6 +415,42 @@ class Scheduler:
         finally:
             recorder.release_slot(slot)
 
+    # -- Weeek custom-field writes (retried; stale links wiped) --------------
+    def _wipe_stale_links(self, st: MeetingState, cfg: dict, log) -> None:
+        """Blank the video/protocol link fields of the task when recording
+        starts — a recurring task inherits LAST week's links otherwise."""
+        token = cfg.get("weeek_token")
+        for opt, fname in (("weeek_set_video_field", "weeek_video_field"),
+                           ("weeek_set_protocol_field", "weeek_protocol_field")):
+            fld = (cfg.get(fname) or "").strip()
+            if not (cfg.get(opt, True) and fld and token):
+                continue
+            try:
+                res = weeek.set_custom_field(token, st.task_id, fld, "")
+                if res.get("ok"):
+                    log(f"Поле «{fld}»: очищено от прошлой встречи.")
+            except Exception:  # cosmetic step — never blocks the recording
+                pass
+
+    def _write_weeek_field(self, token, task_id, field: str, value: str,
+                           log, attempts: int = 3) -> bool:
+        """Write a link into a Weeek custom field, retrying — the link for THIS
+        meeting must actually land, not silently stay last week's."""
+        err = None
+        for i in range(attempts):
+            if i:
+                time.sleep(10 * i)
+            try:
+                res = weeek.set_custom_field(token, task_id, field, value)
+            except Exception as e:  # noqa: BLE001
+                res = {"ok": False, "error": str(e)}
+            if res.get("ok"):
+                log(f"Поле «{field}» в Weeek: заполнено ✓")
+                return True
+            err = res.get("error")
+        log(f"Поле «{field}» в Weeek: не удалось — {err}")
+        return False
+
     # -- recording delivery: the local file is only a staging copy ----------
     def _upload_with_retry(self, out: str, cfg: dict, log, attempts: int = 3) -> dict:
         """Upload the recording, retrying a few times with a pause — one network
@@ -460,7 +501,8 @@ class Scheduler:
             token = cfg.get("weeek_token")
             field = (cfg.get("weeek_video_field") or "").strip()
             if cfg.get("weeek_set_video_field", True) and st.cloud_url and field:
-                weeek.set_custom_field(token, st.task_id, field, st.cloud_url)
+                self._write_weeek_field(token, st.task_id, field, st.cloud_url,
+                                        lambda *_: None)
             if cfg.get("post_back_to_weeek") and st.cloud_url:
                 weeek.add_comment(token, st.task_id,
                                   f"🎥 Запись встречи: {st.cloud_url}")
@@ -513,7 +555,13 @@ class Scheduler:
             return
         field = (cfg.get("weeek_protocol_field") or "").strip()
         if cfg.get("weeek_set_protocol_field", True) and field:
-            weeek.set_custom_field(cfg.get("weeek_token"), task_id, field, up["url"])
+            token = cfg.get("weeek_token")
+            ok = self._write_weeek_field(token, task_id, field, up["url"],
+                                         lambda *_: None)
+            if not ok:
+                # The link must not get lost — leave it as a comment instead.
+                weeek.add_comment(token, task_id,
+                                  f"📄 Протокол встречи: {up['url']}")
 
     def _enrich_from_job(self, m: dict) -> None:
         """Overlay the live transcription/protocol stage onto a meeting dict,
