@@ -222,6 +222,7 @@ class TelemostBot:
         # Chat stop-word bookkeeping (see maybe_chat_stop).
         self._chat_baseline = None    # stop-word lines present at first read
         self._chat_last_peek = 0.0    # last time we read the chat
+        self._chat_last_open_try = 0.0  # last attempt to open the panel
         self._chat_opened_once = False
         self._chat_warned = False
 
@@ -559,15 +560,23 @@ class TelemostBot:
     # the opened panel sits on the right with a «Сообщение…» input and a ✕.
     _CHAT_BTN = ('button:has-text("Чат")', 'button:has-text("Chat")',
                  'button[aria-label*="чат" i]', 'button[aria-label*="chat" i]')
-    _CHAT_INPUT = ('input[placeholder*="Сообщение" i]',
-                   'textarea[placeholder*="Сообщение" i]',
-                   'input[placeholder*="Message" i]')
+    # Signs the panel is open. CRUCIAL: the bot joins as a GUEST, and a guest's
+    # chat has NO message input — only a «Войдите, чтобы написать сообщение»
+    # bar. Missing that made _chat_open() always False, so the bot re-clicked
+    # «Чат» every few seconds, toggling the panel open/closed and reading it
+    # half the time closed — the stop word never fired.
+    _CHAT_OPEN_HINTS = ('input[placeholder*="Сообщение" i]',
+                        'textarea[placeholder*="Сообщение" i]',
+                        'input[placeholder*="Message" i]',
+                        'text=Войдите, чтобы написать',
+                        'text=Sign in to write')
 
     def _chat_open(self) -> bool:
-        """The panel is open when its message input is in the DOM."""
-        for sel in self._CHAT_INPUT:
+        """Is the chat panel open (works for both guest and signed-in modes)?"""
+        for sel in self._CHAT_OPEN_HINTS:
             try:
-                if self._page.query_selector(sel):
+                el = self._page.query_selector(sel)
+                if el and el.is_visible():
                     return True
             except Exception:
                 continue
@@ -614,22 +623,32 @@ class TelemostBot:
             return False
         self._chat_last_peek = now
 
-        # Keep the chat open for the whole meeting; reopen if it got closed.
+        # The chat stays open for the WHOLE meeting. «Чат» is a TOGGLE, so we
+        # click it only when the panel is definitely closed — and if we can't
+        # confirm it opened, we don't hammer the button every cycle (that's
+        # what made the panel blink open/closed before): retry once a minute.
         if not self._chat_open():
-            opened = self._click_any(self._CHAT_BTN, overall_ms=2500, poll_ms=300)
-            if opened and not self._chat_opened_once:
-                self._on_log(f"Слежу за чатом: стоп-слово «{word}».")
-                self._chat_opened_once = True
-            for _ in range(10):
-                self._page.wait_for_timeout(200)
-                if self._chat_open():
-                    break
-            if not self._chat_open():
-                if not self._chat_warned:
-                    self._on_log("⚠ Не удалось открыть чат Телемоста — стоп-слово "
-                                 "может не сработать (пришлите скриншот).")
+            if now - self._chat_last_open_try < 60 and self._chat_opened_once:
+                pass  # recently tried; read whatever is on screen meanwhile
+            else:
+                self._chat_last_open_try = now
+                try:  # the toolbar auto-hides — a mouse nudge reveals it
+                    self._page.mouse.move(500, 400)
+                    self._page.mouse.move(640, 660)
+                except Exception:
+                    pass
+                if self._click_any(self._CHAT_BTN, overall_ms=2500, poll_ms=300):
+                    if not self._chat_opened_once:
+                        self._on_log(f"Открыл чат — слежу за стоп-словом «{word}».")
+                    self._chat_opened_once = True
+                    for _ in range(15):
+                        self._page.wait_for_timeout(200)
+                        if self._chat_open():
+                            break
+                elif not self._chat_warned:
+                    self._on_log("⚠ Кнопка «Чат» не найдена — стоп-слово может "
+                                 "не сработать (пришлите скриншот встречи).")
                     self._chat_warned = True
-                # still fall through: some rooms keep chat text in the page anyway
 
         text = self._read_chat_panel()
         if text is None:
@@ -642,6 +661,10 @@ class TelemostBot:
         if n > self._chat_baseline:
             self._chat_baseline = n
             return True
+        if n < self._chat_baseline:
+            # Old stop-word lines scrolled out of the (virtualised) chat list —
+            # lower the floor, or a NEW «стоп» would never exceed the baseline.
+            self._chat_baseline = n
         return False
 
     def wait_until_end(self, should_stop, max_sec: int, alone_sec: int,
