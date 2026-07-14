@@ -222,9 +222,8 @@ class TelemostBot:
         # Chat stop-word bookkeeping (see maybe_chat_stop).
         self._chat_baseline = None    # stop-word lines present at first read
         self._chat_last_peek = 0.0    # last time we read the chat
-        self._chat_last_open_try = 0.0  # last attempt to open the panel
+        self._chat_last_n = -1        # last logged count (for live diagnostics)
         self._chat_opened_once = False
-        self._chat_warned = False
 
     # -- lifecycle ----------------------------------------------------------
     def _launch(self, headless: bool | None = None):
@@ -582,20 +581,49 @@ class TelemostBot:
                 continue
         return False
 
-    def _read_chat_panel(self) -> str | None:
-        """All visible page text (None if unreadable). When the chat panel is
-        open its messages are part of it — reading the whole page is far more
-        robust than guessing Telemost's chat CSS/structure, and a standalone
-        «стоп» line never appears elsewhere in the call UI."""
+    def open_chat(self) -> None:
+        """Open the chat panel ONCE at the start of recording and NEVER touch
+        the «Чат» button again — it's a toggle, so re-clicking it would close a
+        panel that's already open (that's why the chat kept closing after a
+        minute). If it's already open we don't click at all."""
         try:
-            txt = self._page.inner_text("body")
-            return txt if isinstance(txt, str) and txt.strip() else None
+            if self._chat_open():
+                self._chat_opened_once = True
+                self._on_log("Чат уже открыт — слежу за стоп-словом.")
+                return
+            self._page.mouse.move(500, 400)     # reveal the auto-hiding toolbar
+            self._page.mouse.move(640, 660)
         except Exception:
+            pass
+        if self._click_any(self._CHAT_BTN, overall_ms=6000, poll_ms=300):
+            self._chat_opened_once = True
+            for _ in range(25):
+                self._page.wait_for_timeout(200)
+                if self._chat_open():
+                    break
+            self._on_log("Открыл чат — слежу за стоп-словом (кнопку «Чат» больше "
+                         "не трогаю).")
+        else:
+            self._on_log("⚠ Кнопка «Чат» не найдена — стоп-слово может не "
+                         "сработать (пришлите скриншот встречи).")
+
+    def _read_all_text(self) -> str | None:
+        """Visible text of the main frame AND every child frame. Telemost may
+        render the chat inside an iframe, so reading only the top document would
+        miss the messages (the earlier "0 слов стоп" symptom)."""
+        parts = []
+        try:
+            frames = list(self._page.frames)     # includes the main frame
+        except Exception:
+            frames = []
+        for fr in frames:
             try:
-                txt = self._page.evaluate("() => document.body.innerText")
-                return txt if isinstance(txt, str) and txt.strip() else None
+                t = fr.inner_text("body")
+                if t and t.strip():
+                    parts.append(t)
             except Exception:
-                return None
+                continue
+        return "\n".join(parts) if parts else None
 
     @staticmethod
     def _is_stop_line(line: str, word: str) -> bool:
@@ -611,52 +639,27 @@ class TelemostBot:
     def maybe_chat_stop(self, word: str) -> bool:
         """True when a NEW stop-word message appeared in the chat.
 
-        Strategy: open «Чат» ONCE and keep it open, then read the panel text
-        silently via JS on each call (no repeated clicking → nothing flashes in
-        the recording). The FIRST read is a BASELINE, so a stop word left in the
-        room's chat by a previous session doesn't count. Checked every ~8 s."""
+        Never clicks anything — the panel was opened once by open_chat(). Reads
+        all frames' text every ~5 s, counts standalone stop-word lines, and fires
+        when the count grows above the first-seen baseline. The live count is
+        logged whenever it changes, so a miss is diagnosable from the log."""
         word = (word or "").strip().lower()
         if not word:
             return False
         now = time.time()
-        if now - self._chat_last_peek < 6:
+        if now - self._chat_last_peek < 5:
             return False
         self._chat_last_peek = now
 
-        # The chat stays open for the WHOLE meeting. «Чат» is a TOGGLE, so we
-        # click it only when the panel is definitely closed — and if we can't
-        # confirm it opened, we don't hammer the button every cycle (that's
-        # what made the panel blink open/closed before): retry once a minute.
-        if not self._chat_open():
-            if now - self._chat_last_open_try < 60 and self._chat_opened_once:
-                pass  # recently tried; read whatever is on screen meanwhile
-            else:
-                self._chat_last_open_try = now
-                try:  # the toolbar auto-hides — a mouse nudge reveals it
-                    self._page.mouse.move(500, 400)
-                    self._page.mouse.move(640, 660)
-                except Exception:
-                    pass
-                if self._click_any(self._CHAT_BTN, overall_ms=2500, poll_ms=300):
-                    if not self._chat_opened_once:
-                        self._on_log(f"Открыл чат — слежу за стоп-словом «{word}».")
-                    self._chat_opened_once = True
-                    for _ in range(15):
-                        self._page.wait_for_timeout(200)
-                        if self._chat_open():
-                            break
-                elif not self._chat_warned:
-                    self._on_log("⚠ Кнопка «Чат» не найдена — стоп-слово может "
-                                 "не сработать (пришлите скриншот встречи).")
-                    self._chat_warned = True
-
-        text = self._read_chat_panel()
+        text = self._read_all_text()
         if text is None:
             return False
         n = sum(1 for ln in text.splitlines() if self._is_stop_line(ln, word))
+        if n != self._chat_last_n:
+            self._on_log(f"Чат: сообщений «{word}» видно {n}.")  # live diagnostics
+            self._chat_last_n = n
         if self._chat_baseline is None:
             self._chat_baseline = n           # ignore whatever was already there
-            self._on_log(f"Чат под наблюдением (исходно «{word}»: {n}).")
             return False
         if n > self._chat_baseline:
             self._chat_baseline = n
@@ -686,6 +689,12 @@ class TelemostBot:
         never_joined_sec = int(self.cfg.get("end_if_nobody_joins_sec", 300))
         # Give the call a moment to render its controls before we judge it.
         self._page.wait_for_timeout(6000)
+        # Open the chat ONCE now; from here maybe_chat_stop only reads it.
+        if (chat_stop_word or "").strip():
+            try:
+                self.open_chat()
+            except Exception:
+                pass
         while True:
             if should_stop and should_stop():
                 return "stopped"
