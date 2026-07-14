@@ -222,6 +222,8 @@ class TelemostBot:
         # Chat stop-word bookkeeping (see maybe_chat_stop).
         self._chat_baseline = None    # stop-word lines present at first read
         self._chat_last_peek = 0.0    # last time we read the chat
+        self._chat_opened_once = False
+        self._chat_warned = False
 
     # -- lifecycle ----------------------------------------------------------
     def _launch(self, headless: bool | None = None):
@@ -560,27 +562,6 @@ class TelemostBot:
     _CHAT_INPUT = ('input[placeholder*="Сообщение" i]',
                    'textarea[placeholder*="Сообщение" i]',
                    'input[placeholder*="Message" i]')
-    # The panel is found by its message input, then the smallest ancestor tall
-    # enough to be the whole right-hand panel; its innerText = all messages.
-    # Reading the panel wholesale beats guessing Telemost's CSS class names.
-    _PANEL_JS = """
-    () => {
-      const sels = ['input[placeholder*="Сообщение" i]',
-                    'textarea[placeholder*="Сообщение" i]',
-                    'input[placeholder*="Message" i]'];
-      let inp = null;
-      for (const s of sels) { inp = document.querySelector(s); if (inp) break; }
-      if (!inp) return null;
-      let el = inp, best = inp.parentElement;
-      for (let i = 0; i < 8 && el.parentElement; i++) {
-        el = el.parentElement;
-        best = el;
-        const r = el.getBoundingClientRect();
-        if (r.height > window.innerHeight * 0.55) break;
-      }
-      return best ? best.innerText : null;
-    }
-    """
 
     def _chat_open(self) -> bool:
         """The panel is open when its message input is in the DOM."""
@@ -593,14 +574,19 @@ class TelemostBot:
         return False
 
     def _read_chat_panel(self) -> str | None:
-        """innerText of the whole open chat panel (None if it can't be read).
-        Reading the panel wholesale is far more robust than guessing which CSS
-        class holds a message."""
+        """All visible page text (None if unreadable). When the chat panel is
+        open its messages are part of it — reading the whole page is far more
+        robust than guessing Telemost's chat CSS/structure, and a standalone
+        «стоп» line never appears elsewhere in the call UI."""
         try:
-            txt = self._page.evaluate(self._PANEL_JS)
-            return txt if isinstance(txt, str) else None
+            txt = self._page.inner_text("body")
+            return txt if isinstance(txt, str) and txt.strip() else None
         except Exception:
-            return None
+            try:
+                txt = self._page.evaluate("() => document.body.innerText")
+                return txt if isinstance(txt, str) and txt.strip() else None
+            except Exception:
+                return None
 
     @staticmethod
     def _is_stop_line(line: str, word: str) -> bool:
@@ -624,18 +610,26 @@ class TelemostBot:
         if not word:
             return False
         now = time.time()
-        if now - self._chat_last_peek < 8:
+        if now - self._chat_last_peek < 6:
             return False
         self._chat_last_peek = now
 
         # Keep the chat open for the whole meeting; reopen if it got closed.
         if not self._chat_open():
-            if not self._click_any(self._CHAT_BTN, overall_ms=2500, poll_ms=300):
-                return False                  # no «Чат» button — can't watch chat
+            opened = self._click_any(self._CHAT_BTN, overall_ms=2500, poll_ms=300)
+            if opened and not self._chat_opened_once:
+                self._on_log(f"Слежу за чатом: стоп-слово «{word}».")
+                self._chat_opened_once = True
             for _ in range(10):
                 self._page.wait_for_timeout(200)
                 if self._chat_open():
                     break
+            if not self._chat_open():
+                if not self._chat_warned:
+                    self._on_log("⚠ Не удалось открыть чат Телемоста — стоп-слово "
+                                 "может не сработать (пришлите скриншот).")
+                    self._chat_warned = True
+                # still fall through: some rooms keep chat text in the page anyway
 
         text = self._read_chat_panel()
         if text is None:
@@ -643,6 +637,7 @@ class TelemostBot:
         n = sum(1 for ln in text.splitlines() if self._is_stop_line(ln, word))
         if self._chat_baseline is None:
             self._chat_baseline = n           # ignore whatever was already there
+            self._on_log(f"Чат под наблюдением (исходно «{word}»: {n}).")
             return False
         if n > self._chat_baseline:
             self._chat_baseline = n
