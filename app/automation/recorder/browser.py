@@ -220,9 +220,8 @@ class TelemostBot:
         self._page = None
         self._temp_profile = None
         # Chat stop-word bookkeeping (see maybe_chat_stop).
-        self._chat_baseline = None    # stop-word messages present at first read
-        self._chat_hint = None        # last seen unread counter
-        self._chat_last_peek = 0.0    # last periodic peek (no-counter fallback)
+        self._chat_baseline = None    # stop-word lines present at first read
+        self._chat_last_peek = 0.0    # last time we read the chat
 
     # -- lifecycle ----------------------------------------------------------
     def _launch(self, headless: bool | None = None):
@@ -554,96 +553,96 @@ class TelemostBot:
     # Participants can end the recording from INSIDE the call: write the stop
     # word (e.g. «стоп») as a message in the Telemost chat — the bot stops and
     # leaves. That's how a few people can stay behind for a private talk.
-    _CHAT_BTN = ('button[aria-label*="чат" i]', 'button[aria-label*="chat" i]',
-                 'button:has-text("Чат")', 'button:has-text("Chat")')
-    _CHAT_MSGS = ('[class*="chat" i] [class*="message" i]',
-                  '[data-testid*="chat" i] [data-testid*="message" i]',
-                  '[class*="chat" i] [class*="text" i]')
+    # The toolbar button is literally labelled «Чат» (see the real Telemost UI);
+    # the opened panel sits on the right with a «Сообщение…» input and a ✕.
+    _CHAT_BTN = ('button:has-text("Чат")', 'button:has-text("Chat")',
+                 'button[aria-label*="чат" i]', 'button[aria-label*="chat" i]')
+    _CHAT_INPUT = ('input[placeholder*="Сообщение" i]',
+                   'textarea[placeholder*="Сообщение" i]',
+                   'input[placeholder*="Message" i]')
+    # The panel is found by its message input, then the smallest ancestor tall
+    # enough to be the whole right-hand panel; its innerText = all messages.
+    # Reading the panel wholesale beats guessing Telemost's CSS class names.
+    _PANEL_JS = """
+    () => {
+      const sels = ['input[placeholder*="Сообщение" i]',
+                    'textarea[placeholder*="Сообщение" i]',
+                    'input[placeholder*="Message" i]'];
+      let inp = null;
+      for (const s of sels) { inp = document.querySelector(s); if (inp) break; }
+      if (!inp) return null;
+      let el = inp, best = inp.parentElement;
+      for (let i = 0; i < 8 && el.parentElement; i++) {
+        el = el.parentElement;
+        best = el;
+        const r = el.getBoundingClientRect();
+        if (r.height > window.innerHeight * 0.55) break;
+      }
+      return best ? best.innerText : null;
+    }
+    """
 
-    def _chat_unread_hint(self) -> int | None:
-        """The unread-counter on the chat button (None when not readable)."""
-        for sel in self._CHAT_BTN:
+    def _chat_open(self) -> bool:
+        """The panel is open when its message input is in the DOM."""
+        for sel in self._CHAT_INPUT:
             try:
-                el = self._page.query_selector(sel)
-                if not el:
-                    continue
-                txt = ((el.inner_text() or "") + " "
-                       + (el.get_attribute("aria-label") or ""))
-                m = re.search(r"\d+", txt)
-                if m:
-                    return int(m.group())
+                if self._page.query_selector(sel):
+                    return True
             except Exception:
                 continue
-        return None
+        return False
 
-    def _chat_texts(self) -> list[str] | None:
-        """Chat message texts currently in the DOM (None = none found)."""
-        for sel in self._CHAT_MSGS:
-            try:
-                els = self._page.query_selector_all(sel)
-            except Exception:
-                continue
-            out = []
-            for el in (els or [])[-20:]:
-                try:
-                    t = (el.inner_text() or "").strip()
-                except Exception:
-                    continue
-                if t:
-                    out.append(t)
-            if out:
-                return out
-        return None
+    def _read_chat_panel(self) -> str | None:
+        """innerText of the whole open chat panel (None if it can't be read).
+        Reading the panel wholesale is far more robust than guessing which CSS
+        class holds a message."""
+        try:
+            txt = self._page.evaluate(self._PANEL_JS)
+            return txt if isinstance(txt, str) else None
+        except Exception:
+            return None
 
-    def _stop_word_count(self, word: str) -> int:
-        """How many chat messages consist of exactly the stop word. Opens the
-        chat panel briefly only if the messages aren't already in the DOM (so
-        the panel doesn't sit in the recording)."""
-        texts = self._chat_texts()
-        opened = False
-        if texts is None:
-            if not self._click_any(self._CHAT_BTN, overall_ms=2000, poll_ms=300):
-                return -1                     # no chat UI found at all
-            opened = True
-            try:
-                self._page.wait_for_timeout(700)
-            except Exception:
-                pass
-            texts = self._chat_texts() or []
-        # The whole message must BE the word («стоп», «Стоп!») — a sentence that
-        # merely mentions it must not kill the recording.
-        rx = re.compile(rf"^\W*{re.escape(word)}\W*$", re.IGNORECASE)
-        n = sum(1 for t in texts for ln in t.splitlines() if rx.match(ln.strip()))
-        if opened:
-            self._click_any(self._CHAT_BTN, overall_ms=1500, poll_ms=300)  # close
-        return n
+    @staticmethod
+    def _is_stop_line(line: str, word: str) -> bool:
+        """Is this chat line the stop command? The word must be present and NO
+        other letters may be — so «стоп», «Стоп!», even «стоп 12:50» (a trailing
+        timestamp/emoji) count, but «давайте без стоп слов» does not."""
+        low = line.strip().lower()
+        if word not in low:
+            return False
+        rest = re.sub(re.escape(word), " ", low)
+        return not any(ch.isalpha() for ch in rest)
 
     def maybe_chat_stop(self, word: str) -> bool:
         """True when a NEW stop-word message appeared in the chat.
 
-        Cadence: when the chat button exposes an unread counter, the chat is
-        peeked only when it grows (no flashing panel in the video); otherwise a
-        periodic peek every ~45 s. The first read is a BASELINE — a stop word
-        left in the room's chat by a previous session doesn't count."""
+        Strategy: open «Чат» ONCE and keep it open, then read the panel text
+        silently via JS on each call (no repeated clicking → nothing flashes in
+        the recording). The FIRST read is a BASELINE, so a stop word left in the
+        room's chat by a previous session doesn't count. Checked every ~8 s."""
         word = (word or "").strip().lower()
         if not word:
             return False
         now = time.time()
-        hint = self._chat_unread_hint()
-        if hint is not None and self._chat_hint is not None:
-            if hint <= self._chat_hint:
-                self._chat_hint = hint
-                return False                  # nothing new — don't touch the UI
-        if hint is not None:
-            self._chat_hint = hint
-        elif now - self._chat_last_peek < 45:
+        if now - self._chat_last_peek < 8:
             return False
         self._chat_last_peek = now
-        n = self._stop_word_count(word)
-        if n < 0:
+
+        # Keep the chat open for the whole meeting; reopen if it got closed.
+        if not self._chat_open():
+            if not self._click_any(self._CHAT_BTN, overall_ms=2500, poll_ms=300):
+                return False                  # no «Чат» button — can't watch chat
+            for _ in range(10):
+                self._page.wait_for_timeout(200)
+                if self._chat_open():
+                    break
+
+        text = self._read_chat_panel()
+        if text is None:
             return False
+        n = sum(1 for ln in text.splitlines() if self._is_stop_line(ln, word))
         if self._chat_baseline is None:
-            self._chat_baseline = n
+            self._chat_baseline = n           # ignore whatever was already there
             return False
         if n > self._chat_baseline:
             self._chat_baseline = n
