@@ -468,6 +468,7 @@ def connect_provider(body: ProviderKey, user: str = Depends(current_user)):
         llm.get_provider(provider, trial).complete("Ответь одним словом: ok",
                                                    max_tokens=5, force_json=False)
     except Exception as e:
+        es = str(e).lower()
         # A 429 / quota error means the key AUTHENTICATED but is rate-limited —
         # it's a valid key that will work once the limit resets (and it rotates
         # with your other keys), so save it with a note instead of rejecting it.
@@ -475,6 +476,14 @@ def connect_provider(body: ProviderKey, user: str = Depends(current_user)):
             note = ("Ключ принят, но сейчас упёрся в лимит (429). Он рабочий — "
                     "заработает после сброса квоты; при нескольких ключах они "
                     "чередуются автоматически.")
+        # A 404 «model not found / no longer available» is about the MODEL, not
+        # the key (a bad key would be 400/403 API_KEY_INVALID). The key
+        # authenticated — save it and tell the user to pick a working model.
+        elif "404" in es or "not found" in es or "no longer available" in es \
+                or "not available" in es or "not_found" in es:
+            note = ("Ключ принят, но модель по умолчанию недоступна для этого "
+                    "аккаунта. Выберите другую модель Gemini в списке «Движок "
+                    "протокола» (например, «актуальная» — не устаревает).")
         else:
             raise HTTPException(400, f"Не удалось подключиться: {e}")
     # Append to the provider's key POOL (several keys rotate on rate limits).
