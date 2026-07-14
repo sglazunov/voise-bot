@@ -10,7 +10,7 @@ from fastapi import (Depends, FastAPI, File, Form, HTTPException, Request,
 from fastapi.responses import (HTMLResponse, PlainTextResponse, FileResponse,
                                JSONResponse, RedirectResponse)
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from . import config, llm, analyze, security, user_creds
 from .jobs import store, STATUS_DONE, STATUS_ANALYZING, STATUS_CANCELLED
@@ -220,6 +220,31 @@ def auth_me(user: str = Depends(current_user)):
     return {"username": user}
 
 
+# ---- AI context (standing knowledge base for the protocol AI) --------------
+@app.get("/context", response_class=HTMLResponse)
+def context_page(request: Request, user: str = Depends(current_user)):
+    return templates.TemplateResponse("context.html", {"request": request})
+
+
+@app.get("/api/context")
+def get_context(user: str = Depends(current_user)):
+    from . import ai_context
+    return ai_context.load(user)
+
+
+class ContextBody(BaseModel):
+    # JSON key "global" is a Python keyword → accept it via an alias.
+    global_: str = Field("", alias="global")
+    projects: list[dict] = []
+    model_config = {"populate_by_name": True}
+
+
+@app.post("/api/context")
+def save_context(body: ContextBody, user: str = Depends(current_user)):
+    from . import ai_context
+    return ai_context.save(user, {"global": body.global_, "projects": body.projects})
+
+
 # ---- Password recovery by phone (public, heavily throttled) ---------------
 @app.get("/recover", response_class=HTMLResponse)
 def recover_page(request: Request):
@@ -370,6 +395,7 @@ async def create_job(
     identify_speakers: bool = Form(False),
     deliver_protocol_cloud: bool = Form(False),
     deliver_weeek_task: str = Form(""),
+    context_hint: str = Form(""),
     user: str = Depends(current_user),
 ):
     ext = Path(file.filename or "").suffix.lower()
@@ -402,7 +428,8 @@ async def create_job(
                        capture_screen=capture_screen,
                        identify_speakers=identify_speakers,
                        deliver_protocol_cloud=deliver_protocol_cloud,
-                       deliver_weeek_task=deliver_weeek_task, model=model_sel,
+                       deliver_weeek_task=deliver_weeek_task,
+                       context_hint=context_hint, model=model_sel,
                        owner=user)
     return JSONResponse({"job_id": job.id, **job.to_public()}, status_code=201)
 

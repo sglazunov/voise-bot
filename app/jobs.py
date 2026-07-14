@@ -65,6 +65,7 @@ class Job:
     identify_speakers: bool = False  # read WHO spoke from the video (active-tile name)
     deliver_protocol_cloud: bool = False  # upload the .docx protocol to the user's cloud
     deliver_weeek_task: str = ""     # Weeek task id/URL to attach the protocol link to
+    context_hint: str = ""           # matches saved AI-context projects (meeting/project name)
     delete_audio_when_done: bool = False  # delete the source media after processing
                                           # (recordings already sent to the UI's cloud)
     owner: str = ""                  # the login that owns this job (isolation)
@@ -148,7 +149,7 @@ class JobStore:
                analysis_instructions: str = "", analysis_prompt: str = "",
                capture_screen: bool = False, identify_speakers: bool = False,
                deliver_protocol_cloud: bool = False, deliver_weeek_task: str = "",
-               model: str = "",
+               context_hint: str = "", model: str = "",
                delete_audio_when_done: bool = False, owner: str = "") -> Job:
         job = Job(
             id=uuid.uuid4().hex[:12],
@@ -167,6 +168,7 @@ class JobStore:
             identify_speakers=identify_speakers,
             deliver_protocol_cloud=deliver_protocol_cloud,
             deliver_weeek_task=(deliver_weeek_task or "").strip(),
+            context_hint=(context_hint or "").strip(),
             delete_audio_when_done=delete_audio_when_done,
             owner=owner,
         )
@@ -294,6 +296,8 @@ class JobStore:
     def _do_reanalyze(self, job: Job, txt: str) -> None:
         if "УЧАСТНИКИ ЗВОНКА" not in txt:
             txt += _participants_block(job)
+        if "ПОСТОЯННЫЙ КОНТЕКСТ" not in txt:
+            txt += _context_block(job)
         self._analysis[job.id] = {"stage": "Готовлю анализ…", "text": "", "chars": 0}
         self._set(job, status=STATUS_ANALYZING, analysis_error=None)
         try:
@@ -578,9 +582,11 @@ class JobStore:
                     screen_err = str(e)
 
             # Text fed to the protocol analysis = continuous speech (no timestamps)
-            # + on-screen text + the participants read off the call grid.
+            # + on-screen text + the participants read off the call grid + the
+            # user's standing AI context (who's who / project essence).
             analysis_input = plain_content + (("\n\n" + screen_block) if screen_block else "")
             analysis_input += _participants_block(job)
+            analysis_input += _context_block(job)
 
             # AI analysis + Word document (optional, requires ANTHROPIC_API_KEY)
             analysis_result = None
@@ -682,6 +688,18 @@ class JobStore:
                 pass
         self._control.pop(job.id, None)
         self._set(job, status=STATUS_CANCELLED, finished_at=time.time())
+
+
+def _context_block(job: "Job") -> str:
+    """The user's standing AI context (global + projects matching this meeting),
+    prepended to the analysis so the AI knows roles / project essence up front."""
+    try:
+        from . import ai_context
+        hint = f"{job.context_hint} {job.filename}"
+        blk = ai_context.block_for(job.owner, hint)
+        return ("\n\n" + blk) if blk else ""
+    except Exception:
+        return ""
 
 
 def _participants_block(job: "Job") -> str:

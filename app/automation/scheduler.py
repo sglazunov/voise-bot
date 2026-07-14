@@ -362,6 +362,8 @@ class Scheduler:
                     # Telemost recordings always show the active speaker (green
                     # tile) + names, so read WHO spoke straight from the video.
                     identify_speakers=bool(cfg.get("identify_speakers", True)),
+                    # Meeting title → matches the user's per-project AI context.
+                    context_hint=str(st.title or ""),
                     delete_audio_when_done=delivered_elsewhere,
                     owner=user)
                 st.job_id = job.id
