@@ -219,6 +219,10 @@ class TelemostBot:
         self._ctx = None
         self._page = None
         self._temp_profile = None
+        # Chat stop-word bookkeeping (see maybe_chat_stop).
+        self._chat_baseline = None    # stop-word messages present at first read
+        self._chat_hint = None        # last seen unread counter
+        self._chat_last_peek = 0.0    # last periodic peek (no-counter fallback)
 
     # -- lifecycle ----------------------------------------------------------
     def _launch(self, headless: bool | None = None):
@@ -546,11 +550,112 @@ class TelemostBot:
         except Exception as e:
             self._on_log(f"Скриншот не удался: {e}")
 
+    # ---- meeting chat: the stop word --------------------------------------
+    # Participants can end the recording from INSIDE the call: write the stop
+    # word (e.g. «стоп») as a message in the Telemost chat — the bot stops and
+    # leaves. That's how a few people can stay behind for a private talk.
+    _CHAT_BTN = ('button[aria-label*="чат" i]', 'button[aria-label*="chat" i]',
+                 'button:has-text("Чат")', 'button:has-text("Chat")')
+    _CHAT_MSGS = ('[class*="chat" i] [class*="message" i]',
+                  '[data-testid*="chat" i] [data-testid*="message" i]',
+                  '[class*="chat" i] [class*="text" i]')
+
+    def _chat_unread_hint(self) -> int | None:
+        """The unread-counter on the chat button (None when not readable)."""
+        for sel in self._CHAT_BTN:
+            try:
+                el = self._page.query_selector(sel)
+                if not el:
+                    continue
+                txt = ((el.inner_text() or "") + " "
+                       + (el.get_attribute("aria-label") or ""))
+                m = re.search(r"\d+", txt)
+                if m:
+                    return int(m.group())
+            except Exception:
+                continue
+        return None
+
+    def _chat_texts(self) -> list[str] | None:
+        """Chat message texts currently in the DOM (None = none found)."""
+        for sel in self._CHAT_MSGS:
+            try:
+                els = self._page.query_selector_all(sel)
+            except Exception:
+                continue
+            out = []
+            for el in (els or [])[-20:]:
+                try:
+                    t = (el.inner_text() or "").strip()
+                except Exception:
+                    continue
+                if t:
+                    out.append(t)
+            if out:
+                return out
+        return None
+
+    def _stop_word_count(self, word: str) -> int:
+        """How many chat messages consist of exactly the stop word. Opens the
+        chat panel briefly only if the messages aren't already in the DOM (so
+        the panel doesn't sit in the recording)."""
+        texts = self._chat_texts()
+        opened = False
+        if texts is None:
+            if not self._click_any(self._CHAT_BTN, overall_ms=2000, poll_ms=300):
+                return -1                     # no chat UI found at all
+            opened = True
+            try:
+                self._page.wait_for_timeout(700)
+            except Exception:
+                pass
+            texts = self._chat_texts() or []
+        # The whole message must BE the word («стоп», «Стоп!») — a sentence that
+        # merely mentions it must not kill the recording.
+        rx = re.compile(rf"^\W*{re.escape(word)}\W*$", re.IGNORECASE)
+        n = sum(1 for t in texts for ln in t.splitlines() if rx.match(ln.strip()))
+        if opened:
+            self._click_any(self._CHAT_BTN, overall_ms=1500, poll_ms=300)  # close
+        return n
+
+    def maybe_chat_stop(self, word: str) -> bool:
+        """True when a NEW stop-word message appeared in the chat.
+
+        Cadence: when the chat button exposes an unread counter, the chat is
+        peeked only when it grows (no flashing panel in the video); otherwise a
+        periodic peek every ~45 s. The first read is a BASELINE — a stop word
+        left in the room's chat by a previous session doesn't count."""
+        word = (word or "").strip().lower()
+        if not word:
+            return False
+        now = time.time()
+        hint = self._chat_unread_hint()
+        if hint is not None and self._chat_hint is not None:
+            if hint <= self._chat_hint:
+                self._chat_hint = hint
+                return False                  # nothing new — don't touch the UI
+        if hint is not None:
+            self._chat_hint = hint
+        elif now - self._chat_last_peek < 45:
+            return False
+        self._chat_last_peek = now
+        n = self._stop_word_count(word)
+        if n < 0:
+            return False
+        if self._chat_baseline is None:
+            self._chat_baseline = n
+            return False
+        if n > self._chat_baseline:
+            self._chat_baseline = n
+            return True
+        return False
+
     def wait_until_end(self, should_stop, max_sec: int, alone_sec: int,
-                       min_participants: int = 1) -> str:
+                       min_participants: int = 1, chat_stop_word: str = "") -> str:
         """Block until the meeting ends. Returns the reason it stopped.
 
-        Stop conditions (first wins): manual stop (`should_stop`), hard time cap
+        Stop conditions (first wins): manual stop (`should_stop`), the stop word
+        written in the meeting chat (`chat_stop_word`), hard time cap
         (`max_sec`), the bot dropped out of the call, or the room thinned to
         `min_participants` or fewer for `alone_sec` — but only AFTER real
         participants were seen, so joining early (empty room) doesn't end it.
@@ -567,6 +672,11 @@ class TelemostBot:
         while True:
             if should_stop and should_stop():
                 return "stopped"
+            try:
+                if self.maybe_chat_stop(chat_stop_word):
+                    return "chat_stop"
+            except Exception:  # chat probing must never crash the recording
+                pass
             if time.time() - start > max_sec:
                 return "max_duration"
             # Re-assert mute periodically: Telemost can reset the mic/cam after a

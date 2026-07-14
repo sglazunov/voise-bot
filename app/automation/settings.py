@@ -79,6 +79,8 @@ _DEFAULTS: dict[str, Any] = {
     "join_timeout_sec": 60,           # how long to wait to get into the call
     "end_when_alone_sec": 90,         # stop after the room sits at/below the threshold this long
     "min_participants": 1,            # stop when total in room (incl. bot) drops to <= this
+    "chat_stop_word": "стоп",         # message in the Telemost chat that ends the
+                                      # recording (bot leaves); "" disables
                                       # 1 = stop only when everyone left; 3 = ignore a small lingering tail
     # --- which meetings to auto-record (all empty = record everything) ---
     "rec_time_from": "",              # "HH:MM" local — record only meetings starting at/after

@@ -230,9 +230,14 @@
     </div>
     <div class="grid2">
       <div><label>Таймаут входа, сек.</label><input id="join_timeout_sec" type="number" min="10" value="60"></div>
+      <div><label>Кодовое слово в чате (стоп-команда)</label><input id="chat_stop_word" type="text" placeholder="стоп"></div>
     </div>
-    <div class="note">Запись также можно остановить вручную кнопкой «Остановить запись» ниже. «Истончение»
-      комнаты считается только после того, как в ней реально появлялись люди (ранний вход не завершит запись).</div>
+    <div class="note">Запись также можно остановить вручную кнопкой «Остановить запись» ниже, либо
+      <b>из самой встречи</b>: напишите кодовое слово (по умолчанию «стоп») отдельным сообщением в чат
+      Телемоста — бот остановит запись и выйдет. Удобно, когда несколько человек хотят остаться и
+      поговорить приватно. Слово должно быть всем сообщением («стоп», «Стоп!»), упоминание внутри фразы
+      не сработает; пустое поле отключает команду. «Истончение» комнаты считается только после того,
+      как в ней реально появлялись люди (ранний вход не завершит запись).</div>
 
     <div class="row">
       <button class="go" onclick="saveRecorder()">Сохранить</button>
@@ -406,6 +411,7 @@ async function loadAll(){
   setVal("ffmpeg_path", s.ffmpeg_path); setChk("capture_video", s.capture_video); setChk("headless", s.headless);
   setVal("min_participants", s.min_participants); setVal("end_when_alone_sec", s.end_when_alone_sec);
   setVal("max_meeting_min", s.max_meeting_min); setVal("join_timeout_sec", s.join_timeout_sec);
+  setVal("chat_stop_word", s.chat_stop_word);
   // scheduler
   setChk("enabled", s.enabled); setVal("poll_interval_sec", s.poll_interval_sec);
   setVal("lookahead_min", s.lookahead_min); setVal("analyze_provider", s.analyze_provider||"auto");
@@ -612,7 +618,8 @@ async function saveRecorder(){
     ffmpeg_path:$("ffmpeg_path").value||null, audio_device:$("audio_device").value||null,
     capture_video:$("capture_video").checked, headless:$("headless").checked,
     min_participants:+$("min_participants").value, end_when_alone_sec:+$("end_when_alone_sec").value,
-    max_meeting_min:+$("max_meeting_min").value, join_timeout_sec:+$("join_timeout_sec").value};
+    max_meeting_min:+$("max_meeting_min").value, join_timeout_sec:+$("join_timeout_sec").value,
+    chat_stop_word:$("chat_stop_word").value.trim()};
   try{ await api("POST","/api/automation/settings", b); toast("Рекордер сохранён"); recorderStatus(); }
   catch(e){ toast(e.message,true); }
 }

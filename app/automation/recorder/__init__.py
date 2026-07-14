@@ -134,8 +134,16 @@ def record_meeting(url: str, out_path: str, cfg: dict,
                     "error": "ffmpeg не смог записывать. " + (rec.error_tail() or
                              "Проверьте ffmpeg/дисплей/аудио слота.")}
         log("🔴 Идёт запись встречи — бот в звонке.")
-        reason = bot.wait_until_end(should_stop, max_sec, alone_sec, min_p)
-        log(f"Останавливаю запись (причина: {reason}).")
+        stop_word = str(cfg.get("chat_stop_word") or "").strip()
+        if stop_word:
+            log(f"Кодовое слово в чате: «{stop_word}» — напишите его отдельным "
+                "сообщением, и бот остановит запись и выйдет.")
+        reason = bot.wait_until_end(should_stop, max_sec, alone_sec, min_p,
+                                    chat_stop_word=stop_word)
+        if reason == "chat_stop":
+            log("🛑 В чате написали кодовое слово — останавливаю запись и выхожу.")
+        else:
+            log(f"Останавливаю запись (причина: {reason}).")
         rec.stop()
         p = Path(out_path)
         if not p.exists() or p.stat().st_size == 0:
