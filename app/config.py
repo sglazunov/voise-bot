@@ -67,12 +67,12 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 GROQ_MODEL = os.getenv("VTX_GROQ_MODEL", "llama-3.3-70b-versatile")
 
 # --- Google Gemini (free tier; key at https://aistudio.google.com/apikey) ---
-# Google keeps retiring versioned models (2.0-flash → 429, 2.5-flash-lite → 404
-# "no longer available to new users"). So default to the ALIAS gemini-flash-latest,
-# which always points to the current stable Flash model and never needs updating.
-# Override with VTX_GEMINI_MODEL if you want a specific version.
+# Pin a CONCRETE model (not the gemini-flash-latest alias) so behaviour and free
+# limits don't silently change when Google re-points the alias — that surprise is
+# exactly what killed the 2.5 models. gemini-3.1-flash-lite is the current stable,
+# most generous free choice (~1500 req/day). Override with VTX_GEMINI_MODEL.
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.getenv("VTX_GEMINI_MODEL", "gemini-flash-latest")
+GEMINI_MODEL = os.getenv("VTX_GEMINI_MODEL", "gemini-3.1-flash-lite")
 
 # --- YandexGPT (Yandex Cloud: API key + folder id) ---
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY", "")
@@ -122,11 +122,11 @@ PROVIDER_MODELS = {
         {"value": "yandexgpt-lite/latest", "label": "YandexGPT Lite · лёгкая/быстрая"},
     ],
     "gemini": [
-        {"value": "gemini-flash-latest", "label": "Gemini Flash (актуальная, не устаревает) · по умолчанию"},
-        {"value": "gemini-flash-lite-latest", "label": "Gemini Flash-Lite (актуальная) · быстрая/дешёвая"},
-        {"value": "gemini-3.1-flash-lite", "label": "Gemini 3.1 Flash-Lite · быстрая (~1500/день)"},
+        {"value": "gemini-3.1-flash-lite", "label": "Gemini 3.1 Flash-Lite · быстрая (~1500/день, по умолчанию)"},
         {"value": "gemini-3.5-flash", "label": "Gemini 3.5 Flash · мощнее"},
-        {"value": "gemini-pro-latest", "label": "Gemini Pro (актуальная) · максимум"},
+        {"value": "gemini-flash-latest", "label": "Gemini Flash (алиас — актуальная, но лимиты могут меняться)"},
+        {"value": "gemini-flash-lite-latest", "label": "Gemini Flash-Lite (алиас — актуальная)"},
+        {"value": "gemini-pro-latest", "label": "Gemini Pro (алиас) · максимум"},
     ],
     "anthropic": [
         {"value": "claude-sonnet-4-6", "label": "Claude Sonnet · баланс"},
