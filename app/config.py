@@ -67,8 +67,10 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 GROQ_MODEL = os.getenv("VTX_GROQ_MODEL", "llama-3.3-70b-versatile")
 
 # --- Google Gemini (free tier; key at https://aistudio.google.com/apikey) ---
+# gemini-2.0-flash was retired (→ 429 "quota exceeded" even on a valid key), so
+# default to the current, most generous free model (2.5 Flash-Lite: 1000 req/day).
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.getenv("VTX_GEMINI_MODEL", "gemini-2.0-flash")
+GEMINI_MODEL = os.getenv("VTX_GEMINI_MODEL", "gemini-2.5-flash-lite")
 
 # --- YandexGPT (Yandex Cloud: API key + folder id) ---
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY", "")
@@ -118,8 +120,9 @@ PROVIDER_MODELS = {
         {"value": "yandexgpt-lite/latest", "label": "YandexGPT Lite · лёгкая/быстрая"},
     ],
     "gemini": [
-        {"value": "gemini-2.0-flash", "label": "Gemini 2.0 Flash · быстрая"},
-        {"value": "gemini-1.5-pro", "label": "Gemini 1.5 Pro · мощная"},
+        {"value": "gemini-2.5-flash-lite", "label": "Gemini 2.5 Flash-Lite · быстрая (1000/день, по умолчанию)"},
+        {"value": "gemini-2.5-flash", "label": "Gemini 2.5 Flash · баланс (250/день)"},
+        {"value": "gemini-2.5-pro", "label": "Gemini 2.5 Pro · максимум (100/день)"},
     ],
     "anthropic": [
         {"value": "claude-sonnet-4-6", "label": "Claude Sonnet · баланс"},

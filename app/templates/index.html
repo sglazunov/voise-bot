@@ -961,11 +961,12 @@ async function connectKey(){
       await renderKeysList();
       const nkeys=d.keys||1;
       const ktxt=nkeys>1?` (ключей: ${nkeys} — переключаются при лимите)`:"";
+      const noteTxt=d.note?`<div style="color:#fbbf24;margin-top:4px">⚠ ${esc(d.note)}</div>`:"";
       // If an analysis failed (e.g. limits), resume it now on the new engine.
       const resumed=await resumeFailedAnalysis(provider);
-      msg.innerHTML=resumed
+      msg.innerHTML=(resumed
         ? `<span style="color:#22c55e">✓ Ключ добавлен${ktxt} — продолжаю анализ…</span>`
-        : `<span style="color:#22c55e">✓ Ключ добавлен${ktxt}</span>`;
+        : `<span style="color:#22c55e">✓ Ключ добавлен${ktxt}</span>`)+noteTxt;
     }else{
       const detail=String(d.detail||"Ошибка");
       msg.innerHTML='<span style="color:#f87171">✗ '+esc(detail)+'</span>';

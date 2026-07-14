@@ -463,14 +463,23 @@ def connect_provider(body: ProviderKey, user: str = Depends(current_user)):
     # Verify the key with a cheap non-JSON ping BEFORE saving, so a bad key
     # fails fast and nothing is persisted.
     trial = {provider: [{"key": key, "extra": extra}]}
+    note = None
     try:
         llm.get_provider(provider, trial).complete("Ответь одним словом: ok",
                                                    max_tokens=5, force_json=False)
     except Exception as e:
-        raise HTTPException(400, f"Не удалось подключиться: {e}")
+        # A 429 / quota error means the key AUTHENTICATED but is rate-limited —
+        # it's a valid key that will work once the limit resets (and it rotates
+        # with your other keys), so save it with a note instead of rejecting it.
+        if llm._is_rate_limit(e):
+            note = ("Ключ принят, но сейчас упёрся в лимит (429). Он рабочий — "
+                    "заработает после сброса квоты; при нескольких ключах они "
+                    "чередуются автоматически.")
+        else:
+            raise HTTPException(400, f"Не удалось подключиться: {e}")
     # Append to the provider's key POOL (several keys rotate on rate limits).
     user_creds.add(user, provider, key, extra)
-    return {"ok": True, "connected": provider,
+    return {"ok": True, "connected": provider, "note": note,
             "keys": user_creds.counts(user).get(provider, 1),
             "providers": _provider_list(user_creds.load(user))}
 
