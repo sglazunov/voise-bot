@@ -299,7 +299,10 @@
 
     <!-- Protocol engine + paid-API key panel (shown only in protocol mode) -->
     <div id="providerWrap" class="hidden" style="margin-top:12px">
-      <label class="muted">Движок протокола
+      <label class="muted" id="engineProviderWrap">Провайдер
+        <select id="engineProvider" onchange="onEngineProviderChange()"></select>
+      </label>
+      <label class="muted" style="margin-top:8px;display:block">Движок протокола (модель)
         <select id="provider" onchange="onEngineChange()"></select>
       </label>
       <div class="muted hidden" id="noEngine" style="margin-top:8px">
@@ -596,6 +599,11 @@ function updateKeysInfo(){
 // Выбрать в списке движков запись выбранного провайдера (значения там вида
 // "groq:<модель>", поэтому просто value=provider не сработает).
 function selectEngineForProvider(p){
+  // Switch the provider filter to `p`, then pick that provider's first model.
+  const provSel=$('engineProvider');
+  if(provSel && [...provSel.options].some(o=>o.value===p)){
+    provSel.value=p; rebuildEngineOptions();
+  }
   const sel=$('provider'); if(!sel) return false;
   const opt=[...sel.options].find(o=>o.value===p||o.value.indexOf(p+":")===0);
   if(opt){ sel.value=opt.value; onEngineChange(); return true; }
@@ -640,33 +648,53 @@ async function clearKeys(){
     headers:{"Content-Type":"application/json"},body:JSON.stringify({provider:p,api_key:"x"})});
     await loadProviders(); await renderKeysList(); $('connectMsg').textContent="Ключи удалены."; }catch(e){}
 }
+let ALL_ENGINES=[];   // full engine list; the model dropdown is filtered from it
+const ENG_PROV_LABEL={ollama:"Локально · Ollama",groq:"Groq (Llama)",
+  gemini:"Google Gemini",yandex:"YandexGPT",gigachat:"GigaChat",anthropic:"Claude"};
+function engProviderOf(v){
+  v=String(v||"");
+  if(v==="ollama-setup"||v.indexOf("ollama")===0)return "ollama";
+  return v.split(":")[0];
+}
 async function loadProviders(){
   let data;
   try{const r=await fetch("/api/providers");if(!r.ok)return;data=await r.json();}catch{return;}
   PROV_KEYS={}; (data.providers||[]).forEach(p=>{PROV_KEYS[p.id]=p.keys||0;});
   // engines = each installed Ollama model (value "ollama:<model>") + cloud providers
   let engines=data.engines||[];
-  // Defensive: an older server build has no `engines` field (e.g. when the
-  // server wasn't restarted after an update). Fall back to `available` so the
-  // dropdown isn't empty — restart the server to get per-model entries.
+  // Defensive: an older server build has no `engines` field — fall back to `available`.
   if(!engines.length&&(data.available||[]).length){
     engines=data.available.map(id=>({value:id,label:PROV_LABELS[id]||id}));
   }
-  const sel=$('provider');
-  const prev=sel.value;
-  // If no local Ollama model is ready, offer a "install local on demand" choice
-  // so the user can always pick local (it triggers the install prompt below).
-  const hasOllama=engines.some(e=>String(e.value).startsWith("ollama"));
-  if(!hasOllama){
+  // If no local Ollama model is ready, offer a "install local on demand" choice.
+  if(!engines.some(e=>String(e.value).startsWith("ollama"))){
     engines=[{value:"ollama-setup",label:"💻 Локально (Ollama) — установить"}].concat(engines);
   }
-  sel.innerHTML=engines.map(e=>`<option value="${esc(e.value)}">${esc(e.label)}</option>`).join("");
-  if(prev&&engines.some(e=>e.value===prev))sel.value=prev;
-  $('noEngine').classList.add('hidden');  // always ≥1 option (local-setup) + key panel below
-  onEngineChange();
+  ALL_ENGINES=engines;
+  // Build the provider filter (distinct providers, in engine order).
+  const provSel=$('engineProvider');
+  const prevProv=provSel.value, prevEngine=$('provider').value;
+  const provs=[]; engines.forEach(e=>{const p=engProviderOf(e.value); if(!provs.includes(p))provs.push(p);});
+  provSel.innerHTML=provs.map(p=>`<option value="${esc(p)}">${esc(ENG_PROV_LABEL[p]||p)}</option>`).join("");
+  let chosen = provs.includes(prevProv)?prevProv : (prevEngine?engProviderOf(prevEngine):"");
+  if(!provs.includes(chosen)) chosen = provs[0]||"";
+  provSel.value=chosen;
+  // Hide the filter when there's only one provider — nothing to choose.
+  $('engineProviderWrap').style.display = provs.length>1 ? "" : "none";
+  rebuildEngineOptions(prevEngine);
+  $('noEngine').classList.add('hidden');
   updateKeysInfo();
   renderKeysList();
 }
+// Fill the model dropdown with only the selected provider's engines.
+function rebuildEngineOptions(preferEngine){
+  const p=$('engineProvider').value, sel=$('provider');
+  const list=ALL_ENGINES.filter(e=>engProviderOf(e.value)===p);
+  sel.innerHTML=list.map(e=>`<option value="${esc(e.value)}">${esc(e.label)}</option>`).join("");
+  if(preferEngine&&list.some(e=>e.value===preferEngine)) sel.value=preferEngine;
+  onEngineChange();
+}
+function onEngineProviderChange(){ rebuildEngineOptions(); }
 async function loadDefaultPrompt(){
   try{const d=await(await fetch("/api/prompt/default")).json();
     if(d.prompt)$("expertPrompt").value=d.prompt;}catch{}
