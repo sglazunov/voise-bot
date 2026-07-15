@@ -338,12 +338,15 @@ def _start_scheduler() -> None:
             autosetup.ensure_all()
         except Exception:
             pass
-    elif os.getenv("VTX_PRELOAD_MODELS", "1") == "1":
-        try:
-            from . import whisper_setup
-            whisper_setup.preload_all()
-        except Exception:
-            pass
+    else:
+        scope = os.getenv("VTX_PRELOAD_MODELS", "1").strip().lower()
+        if scope not in ("0", "none", "false", "no"):
+            try:
+                from . import whisper_setup
+                models = whisper_setup.PRELOAD_MODELS if scope in ("all", "*") else None
+                whisper_setup.preload_all(models)
+            except Exception:
+                pass
 
 ALLOWED_EXT = {".mp3", ".wav", ".m4a", ".ogg", ".oga", ".opus", ".flac", ".aac",
                ".mp4", ".mkv", ".webm", ".mov", ".wma", ".amr"}

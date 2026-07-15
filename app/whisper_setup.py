@@ -66,7 +66,11 @@ def preload_all(models: list[str] | None = None) -> None:
             return
         _preload_started = True
     default = _eff(None)
-    wanted = models or PRELOAD_MODELS
+    # Default: preload ONLY the model actually in use (~1.6 GB for large-v3-turbo)
+    # — not all four (~6 GB). Pass the full PRELOAD_MODELS list (VTX_PRELOAD_MODELS
+    # =all) to fetch everything upfront; otherwise the others download on demand
+    # the first time they're selected.
+    wanted = models or [default]
     ordered, seen = [], set()
     for m in [default] + list(wanted):   # default first, keep order, de-dupe
         if m and m not in seen:

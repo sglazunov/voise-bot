@@ -37,6 +37,10 @@
     .row{display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-top:12px}
     select{padding:9px 10px;border-radius:10px;border:1px solid var(--line);
            background:#0b1220;color:var(--txt)}
+    /* Long model labels must not stretch the panel / cause horizontal scroll. */
+    #provider,#engineProvider{width:100%;max-width:100%;box-sizing:border-box;
+           display:block;margin-top:4px}
+    #providerWrap>label{display:block;max-width:100%}
     textarea{width:100%;padding:10px;border-radius:10px;border:1px solid var(--line);
              background:#0b1220;color:var(--txt);font-family:inherit;font-size:13px;resize:vertical;margin-bottom:8px}
     details.adv{margin-top:12px;border:1px solid var(--line);border-radius:10px;

@@ -64,12 +64,16 @@ def _run() -> None:
         except Exception:          # one component must never stop the rest
             _state["failed"].append(c)
 
-    # Speech recognition models — download them all in the background too.
-    if os.getenv("VTX_PRELOAD_MODELS", "1") == "1":
+    # Pre-download the speech model(s) in the background. Default: only the model
+    # in use (~1.6 GB). VTX_PRELOAD_MODELS=all fetches every offered model (~6 GB);
+    # =0/none disables. Others download on demand the first time they're picked.
+    scope = os.getenv("VTX_PRELOAD_MODELS", "1").strip().lower()
+    if scope not in ("0", "none", "false", "no"):
         try:
             from . import whisper_setup
-            _state["message"] = "Загружаю модели распознавания речи…"
-            whisper_setup.preload_all()
+            _state["message"] = "Загружаю модель распознавания речи…"
+            models = whisper_setup.PRELOAD_MODELS if scope in ("all", "*") else None
+            whisper_setup.preload_all(models)
         except Exception:
             pass
 
