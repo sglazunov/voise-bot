@@ -5,10 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Контекст для ИИ · Voice Transcriber</title>
   <style>
-    :root { --bg:#0b1220; --card:#121a2b; --card2:#0d1525; --line:#22304a; --fg:#e6edf6;
-            --muted:#8aa0bd; --accent:#3aa0ff; --ok:#4ade80; --bad:#fecaca; }
+    :root { --bg:#0a141c; --card:#122428; --card2:#0d1525; --line:#22304a; --fg:#e6edf6;
+            --muted:#8aa0bd; --accent:#2dd4bf; --ok:#4ade80; --bad:#fecaca; }
+    :root[data-theme="light"]{ --bg:#eaf3f2; --card:#ffffff; --card2:#f1f7f6; --line:rgba(18,80,90,.15); --fg:#0c2a2a; --muted:#557079; --accent:#0d9488; }
     * { box-sizing:border-box; }
-    body { margin:0; min-height:100vh; background:radial-gradient(1200px 600px at 50% -10%, #16233d 0%, var(--bg) 60%);
+    body { margin:0; min-height:100vh; background:radial-gradient(1200px 600px at 50% -10%, rgba(45,212,191,.13) 0%, var(--bg) 60%);
            color:var(--fg); font:15px/1.5 system-ui,Segoe UI,Roboto,sans-serif; }
     .top { position:fixed; top:10px; right:14px; font-size:13px; color:var(--muted); }
     .top a { color:var(--accent); text-decoration:none; }
@@ -108,5 +109,6 @@
     }
     load();
   </script>
+<script>(function(){try{var t=localStorage.getItem('vtx-theme');if(t)document.documentElement.dataset.theme=t;}catch(e){}})();</script>
 </body>
 </html>

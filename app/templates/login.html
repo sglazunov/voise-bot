@@ -5,18 +5,19 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{ "Регистрация" if mode == "register" else ("Восстановление пароля" if mode == "recover" else "Вход") }} · Voice Transcriber</title>
   <style>
-    :root { --bg:#0b1220; --card:#121a2b; --line:#22304a; --fg:#e6edf6; --muted:#8aa0bd;
-            --accent:#3aa0ff; --bad:#fecaca; --badbg:#3a1620; }
+    :root { --bg:#0a141c; --card:#122428; --line:#22304a; --fg:#e6edf6; --muted:#8aa0bd;
+            --accent:#2dd4bf; --card2:#0d1525; --bad:#fecaca; --badbg:#3a1620; }
+    :root[data-theme="light"]{ --bg:#eaf3f2; --card:#ffffff; --card2:#f1f7f6; --line:rgba(18,80,90,.15); --fg:#0c2a2a; --muted:#557079; --accent:#0d9488; }
     * { box-sizing:border-box; }
     body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
-           background:radial-gradient(1200px 600px at 50% -10%, #16233d 0%, var(--bg) 60%);
+           background:radial-gradient(1200px 600px at 50% -10%, rgba(45,212,191,.13) 0%, var(--bg) 60%);
            color:var(--fg); font:15px/1.5 system-ui,Segoe UI,Roboto,sans-serif; }
     .card { width:min(92vw,380px); background:var(--card); border:1px solid var(--line);
             border-radius:16px; padding:28px 26px; box-shadow:0 20px 60px rgba(0,0,0,.4); }
     h1 { margin:0 0 4px; font-size:20px; }
     .sub { color:var(--muted); margin:0 0 18px; font-size:13px; }
     label { display:block; font-size:13px; color:var(--muted); margin:12px 0 4px; }
-    input { width:100%; padding:11px 12px; background:#0d1525; border:1px solid var(--line);
+    input { width:100%; padding:11px 12px; background:var(--card2); border:1px solid var(--line);
             border-radius:10px; color:var(--fg); font-size:15px; outline:none; }
     input:focus { border-color:var(--accent); }
     button { width:100%; margin-top:18px; padding:12px; border:0; border-radius:10px;
@@ -106,5 +107,6 @@
       }
     });
   </script>
+<script>(function(){try{var t=localStorage.getItem('vtx-theme');if(t)document.documentElement.dataset.theme=t;}catch(e){}})();</script>
 </body>
 </html>
