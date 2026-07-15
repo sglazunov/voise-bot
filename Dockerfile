@@ -56,7 +56,8 @@ RUN playwright install --with-deps chromium \
 
 # App code + entrypoint.
 COPY app/ ./app/
-# Built SPA from stage 1 — FastAPI serves it at /app (see main.py SPA_DIR).
+COPY scripts/ ./scripts/
+# Built SPA from stage 1 — FastAPI serves the whole UI at the site root.
 COPY --from=frontend /build/dist ./frontend/dist
 COPY Modelfile ./Modelfile
 COPY docker/ ./docker/
