@@ -40,7 +40,7 @@ function NavItem({ to, icon: Icon, label, end }: any) {
 export function Layout() {
   return (
     <div className="flex min-h-screen">
-      <aside className="w-[248px] flex-none flex flex-col gap-1 p-3.5"
+      <aside className="w-[248px] flex-none self-start sticky top-0 h-screen overflow-y-auto flex flex-col gap-1 p-3.5"
         style={{ background: "var(--side)", borderRight: "1px solid var(--line)",
           backdropFilter: "blur(14px)", WebkitBackdropFilter: "blur(14px)" }}>
         <div className="glass flex items-center gap-3 px-3 py-3 mb-1">
