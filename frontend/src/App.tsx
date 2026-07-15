@@ -9,6 +9,7 @@ import Recorder from "./pages/Recorder";
 import Scheduler from "./pages/Scheduler";
 import Context from "./pages/Context";
 import Recognition from "./pages/Recognition";
+import Providers from "./pages/Providers";
 import Profile from "./pages/Profile";
 
 export default function App() {
@@ -23,6 +24,7 @@ export default function App() {
           <Route path="recorder" element={<Recorder />} />
           <Route path="scheduler" element={<Scheduler />} />
           <Route path="recognition" element={<Recognition />} />
+          <Route path="providers" element={<Providers />} />
           <Route path="context" element={<Context />} />
           <Route path="profile" element={<Profile />} />
           {/* Any unknown/old URL falls back to the dashboard. */}

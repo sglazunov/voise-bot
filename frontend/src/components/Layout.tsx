@@ -2,7 +2,7 @@ import { ReactNode, useEffect, useState } from "react";
 import { NavLink, Outlet } from "react-router-dom";
 import {
   LayoutGrid, CalendarClock, Link2, Cloud, Bot, ListChecks, Radio,
-  Mic, Brain, User, Sun, Moon, RefreshCw, Power, LogOut,
+  Mic, Brain, BrainCircuit, User, Sun, Moon, RefreshCw, Power, LogOut,
 } from "lucide-react";
 import { useTheme } from "../lib/theme";
 import { api, logout } from "../lib/api";
@@ -18,6 +18,7 @@ const nav = [
 ];
 const tools = [
   { to: "/recognition", icon: Mic, label: "Распознавание" },
+  { to: "/providers", icon: BrainCircuit, label: "Нейросети" },
   { to: "/context", icon: Brain, label: "Контекст для ИИ" },
   { to: "/profile", icon: User, label: "Профиль" },
 ];

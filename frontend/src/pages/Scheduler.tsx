@@ -21,9 +21,11 @@ function Toggle({ title, sub, on, onChange }: any) {
 export default function Scheduler() {
   const { s, set, save } = useSettings();
   const [st, setSt] = useState<Status | null>(null);
+  const [engines, setEngines] = useState<{ value: string; label: string }[]>([]);
   const toast = useToast();
   const load = () => api.get("/api/automation/scheduler/status").then(setSt).catch(() => {});
   useEffect(() => { load(); const t = setInterval(load, 6000); return () => clearInterval(t); }, []);
+  useEffect(() => { api.get("/api/providers").then((d) => setEngines(d.engines || [])).catch(() => {}); }, []);
 
   const days: number[] = Array.isArray(s.rec_days) ? s.rec_days : [];
   const toggleDay = (i: number) => set("rec_days", days.includes(i) ? days.filter((d) => d !== i) : [...days, i].sort());
@@ -42,6 +44,7 @@ export default function Scheduler() {
         identify_speakers: !!s.identify_speakers, post_back_to_weeek: !!s.post_back_to_weeek,
         weeek_set_video_field: !!s.weeek_set_video_field, upload_protocol: !!s.upload_protocol,
         weeek_set_protocol_field: !!s.weeek_set_protocol_field,
+        analyze_provider: s.analyze_provider || "auto",
       });
       toast("Планировщик сохранён");
     } catch (e: any) { toast(e.message, true); }
@@ -110,6 +113,15 @@ export default function Scheduler() {
           <Toggle title="Поле «Видео» в Weeek" on={s.weeek_set_video_field} onChange={() => set("weeek_set_video_field", !s.weeek_set_video_field)} />
           <Toggle title="Выгружать протокол" sub="в облако" on={s.upload_protocol} onChange={() => set("upload_protocol", !s.upload_protocol)} />
           <Toggle title="Поле «Протокол» в Weeek" on={s.weeek_set_protocol_field} onChange={() => set("weeek_set_protocol_field", !s.weeek_set_protocol_field)} />
+        </div>
+        <div className="mt-3">
+          <label className="lbl">Движок протокола (нейросеть · модель)</label>
+          <select className="field" value={s.analyze_provider || "auto"} onChange={(e) => set("analyze_provider", e.target.value)}>
+            <option value="auto">Авто (бесплатные/локальные — в первую очередь)</option>
+            {engines.map((e) => <option key={e.value} value={e.value}>{e.label}</option>)}
+          </select>
+          <div className="text-[11.5px] mt-1" style={{ color: "var(--muted)" }}>
+            Ключи и список моделей — на вкладке «Нейросети».</div>
         </div>
       </Card>
 

@@ -15,8 +15,28 @@ start_display_and_audio() {
   export XDG_RUNTIME_DIR=/tmp/xdg
   export PULSE_RUNTIME_PATH=/tmp/pulse
   mkdir -p "$XDG_RUNTIME_DIR" "$PULSE_RUNTIME_PATH"
-  pulseaudio -D --exit-idle-time=-1 --disable-shm=true >/tmp/pulse.log 2>&1 || true
-  sleep 1
+
+  # Start PulseAudio robustly: a stale pid/socket from a previous (crashed)
+  # start makes `pulseaudio -D` fail with a bare "Daemon startup failed", which
+  # leaves the recorder with no audio source (meetN.monitor missing). Kill any
+  # leftover, clear the runtime dir, then start and VERIFY it's actually up.
+  for attempt in 1 2 3; do
+    pulseaudio -k >/dev/null 2>&1 || true
+    rm -f "$PULSE_RUNTIME_PATH/pid" "$PULSE_RUNTIME_PATH/native" 2>/dev/null || true
+    pulseaudio -D --exit-idle-time=-1 --disable-shm=true >/tmp/pulse.log 2>&1 || true
+    for _ in $(seq 1 30); do
+      pactl info >/dev/null 2>&1 && break
+      sleep 0.2
+    done
+    if pactl info >/dev/null 2>&1; then
+      break
+    fi
+    echo "[run] PulseAudio not up (attempt $attempt) — retrying…"
+    sleep 0.5
+  done
+  pactl info >/dev/null 2>&1 \
+    && echo "[run] PulseAudio ready." \
+    || echo "[run] WARNING: PulseAudio failed to start — recordings will have NO audio."
 
   # One Xvfb display + one null-sink per slot (indices 0..SLOTS-1).
   i=0
