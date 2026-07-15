@@ -13,7 +13,7 @@ const WORK = ["recording", "uploading", "transcribing", "analyzing"];
 
 export default function Meetings() {
   const [s, setS] = useState<Status | null>(null);
-  const [filter, setFilter] = useState("all");
+  const [filter, setFilter] = useState("today");
   const toast = useToast();
   const load = () => api.get("/api/automation/scheduler/status").then(setS).catch(() => {});
   useEffect(() => { load(); const t = setInterval(load, 4000); return () => clearInterval(t); }, []);
