@@ -15,6 +15,13 @@ UPLOAD_DIR = DATA_DIR / "uploads"
 RESULT_DIR = DATA_DIR / "results"
 JOBS_FILE = DATA_DIR / "jobs.json"
 
+# Storage backend. When DATABASE_URL is set, structured state (users, sessions,
+# recovery codes, jobs, settings, LLM keys, meeting states, AI context) lives in
+# PostgreSQL instead of the JSON files under DATA_DIR — the app logic is
+# identical either way (see app/db.py). Media files always stay on disk/cloud.
+# Empty = keep the file backend (used by tests and simple local runs).
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+
 # Whisper model. Default "large-v3-turbo": near large-v3 quality but much faster,
 # ~2 GB at int8 — fits comfortably in 14 GB. All offered models are pre-downloaded
 # in the background at startup (see whisper_setup.preload_all), so nothing is

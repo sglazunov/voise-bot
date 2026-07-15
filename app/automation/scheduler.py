@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .. import config, security
+from .. import config, db, security
 from . import clouds, recorder, settings as auto_settings, weeek
 
 # How late after start we'll still auto-join (avoids joining long-finished
@@ -649,6 +649,8 @@ class Scheduler:
 
     def _load_snaps(self, user: str) -> dict:
         try:
+            if db.enabled():
+                return db.meetings_load(user)
             return json.loads(self._snap_path(user).read_text(encoding="utf-8")) or {}
         except (OSError, ValueError):
             return {}
@@ -663,6 +665,9 @@ class Scheduler:
             if len(snaps) > 200:  # keep the newest 200
                 for k in sorted(snaps, key=lambda k: snaps[k].get("saved_at", 0))[:-200]:
                     snaps.pop(k, None)
+            if db.enabled():
+                db.meetings_save(st.owner, snaps)
+                return
             p = self._snap_path(st.owner)
             tmp = p.with_suffix(".tmp")
             tmp.write_text(json.dumps(snaps, ensure_ascii=False), encoding="utf-8")

@@ -16,7 +16,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from .. import config, security
+from .. import config, db, security
 
 _LOCK = threading.Lock()
 
@@ -115,6 +115,9 @@ _DEFAULTS: dict[str, Any] = {
 
 
 def _atomic_write(user: str, data: dict[str, Any]) -> None:
+    if db.enabled():
+        db.settings_save(user, data)
+        return
     path = _path(user)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
@@ -129,9 +132,14 @@ def _atomic_write(user: str, data: dict[str, Any]) -> None:
 
 
 def _read_raw(user: str) -> dict[str, Any]:
-    """On-disk dict (secrets still ENCRYPTED), merged onto defaults."""
+    """Stored dict (secrets still ENCRYPTED), merged onto defaults."""
     import copy
     data = copy.deepcopy(_DEFAULTS)
+    if db.enabled():
+        stored = db.settings_load(user)
+        if isinstance(stored, dict):
+            _deep_update(data, stored)
+        return data
     path = _path(user)
     if path.exists():
         try:

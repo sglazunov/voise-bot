@@ -30,6 +30,11 @@ anthropic>=0.40
 # Authentication & per-user secret encryption (Fernet/HKDF, PBKDF2 via stdlib).
 cryptography>=42
 
+# PostgreSQL backend (used when DATABASE_URL is set; otherwise the app keeps its
+# JSON-file storage). psycopg 3 + connection pool.
+psycopg[binary]>=3.2
+psycopg_pool>=3.2
+
 # --- Meeting recorder bot (Telemost): headed Chromium via Playwright ---
 # The browser itself is installed in the Docker image with
 #   playwright install --with-deps chromium

@@ -15,7 +15,7 @@ import json
 import os
 from pathlib import Path
 
-from . import security
+from . import db, security
 
 # Providers that authenticate with an API key (Ollama is keyless).
 KEY_PROVIDERS = ("anthropic", "groq", "gemini", "yandex", "gigachat")
@@ -26,13 +26,16 @@ def _path(user: str) -> Path:
 
 
 def _read_raw(user: str) -> dict:
-    p = _path(user)
-    if not p.exists():
-        return {}
-    try:
-        raw = json.loads(p.read_text(encoding="utf-8")) or {}
-    except (ValueError, OSError):
-        return {}
+    if db.enabled():
+        raw = db.creds_load(user)
+    else:
+        p = _path(user)
+        if not p.exists():
+            return {}
+        try:
+            raw = json.loads(p.read_text(encoding="utf-8")) or {}
+        except (ValueError, OSError):
+            return {}
     # Normalise every provider's value to a LIST of {key,extra} entries.
     out = {}
     for prov, val in raw.items():
@@ -44,6 +47,9 @@ def _read_raw(user: str) -> dict:
 
 
 def _write(user: str, raw: dict) -> None:
+    if db.enabled():
+        db.creds_save(user, raw)
+        return
     p = _path(user)
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(".tmp")

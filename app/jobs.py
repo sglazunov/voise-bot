@@ -19,7 +19,7 @@ from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import Dict, Optional
 
-from . import config, formats, glossary
+from . import config, db, formats, glossary
 from .transcribe import transcribe_file
 
 STATUS_QUEUED = "queued"
@@ -117,28 +117,35 @@ class JobStore:
 
     # ---- persistence -------------------------------------------------------
     def _load(self) -> None:
-        if config.JOBS_FILE.exists():
-            try:
+        try:
+            if db.enabled():
+                raw = db.jobs_load()
+            elif config.JOBS_FILE.exists():
                 raw = json.loads(config.JOBS_FILE.read_text(encoding="utf-8"))
-                for d in raw:
-                    job = Job(**d)
-                    # Nothing survives a restart mid-flight (no worker resumes it).
-                    if job.status in (STATUS_RUNNING, STATUS_QUEUED, STATUS_PAUSED):
-                        job.status = STATUS_ERROR
-                        job.error = "Прервано (сервис был перезапущен)."
-                    elif job.status == STATUS_ANALYZING:
-                        # Transcript is already saved — keep it, just flag the
-                        # analysis so the user can re-run it in one click.
-                        job.status = STATUS_DONE
-                        job.analysis_error = ("Анализ прерван (сервис перезапущен). "
-                                              "Нажмите «Повторить анализ».")
-                    self._jobs[job.id] = job
-            except Exception:
-                pass
+            else:
+                return
+            for d in raw:
+                job = Job(**d)
+                # Nothing survives a restart mid-flight (no worker resumes it).
+                if job.status in (STATUS_RUNNING, STATUS_QUEUED, STATUS_PAUSED):
+                    job.status = STATUS_ERROR
+                    job.error = "Прервано (сервис был перезапущен)."
+                elif job.status == STATUS_ANALYZING:
+                    # Transcript is already saved — keep it, just flag the
+                    # analysis so the user can re-run it in one click.
+                    job.status = STATUS_DONE
+                    job.analysis_error = ("Анализ прерван (сервис перезапущен). "
+                                          "Нажмите «Повторить анализ».")
+                self._jobs[job.id] = job
+        except Exception:
+            pass
 
     def _save(self) -> None:
-        tmp = config.JOBS_FILE.with_suffix(".tmp")
         data = [asdict(j) for j in self._jobs.values()]
+        if db.enabled():
+            db.jobs_save(data)
+            return
+        tmp = config.JOBS_FILE.with_suffix(".tmp")
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.replace(config.JOBS_FILE)
 

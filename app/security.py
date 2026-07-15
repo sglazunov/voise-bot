@@ -36,7 +36,7 @@ from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
-from . import config
+from . import config, db
 
 _USERS_FILE = config.DATA_DIR / "users.json"
 _SESSIONS_FILE = config.DATA_DIR / "sessions.json"
@@ -132,12 +132,21 @@ def _atomic_write_json(path: Path, data: Any) -> None:
 
 
 def _load_users() -> dict:
+    if db.enabled():
+        return db.users_load()
     if not _USERS_FILE.exists():
         return {}
     try:
         return json.loads(_USERS_FILE.read_text(encoding="utf-8")) or {}
     except (ValueError, OSError):
         return {}
+
+
+def _save_users(users: dict) -> None:
+    if db.enabled():
+        db.users_save(users)
+    else:
+        _atomic_write_json(_USERS_FILE, users)
 
 
 def normalize_username(username: str) -> str:
@@ -197,7 +206,7 @@ def set_phone(username: str, password: str, new_phone: str) -> dict:
     with _LOCK:
         users = _load_users()
         users[username]["phone"] = phone
-        _atomic_write_json(_USERS_FILE, users)
+        _save_users(users)
     return {"ok": True}
 
 
@@ -205,7 +214,7 @@ def _set_password(username: str, new: str) -> None:
     with _LOCK:
         users = _load_users()
         users[username]["pw"] = hash_password(new)
-        _atomic_write_json(_USERS_FILE, users)
+        _save_users(users)
 
 
 # --------------------------------------------------------------------------- #
@@ -223,12 +232,21 @@ _RECOVERY_ITERS = 60_000
 
 
 def _load_recovery() -> dict:
+    if db.enabled():
+        return db.recovery_load()
     if not _RECOVERY_FILE.exists():
         return {}
     try:
         return json.loads(_RECOVERY_FILE.read_text(encoding="utf-8")) or {}
     except (ValueError, OSError):
         return {}
+
+
+def _save_recovery(rec: dict) -> None:
+    if db.enabled():
+        db.recovery_save(rec)
+    else:
+        _atomic_write_json(_RECOVERY_FILE, rec)
 
 
 def _hash_code(code: str, salt: str) -> str:
@@ -261,7 +279,7 @@ def generate_recovery_code(username: str, phone: str) -> dict:
         rec[username] = {"hash": _hash_code(code, salt), "salt": salt,
                          "phone": normalize_phone(phone), "created": now,
                          "expires": now + RECOVERY_CODE_TTL, "attempts": 0}
-        _atomic_write_json(_RECOVERY_FILE, rec)
+        _save_recovery(rec)
     return {"ok": True, "code": code, "phone": normalize_phone(phone)}
 
 
@@ -278,12 +296,12 @@ def confirm_recovery_code(username: str, phone: str, code: str,
         entry = rec.get(username)
         if not entry or entry.get("expires", 0) < time.time():
             rec.pop(username, None)
-            _atomic_write_json(_RECOVERY_FILE, rec)
+            _save_recovery(rec)
             return {"ok": False, "error": "Код не найден или истёк. Запросите новый."}
         entry["attempts"] = entry.get("attempts", 0) + 1
         if entry["attempts"] > RECOVERY_MAX_ATTEMPTS:
             rec.pop(username, None)
-            _atomic_write_json(_RECOVERY_FILE, rec)
+            _save_recovery(rec)
             return {"ok": False, "error": "Слишком много попыток. Запросите новый код."}
         matches = (bool(given)
                    and verify_phone(username, phone)
@@ -291,11 +309,11 @@ def confirm_recovery_code(username: str, phone: str, code: str,
                                            entry["hash"]))
         if not matches:
             left = RECOVERY_MAX_ATTEMPTS - entry["attempts"]
-            _atomic_write_json(_RECOVERY_FILE, rec)   # persist the used attempt
+            _save_recovery(rec)   # persist the used attempt
             tail = f" Осталось попыток: {left}." if left > 0 else ""
             return {"ok": False, "error": f"Неверный код.{tail}"}
         rec.pop(username, None)
-        _atomic_write_json(_RECOVERY_FILE, rec)
+        _save_recovery(rec)
     _set_password(username, new_password)
     destroy_user_sessions(username)
     return {"ok": True}
@@ -339,7 +357,7 @@ def create_user(username: str, password: str, code: str | None = None,
         users[username] = {"pw": hash_password(password), "created_at": time.time(),
                            "phone": norm_phone,
                            "is_admin": not bool(users)}  # first user = admin
-        _atomic_write_json(_USERS_FILE, users)
+        _save_users(users)
     user_dir(username)  # create their private dir up-front
     return {"ok": True, "username": username}
 
@@ -417,12 +435,21 @@ def throttle_clear(*keys: str) -> None:
 # Sessions
 # --------------------------------------------------------------------------- #
 def _load_sessions() -> dict:
+    if db.enabled():
+        return db.sessions_load()
     if not _SESSIONS_FILE.exists():
         return {}
     try:
         return json.loads(_SESSIONS_FILE.read_text(encoding="utf-8")) or {}
     except (ValueError, OSError):
         return {}
+
+
+def _save_sessions(sessions: dict) -> None:
+    if db.enabled():
+        db.sessions_save(sessions)
+    else:
+        _atomic_write_json(_SESSIONS_FILE, sessions)
 
 
 def _token_key(token: str) -> str:
@@ -439,7 +466,7 @@ def create_session(username: str) -> str:
         sessions = _load_sessions()
         sessions[_token_key(token)] = {"user": username, "exp": time.time() + SESSION_TTL}
         _prune(sessions)
-        _atomic_write_json(_SESSIONS_FILE, sessions)
+        _save_sessions(sessions)
     return token
 
 
@@ -455,7 +482,7 @@ def session_user(token: str | None) -> str | None:
             return None
         if s.get("exp", 0) < time.time():
             sessions.pop(key, None)
-            _atomic_write_json(_SESSIONS_FILE, sessions)
+            _save_sessions(sessions)
             return None
         return s.get("user")
 
@@ -466,7 +493,7 @@ def destroy_session(token: str | None) -> None:
     with _LOCK:
         sessions = _load_sessions()
         if sessions.pop(_token_key(token), None) is not None:
-            _atomic_write_json(_SESSIONS_FILE, sessions)
+            _save_sessions(sessions)
 
 
 def destroy_user_sessions(username: str) -> None:
@@ -479,7 +506,7 @@ def destroy_user_sessions(username: str) -> None:
         for k in stale:
             sessions.pop(k, None)
         if stale:
-            _atomic_write_json(_SESSIONS_FILE, sessions)
+            _save_sessions(sessions)
 
 
 def is_admin(username: str | None) -> bool:

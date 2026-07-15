@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
-from . import config, llm, analyze, security, sms, user_creds
+from . import config, db, llm, analyze, security, sms, user_creds
 from .jobs import store, STATUS_DONE, STATUS_ANALYZING, STATUS_CANCELLED
 
 
@@ -382,6 +382,8 @@ def profile_change_password(body: PasswordChange, user: str = Depends(current_us
 def _start_scheduler() -> None:
     """Start the meeting-automation scheduler. It self-gates on the `enabled`
     setting, so it's safe to always run — it idles until turned on in the UI."""
+    if db.enabled():
+        db.init_schema()  # ensure tables exist (idempotent)
     try:
         from .automation.scheduler import scheduler
         scheduler.start()

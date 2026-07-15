@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from . import security
+from . import db, security
 
 _MAX_GLOBAL = 20_000       # generous, but bounded so it can't blow up the prompt
 _MAX_PROJECT = 10_000
@@ -35,10 +35,13 @@ def _path(user: str) -> Path:
 
 def load(user: str) -> dict:
     """Return {'global': str, 'projects': [{'name','text'}, ...]}."""
-    try:
-        raw = json.loads(_path(user).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        raw = {}
+    if db.enabled():
+        raw = db.aicontext_load(user) or {}
+    else:
+        try:
+            raw = json.loads(_path(user).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            raw = {}
     projects = []
     for p in (raw.get("projects") or []):
         if isinstance(p, dict) and (p.get("name") or "").strip():
@@ -61,6 +64,9 @@ def save(user: str, data: dict) -> dict:
         text = str(p.get("text", "")).strip()[:_MAX_PROJECT]
         if name:
             clean["projects"].append({"name": name, "text": text})
+    if db.enabled():
+        db.aicontext_save(user, clean)
+        return clean
     p = _path(user)
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(".tmp")
