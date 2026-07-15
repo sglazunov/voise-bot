@@ -3,6 +3,7 @@ import { UserCircle, Phone, KeyRound, ShieldCheck } from "lucide-react";
 import { Page } from "../components/Layout";
 import { Card, useToast } from "../components/ui";
 import { api } from "../lib/api";
+import { formatRuPhone } from "../lib/phone";
 
 export default function Profile() {
   const [info, setInfo] = useState<any>(null);
@@ -46,7 +47,7 @@ export default function Profile() {
           <div className="flex items-center gap-2 mb-3"><Phone size={17} color="var(--accent)" />
             <div className="font-bold text-[15px]">Сменить телефон</div></div>
           <label className="lbl">Новый телефон</label>
-          <input className="field" value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="+7 900 000-00-00" />
+          <input className="field" value={phone} onChange={(e) => setPhone(formatRuPhone(e.target.value))} placeholder="+7 900 000-00-00" />
           <label className="lbl mt-3">Текущий пароль</label>
           <input className="field" type="password" value={phonePwd} onChange={(e) => setPhonePwd(e.target.value)} />
           <button className="btn btn-primary mt-3" onClick={savePhone}>Сохранить телефон</button>

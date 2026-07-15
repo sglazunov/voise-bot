@@ -10,6 +10,8 @@ const FILTERS = [
   { id: "work", label: "В работе" }, { id: "done", label: "Готовые" },
 ];
 const WORK = ["recording", "uploading", "transcribing", "analyzing"];
+// States where the bot isn't running but the user can still launch it manually.
+const JOINABLE = ["missed", "skipped", "no_time", "error"];
 
 export default function Meetings() {
   const [s, setS] = useState<Status | null>(null);
@@ -79,6 +81,10 @@ export default function Meetings() {
                     <button className="btn btn-ghost" onClick={() => runNow(m)}>Сейчас</button>
                     <span>Пишем</span><Switch size="sm" on={willRecord} onChange={() => setDecision(m, !willRecord)} />
                   </div>
+                ) : JOINABLE.includes(m.state) ? (
+                  <button className="btn btn-primary" onClick={() => runNow(m)}
+                    title="Запустить бота на эту встречу вручную">
+                    <Video size={14} /> Подключиться</button>
                 ) : null}
               </div>
             </div>

@@ -116,18 +116,35 @@ def _request(method: str, path: str, token: str,
 # Reads
 # --------------------------------------------------------------------------- #
 def list_tasks(token: str, project_id: Any = None,
-               extra_params: dict | None = None) -> list[dict]:
-    """Return raw task dicts. `project_id` narrows to one project if given."""
-    params = {"perPage": 100}
-    if project_id is not None:
-        params["projectId"] = project_id
-    if extra_params:
-        params.update(extra_params)
-    out = _request("GET", "/tm/tasks", token, params=params)
-    tasks = out.get("tasks") if isinstance(out, dict) else None
-    if tasks is None and isinstance(out, list):
-        tasks = out
-    return tasks or []
+               extra_params: dict | None = None, max_tasks: int = 500) -> list[dict]:
+    """Return raw task dicts. `project_id` narrows to one project if given.
+
+    Weeek caps a page at 100 tasks and signals more with `hasMore`, so we
+    paginate by `offset` (up to `max_tasks`). Without this, meetings past the
+    first 100 — e.g. an older task that was RESCHEDULED into the future — were
+    never fetched and so never appeared in the app."""
+    per = 100
+    collected: list[dict] = []
+    offset = 0
+    while len(collected) < max_tasks:
+        params: dict = {"perPage": per, "offset": offset}
+        if project_id is not None:
+            params["projectId"] = project_id
+        if extra_params:
+            params.update(extra_params)
+        out = _request("GET", "/tm/tasks", token, params=params)
+        if isinstance(out, dict):
+            tasks = out.get("tasks") or []
+            has_more = bool(out.get("hasMore"))
+        elif isinstance(out, list):
+            tasks, has_more = out, len(out) >= per
+        else:
+            tasks, has_more = [], False
+        collected.extend(tasks)
+        if not has_more or len(tasks) < per:
+            break
+        offset += per
+    return collected
 
 
 def list_projects(token: str) -> list[dict]:
@@ -206,12 +223,22 @@ def parse_start(task: dict, local_tz: tzinfo = timezone.utc) -> datetime | None:
 
     `local_tz` is the workspace timezone used for naive (no-offset) values.
     """
-    # 1) Explicit START datetime (range meetings). NEVER dueDateTime here.
+    # 1) Explicit START datetime (range meetings), full UTC timestamp. For a
+    #    time RANGE Weeek exposes both startDateTime (START) and dueDateTime
+    #    (END) — we must take the START. NEVER dueDateTime in this branch.
     for f in ("startDateTime", "dateTime", "datetime"):
         dt = _parse_dt(task.get(f), local_tz)
         if dt:
             return dt.astimezone(timezone.utc)
-    # 2) A day + a START time (local). Prefer start-time fields over generic ones.
+    # 2) Single-time meetings (no startDateTime): dueDateTime is the exact meeting
+    #    time as a full UTC timestamp. PREFER it over the separate `date`+`time`
+    #    fields — Weeek returns those in MISMATCHED zones (`date` follows UTC while
+    #    `time` is the workspace-local time), so combining them is wrong, most
+    #    visibly near midnight (a 00:25 meeting parsed to the previous day).
+    dt = _parse_dt(task.get("dueDateTime"), local_tz)
+    if dt:
+        return dt.astimezone(timezone.utc)
+    # 3) Last resort: a day + a local start time (only when no dueDateTime exists).
     day = next((task.get(f) for f in
                 ("dateStart", "date", "startDate", "dueDate", "day") if task.get(f)), None)
     stime = next((task.get(f) for f in
@@ -221,10 +248,6 @@ def parse_start(task: dict, local_tz: tzinfo = timezone.utc) -> datetime | None:
         dt = _parse_dt(combined, local_tz)
         if dt:
             return dt.astimezone(timezone.utc)
-    # 3) Last resort: dueDateTime (the END for ranges, but == start for single times).
-    dt = _parse_dt(task.get("dueDateTime"), local_tz)
-    if dt:
-        return dt.astimezone(timezone.utc)
     return None
 
 

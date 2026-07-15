@@ -119,6 +119,19 @@
     };
     const showErr = (m) => { err.textContent = m; err.style.display = 'block'; };
 
+    // Live-format the phone as a Russian +7 number: "8…"→"+7…", "923…"→"+7923…".
+    const phoneEl = $('phone');
+    if (phoneEl) {
+      const fmtPhone = (raw) => {
+        let d = (raw || '').replace(/\D/g, '');
+        if (!d) return '';
+        if (d[0] === '8') d = '7' + d.slice(1);
+        else if (d[0] !== '7') d = '7' + d;
+        return '+' + d.slice(0, 11);
+      };
+      phoneEl.addEventListener('input', () => { phoneEl.value = fmtPhone(phoneEl.value); });
+    }
+
     if (MODE === 'recover') {
       // Two steps: (1) request an SMS code, (2) verify it + set the new password.
       let step = 1, resendTimer = null;
