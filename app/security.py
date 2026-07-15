@@ -355,6 +355,16 @@ def registration_allowed(code: str | None) -> tuple[bool, str]:
     return False, "Регистрация закрыта администратором."
 
 
+def registration_requires_code() -> bool:
+    """Whether a new (non-first) registration must supply an invite code — true
+    only when a VTX_REGISTRATION_CODE is configured AND at least one user exists.
+    Drives whether the register form shows the «Код регистрации» field."""
+    with _LOCK:
+        if not _load_users():
+            return False
+    return bool(os.getenv("VTX_REGISTRATION_CODE", ""))
+
+
 def create_user(username: str, password: str, code: str | None = None,
                 phone: str | None = None) -> dict:
     username = normalize_username(username)
@@ -425,14 +435,13 @@ def delete_account(username: str, password: str) -> dict:
         users = _load_users()
         if username not in users:
             return {"ok": False, "error": "Аккаунт не найден."}
-        # Don't orphan the workspace: the only admin can't self-delete while
-        # other users still exist (there's no admin-transfer yet).
-        if users[username].get("is_admin"):
-            others = [u for u in users if u != username]
-            if others and not any(users[u].get("is_admin") for u in others):
-                return {"ok": False, "error": "Вы единственный администратор — "
-                        "сначала удалите остальных пользователей."}
+        was_admin = bool(users[username].get("is_admin"))
         users.pop(username, None)
+        # If we removed the last admin but other users remain, promote the
+        # earliest-created one so the workspace never ends up without an admin.
+        if was_admin and users and not any(u.get("is_admin") for u in users.values()):
+            oldest = min(users, key=lambda u: users[u].get("created_at") or 0)
+            users[oldest]["is_admin"] = True
         _save_users(users)
         rec = _load_recovery()
         if rec.pop(username, None) is not None:

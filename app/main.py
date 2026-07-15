@@ -201,7 +201,8 @@ def login_page(request: Request):
 def register_page(request: Request):
     return templates.TemplateResponse(
         "login.html", {"request": request, "mode": "register",
-                       "first_run": not security.list_users()})
+                       "first_run": not security.list_users(),
+                       "code_required": security.registration_requires_code()})
 
 
 @app.post("/api/auth/register")
