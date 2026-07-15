@@ -4,6 +4,7 @@ import { Page } from "../components/Layout";
 import { Card, useToast } from "../components/ui";
 import { useSettings } from "../lib/useSettings";
 import { api } from "../lib/api";
+import { TZ_RU, TZ_CIS, otherZones, tzLabel } from "../lib/timezones";
 
 export default function Weeek() {
   const { s, set, save, reload } = useSettings();
@@ -48,7 +49,22 @@ export default function Weeek() {
             <div><label className="lbl">ID проекта</label>
               <input className="field" value={s.weeek_project_id || ""} onChange={(e) => set("weeek_project_id", e.target.value)} placeholder="пусто = все" /></div>
             <div><label className="lbl">Часовой пояс</label>
-              <input className="field" value={s.timezone || ""} onChange={(e) => set("timezone", e.target.value)} placeholder="Europe/Moscow" /></div>
+              <select className="field" value={s.timezone || "Europe/Moscow"} onChange={(e) => set("timezone", e.target.value)}>
+                <optgroup label="Россия">
+                  {TZ_RU.map((z) => <option key={z} value={z}>{tzLabel(z)}</option>)}
+                </optgroup>
+                <optgroup label="СНГ">
+                  {TZ_CIS.map((z) => <option key={z} value={z}>{tzLabel(z)}</option>)}
+                </optgroup>
+                {s.timezone && ![...TZ_RU, ...TZ_CIS, ...otherZones()].includes(s.timezone) && (
+                  <option value={s.timezone}>{s.timezone}</option>
+                )}
+                {otherZones().length > 0 && (
+                  <optgroup label="Все зоны">
+                    {otherZones().map((z) => <option key={z} value={z}>{tzLabel(z)}</option>)}
+                  </optgroup>
+                )}
+              </select></div>
           </div>
           <div className="text-[12px] mt-1.5" style={{ color: "var(--muted)" }}>Пусто = все проекты</div>
           <div className="flex gap-2.5 mt-3 flex-wrap">
