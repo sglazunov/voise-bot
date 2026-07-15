@@ -86,8 +86,8 @@
              autocomplete="{{ 'current-password' if mode == 'login' else 'new-password' }}"
              placeholder="{{ 'ваш пароль' if mode == 'login' else 'не короче 8 символов' }}">
       {% if mode == "register" and not first_run %}
-      <label for="code">Код регистрации</label>
-      <input id="code" name="code" placeholder="выдаётся администратором">
+      <label for="code">Код регистрации <span style="color:var(--accent)">*</span></label>
+      <input id="code" name="code" required placeholder="выдаётся администратором">
       {% endif %}
       <button id="btn" type="submit">{{ "Зарегистрироваться" if mode == "register" else "Войти" }}</button>
       <div id="err" class="err"></div>
