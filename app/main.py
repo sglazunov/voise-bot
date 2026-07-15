@@ -80,27 +80,30 @@ def _engine_list(user_keys: dict | None = None) -> list[dict]:
 app = FastAPI(title="Voice Transcriber", version="1.0")
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
-# Built React SPA (Vite → frontend/dist). Served under /app so the existing
-# Jinja pages keep working during/after the migration. Hashed assets are served
-# from /app/assets; every other /app/* path returns index.html so client-side
-# routing (deep links, refresh) works. The dir is absent in dev until `npm run
-# build`, so mounting is guarded.
+# Built React SPA (Vite → frontend/dist) — this IS the whole app UI. Hashed
+# assets are served from /assets; the SPA shell (index.html) is served for "/"
+# and every other client route by _register_spa() at the end of this module.
+# The dir is absent in dev until `npm run build`, so mounting is guarded.
 SPA_DIR = Path(__file__).parent.parent / "frontend" / "dist"
 if (SPA_DIR / "assets").is_dir():
-    app.mount("/app/assets", StaticFiles(directory=str(SPA_DIR / "assets")), name="spa-assets")
+    app.mount("/assets", StaticFiles(directory=str(SPA_DIR / "assets")), name="spa-assets")
 
 
 def _register_spa() -> None:
-    """Serve the SPA shell for /app and any /app/* client route."""
+    """Serve the React SPA as the entire app UI: index.html for `/` and every
+    other non-API, non-file path so client-side routing (deep links, refresh)
+    works. Registered LAST so real routes (auth pages, /api/*, /healthz) win."""
     index = SPA_DIR / "index.html"
     if not index.exists():
         return
 
-    @app.get("/app", include_in_schema=False)
-    @app.get("/app/{full_path:path}", include_in_schema=False)
+    @app.get("/", include_in_schema=False)
+    @app.get("/{full_path:path}", include_in_schema=False)
     def spa(full_path: str = "", user: str = Depends(current_user)):
-        # Real files (favicon, etc.) win; everything else is the SPA shell so
-        # deep links like /app/recognition resolve to client-side routing.
+        # Unknown API paths must 404, not return the HTML shell.
+        if full_path.startswith("api/"):
+            raise HTTPException(404, "Not found")
+        # Real files (favicon, etc.) win; everything else is the SPA shell.
         target = SPA_DIR / full_path
         if full_path and target.is_file():
             return FileResponse(target)
@@ -249,11 +252,6 @@ def auth_me(user: str = Depends(current_user)):
 
 
 # ---- AI context (standing knowledge base for the protocol AI) --------------
-@app.get("/context", response_class=HTMLResponse)
-def context_page(request: Request, user: str = Depends(current_user)):
-    return templates.TemplateResponse("context.html", {"request": request})
-
-
 @app.get("/api/context")
 def get_context(user: str = Depends(current_user)):
     from . import ai_context
@@ -343,11 +341,6 @@ def auth_recover_verify(body: RecoverVerifyBody, request: Request):
 
 
 # ---- Profile (phone + password management) ---------------------------------
-@app.get("/profile", response_class=HTMLResponse)
-def profile_page(request: Request, user: str = Depends(current_user)):
-    return templates.TemplateResponse("profile.html", {"request": request})
-
-
 @app.get("/api/profile")
 def profile_info(user: str = Depends(current_user)):
     return {"username": user, "phone_masked": security.masked_phone(user),
@@ -420,30 +413,8 @@ ALLOWED_EXT = {".mp3", ".wav", ".m4a", ".ogg", ".oga", ".opus", ".flac", ".aac",
 ALLOWED_MODELS = ["tiny", "base", "small", "medium", "large-v3", "large-v3-turbo"]
 
 
-# ---- Web UI ---------------------------------------------------------------
-@app.get("/automation", response_class=HTMLResponse)
-def automation_page(request: Request):
-    """Settings + control panel for the meeting-automation pipeline."""
-    return templates.TemplateResponse("automation.html", {"request": request})
-
-
-@app.get("/", response_class=HTMLResponse)
-def index(request: Request, user: str = Depends(current_user)):
-    uk = user_creds.load(user)
-    return templates.TemplateResponse(
-        "index.html",
-        {
-            "request": request,
-            "username": user,
-            "jobs": [j.to_public() for j in store.list(owner=user)],
-            "diarization_enabled": config.DIARIZATION_ENABLED,
-            "analysis_enabled": bool(config.available_providers(uk)),
-            "providers": _provider_list(uk),
-            "model": config.MODEL,
-            "models": ALLOWED_MODELS,
-            "max_upload_mb": config.MAX_UPLOAD_MB,
-        },
-    )
+# The whole UI is the React SPA (served by _register_spa at the end of this
+# module for "/" and every client route); there are no Jinja app pages anymore.
 
 
 # ---- REST API -------------------------------------------------------------

@@ -1,10 +1,10 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
-// The SPA is served under /app/ by FastAPI (StaticFiles), so old Jinja routes
-// keep working during the migration. API stays at /api/* (proxied in dev).
+// The SPA is the whole app UI, served at the site root by FastAPI. Hashed
+// assets live under /assets; API stays at /api/* (proxied in dev).
 export default defineConfig({
-  base: "/app/",
+  base: "/",
   plugins: [react()],
   build: { outDir: "dist", emptyOutDir: true },
   server: {

@@ -1,4 +1,4 @@
-import { Routes, Route } from "react-router-dom";
+import { Routes, Route, Navigate } from "react-router-dom";
 import { Layout } from "./components/Layout";
 import { ToastProvider } from "./components/ui";
 import Overview from "./pages/Overview";
@@ -25,6 +25,8 @@ export default function App() {
           <Route path="recognition" element={<Recognition />} />
           <Route path="context" element={<Context />} />
           <Route path="profile" element={<Profile />} />
+          {/* Any unknown/old URL falls back to the dashboard. */}
+          <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
       </Routes>
     </ToastProvider>
