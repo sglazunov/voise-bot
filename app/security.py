@@ -414,6 +414,47 @@ def change_password(username: str, new: str, old: str | None = None,
     return {"ok": True}
 
 
+def delete_account(username: str, password: str) -> dict:
+    """Permanently delete an account: the login, phone, sessions, recovery code
+    and ALL of the user's data (settings, tokens, LLM keys, AI context, meeting
+    states, and their files on disk). Requires the current password."""
+    username = normalize_username(username)
+    if not verify_user(username, password):
+        return {"ok": False, "error": "Пароль неверный."}
+    with _LOCK:
+        users = _load_users()
+        if username not in users:
+            return {"ok": False, "error": "Аккаунт не найден."}
+        # Don't orphan the workspace: the only admin can't self-delete while
+        # other users still exist (there's no admin-transfer yet).
+        if users[username].get("is_admin"):
+            others = [u for u in users if u != username]
+            if others and not any(users[u].get("is_admin") for u in others):
+                return {"ok": False, "error": "Вы единственный администратор — "
+                        "сначала удалите остальных пользователей."}
+        users.pop(username, None)
+        _save_users(users)
+        rec = _load_recovery()
+        if rec.pop(username, None) is not None:
+            _save_recovery(rec)
+    destroy_user_sessions(username)
+    _delete_user_data(username)
+    return {"ok": True}
+
+
+def _delete_user_data(username: str) -> None:
+    """Remove the user's per-user data (DB rows when on Postgres) and their files
+    on disk (recordings/results/uploads/settings)."""
+    username = normalize_username(username)
+    if db.enabled():
+        try:
+            db.delete_user_data(username)
+        except Exception:
+            pass
+    import shutil
+    shutil.rmtree(config.DATA_DIR / "users" / username, ignore_errors=True)
+
+
 # --------------------------------------------------------------------------- #
 # Brute-force protection (login / registration code)
 # --------------------------------------------------------------------------- #

@@ -1,14 +1,15 @@
 import { useEffect, useState } from "react";
-import { UserCircle, Phone, KeyRound, ShieldCheck } from "lucide-react";
+import { UserCircle, Phone, KeyRound, ShieldCheck, Trash2, AlertTriangle } from "lucide-react";
 import { Page } from "../components/Layout";
-import { Card, useToast } from "../components/ui";
-import { api } from "../lib/api";
+import { Card, Modal, useToast } from "../components/ui";
+import { api, logout } from "../lib/api";
 import { formatRuPhone } from "../lib/phone";
 
 export default function Profile() {
   const [info, setInfo] = useState<any>(null);
   const [phone, setPhone] = useState(""); const [phonePwd, setPhonePwd] = useState("");
   const [oldPwd, setOldPwd] = useState(""); const [newPwd, setNewPwd] = useState("");
+  const [delOpen, setDelOpen] = useState(false); const [delPwd, setDelPwd] = useState(""); const [deleting, setDeleting] = useState(false);
   const toast = useToast();
 
   const load = () => api.get("/api/profile").then(setInfo).catch(() => {});
@@ -23,6 +24,15 @@ export default function Profile() {
     if (newPwd.length < 6) return toast("Пароль минимум 6 символов", true);
     try { await api.post("/api/profile/password", { new_password: newPwd, old_password: oldPwd }); setOldPwd(""); setNewPwd(""); toast("Пароль изменён"); }
     catch (e: any) { toast(e.message, true); }
+  }
+  async function deleteAccount() {
+    if (!delPwd) return toast("Введите пароль для подтверждения", true);
+    setDeleting(true);
+    try {
+      await api.post("/api/profile/delete", { password: delPwd });
+      // account gone + session revoked -> back to the login page
+      window.location.href = "/login";
+    } catch (e: any) { toast(e.message, true); setDeleting(false); }
   }
 
   return (
@@ -64,7 +74,40 @@ export default function Profile() {
           </div>
           <button className="btn btn-primary mt-3" onClick={savePassword}>Изменить пароль</button>
         </Card>
+
+        {/* Danger zone — permanent account deletion */}
+        <Card className="lg:col-span-2" >
+          <div style={{ border: "1px solid rgba(248,113,113,.4)", borderRadius: 16, padding: 16, background: "rgba(248,113,113,.05)" }}>
+            <div className="flex items-center gap-2 mb-1"><AlertTriangle size={17} color="#f87171" />
+              <div className="font-bold text-[15px]" style={{ color: "#fca5a5" }}>Опасная зона</div></div>
+            <div className="text-[12.5px] mb-3" style={{ color: "var(--muted)" }}>
+              Полное удаление аккаунта: логин, телефон, токены, ключи, контекст и записи — всё
+              безвозвратно. Отменить нельзя.
+            </div>
+            <button className="btn btn-danger" onClick={() => { setDelPwd(""); setDelOpen(true); }}>
+              <Trash2 size={14} /> Удалить аккаунт</button>
+          </div>
+        </Card>
       </div>
+
+      <Modal open={delOpen} onClose={() => !deleting && setDelOpen(false)}
+        title={<span style={{ color: "#fca5a5" }}>Точно удалить аккаунт навсегда?</span>}>
+        <div className="text-[13px] leading-relaxed mb-3" style={{ color: "var(--muted)" }}>
+          Аккаунт <b style={{ color: "var(--txt)" }}>{info?.username}</b> и все его данные (логин,
+          телефон, токены Weeek/облака, ключи нейросетей, контекст, встречи и записи) будут удалены
+          <b style={{ color: "#fca5a5" }}> без возможности восстановления</b>.
+        </div>
+        <label className="lbl">Подтвердите паролем</label>
+        <input className="field" type="password" autoFocus value={delPwd}
+          onChange={(e) => setDelPwd(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") deleteAccount(); }}
+          placeholder="ваш текущий пароль" />
+        <div className="flex gap-2.5 mt-4 justify-end">
+          <button className="btn btn-ghost" onClick={() => setDelOpen(false)} disabled={deleting}>Отмена</button>
+          <button className="btn btn-danger" onClick={deleteAccount} disabled={deleting}>
+            <Trash2 size={14} /> {deleting ? "Удаление…" : "Удалить навсегда"}</button>
+        </div>
+      </Modal>
     </Page>
   );
 }

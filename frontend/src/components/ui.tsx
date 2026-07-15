@@ -20,6 +20,29 @@ export function Card({ children, className = "" }: { children: ReactNode; classN
   return <div className={`glass p-4 md:p-[18px] ${className}`}>{children}</div>;
 }
 
+/* ---- Modal (centered dialog with backdrop) ---- */
+export function Modal({ open, onClose, title, children }:
+  { open: boolean; onClose: () => void; title?: ReactNode; children: ReactNode }) {
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [open, onClose]);
+  if (!open) return null;
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 200,
+      background: "rgba(4,12,16,.62)", backdropFilter: "blur(2px)",
+      display: "grid", placeItems: "center", padding: 16 }}>
+      <div onClick={(e) => e.stopPropagation()} className="glass"
+        style={{ width: "min(94vw, 440px)", padding: 22 }}>
+        {title && <div className="font-bold text-[16px] mb-2">{title}</div>}
+        {children}
+      </div>
+    </div>
+  );
+}
+
 /* ---- Select (themed dropdown; replaces native <select> app-wide) ----
    Always opens downward, matches the trigger width, and is styled like the rest
    of the UI (rounded, glass, teal accent). Supports flat options and groups. */

@@ -416,3 +416,14 @@ def aicontext_save(user: str, data: dict) -> None:
             cur.execute("INSERT INTO ai_context_projects (username, idx, name, text) "
                         "VALUES (%s,%s,%s,%s)",
                         (user, i, p.get("name", ""), p.get("text", "")))
+
+
+# --------------------------------------------------------------------------- #
+# Account deletion — wipe every per-user row (users/sessions/recovery are
+# handled by security's own save paths; here we clear the rest in one txn).
+# --------------------------------------------------------------------------- #
+def delete_user_data(user: str) -> None:
+    with _conn() as conn, _cur(conn) as cur:
+        for table in ("user_settings", "user_creds", "meetings",
+                      "ai_context_projects", "ai_context"):
+            cur.execute(f"DELETE FROM {table} WHERE username=%s", (user,))

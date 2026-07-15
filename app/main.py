@@ -378,6 +378,24 @@ def profile_change_password(body: PasswordChange, user: str = Depends(current_us
     return {"ok": True}
 
 
+class AccountDelete(BaseModel):
+    password: str
+
+
+@app.post("/api/profile/delete")
+def profile_delete(body: AccountDelete, request: Request,
+                   user: str = Depends(current_user)):
+    """Permanently delete the current account (login, phone, all data). Requires
+    the current password. Clears the session — the client redirects to /login."""
+    res = security.delete_account(user, body.password)
+    if not res.get("ok"):
+        raise HTTPException(400, res.get("error"))
+    security.destroy_session(request.cookies.get(security.SESSION_COOKIE))
+    resp = JSONResponse({"ok": True, "detail": "Аккаунт удалён."})
+    resp.delete_cookie(security.SESSION_COOKIE)
+    return resp
+
+
 @app.on_event("startup")
 def _start_scheduler() -> None:
     """Start the meeting-automation scheduler. It self-gates on the `enabled`
