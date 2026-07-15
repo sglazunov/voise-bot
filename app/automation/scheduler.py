@@ -374,7 +374,7 @@ class Scheduler:
                 if do_protocol and cfg.get("upload_protocol", True):
                     threading.Thread(
                         target=self._await_and_upload_protocol,
-                        args=(user, st.task_id, job.id, cfg, Path(out).stem),
+                        args=(st, job.id, cfg, Path(out).stem),
                         daemon=True).start()
             elif delivered_elsewhere:
                 # No transcription — nothing else needs the file; drop it now.
@@ -522,28 +522,57 @@ class Scheduler:
                             pass
             return
 
-    def _await_and_upload_protocol(self, user: str, task_id, job_id: str,
+    def _await_and_upload_protocol(self, st: MeetingState, job_id: str,
                                    cfg: dict, base_name: str) -> None:
-        """Wait for the job's protocol (.docx) to be generated, then upload it to
-        the same cloud as the recording and write its link into the Weeek field.
-        The .docx stays downloadable in the UI."""
+        """Wait for the job's protocol (.docx), upload it to the cloud and write
+        its link into the Weeek field. NEVER fails silently: every problem is
+        written to the meeting log and posted as a Weeek comment, so an empty
+        «Протокол встречи» field is always explained."""
+        task_id = st.task_id
+        token = cfg.get("weeek_token")
+
+        def log(msg: str) -> None:
+            st.logs.append(str(msg))
+
+        def report(msg: str) -> None:
+            """Log + (best-effort) leave a comment in the task, so the user sees
+            why the protocol didn't attach."""
+            log(msg)
+            if token and cfg.get("post_back_to_weeek", True):
+                try:
+                    weeek.add_comment(token, task_id, msg)
+                except Exception:
+                    pass
+
         deadline = time.time() + 2 * 3600
         while time.time() < deadline:
             job = store.get(job_id)
             if job is None:
+                report("⚠ Протокол не прикреплён: задача распознавания пропала "
+                       "(сервис перезапускался во время обработки).")
                 return
             if job.status in ("done", "error", "cancelled"):
                 break
             time.sleep(5)
+
         job = store.get(job_id)
-        provs = getattr(job, "docx_providers", None) if job else None
-        if not job or job.status != "done" or not provs:
+        if not job:
+            return
+        provs = getattr(job, "docx_providers", None)
+        if job.status != "done" or not provs:
+            why = (job.analysis_error or "").strip().splitlines()
+            reason = why[-1] if why else f"статус задачи «{job.status}»"
+            report(f"⚠ Протокол не собрался, поэтому не прикреплён. Причина: "
+                   f"{reason}. Откройте задачу распознавания и нажмите «Повторить "
+                   f"анализ» (при лимите ключа — добавьте ключ/смените движок).")
             return
         docx = store.docx_path(job_id, provs[-1])
         if not docx.exists():
+            report("⚠ Файл протокола (.docx) не найден на сервере — не прикреплён.")
             return
+
         # Protocols go into their OWN cloud folder (separate from the recordings).
-        # Same rule as the video: one network hiccup must not lose the delivery.
+        # One network hiccup must not lose the delivery — retry a few times.
         folder = (cfg.get("protocol_folder") or "").strip() or None
         up = {}
         for i in range(3):
@@ -553,17 +582,26 @@ class Scheduler:
                                folder=folder)
             if up.get("ok"):
                 break
-        if not (up.get("ok") and up.get("url")):
+        if not up.get("ok"):
+            report(f"⚠ Протокол не выгрузился в облако: {up.get('error') or 'ошибка'}. "
+                   "Он доступен для скачивания в интерфейсе распознавания.")
             return
+        url = up.get("url")
+        if not url:
+            report("Протокол выгружен в облако, но публичную ссылку получить не "
+                   "удалось (нужен доступ на чтение у токена Я.Диска).")
+            return
+
         field = (cfg.get("weeek_protocol_field") or "").strip()
         if cfg.get("weeek_set_protocol_field", True) and field:
-            token = cfg.get("weeek_token")
-            ok = self._write_weeek_field(token, task_id, field, up["url"],
-                                         lambda *_: None)
-            if not ok:
+            ok = self._write_weeek_field(token, task_id, field, url, log)
+            if ok:
+                log("Ссылка на протокол записана в поле Weeek ✓")
+            else:
                 # The link must not get lost — leave it as a comment instead.
-                weeek.add_comment(token, task_id,
-                                  f"📄 Протокол встречи: {up['url']}")
+                report(f"📄 Протокол встречи: {url}")
+        elif cfg.get("post_back_to_weeek", True):
+            report(f"📄 Протокол встречи: {url}")
 
     def _enrich_from_job(self, m: dict) -> None:
         """Overlay the live transcription/protocol stage onto a meeting dict,
