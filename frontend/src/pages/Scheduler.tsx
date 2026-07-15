@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { CalendarClock, RefreshCw, Filter, Workflow, Send } from "lucide-react";
 import { Page } from "../components/Layout";
-import { Card, Switch, useToast } from "../components/ui";
+import { Card, Switch, Select, useToast } from "../components/ui";
 import { useSettings } from "../lib/useSettings";
 import { api } from "../lib/api";
 import { Status } from "../lib/format";
@@ -116,10 +116,9 @@ export default function Scheduler() {
         </div>
         <div className="mt-3">
           <label className="lbl">Движок протокола (нейросеть · модель)</label>
-          <select className="field" value={s.analyze_provider || "auto"} onChange={(e) => set("analyze_provider", e.target.value)}>
-            <option value="auto">Авто (бесплатные/локальные — в первую очередь)</option>
-            {engines.map((e) => <option key={e.value} value={e.value}>{e.label}</option>)}
-          </select>
+          <Select value={s.analyze_provider || "auto"} onChange={(v) => set("analyze_provider", v)}
+            options={[{ value: "auto", label: "Авто (бесплатные/локальные — в первую очередь)" },
+                      ...engines.map((e) => ({ value: e.value, label: e.label }))]} />
           <div className="text-[11.5px] mt-1" style={{ color: "var(--muted)" }}>
             Ключи и список моделей — на вкладке «Нейросети».</div>
         </div>

@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Link2, RefreshCw, Trash2, FolderTree, CheckCircle2 } from "lucide-react";
 import { Page } from "../components/Layout";
-import { Card, useToast } from "../components/ui";
+import { Card, Select, useToast } from "../components/ui";
 import { useSettings } from "../lib/useSettings";
 import { api } from "../lib/api";
 import { TZ_RU, TZ_CIS, otherZones, tzLabel } from "../lib/timezones";
@@ -49,22 +49,12 @@ export default function Weeek() {
             <div><label className="lbl">ID проекта</label>
               <input className="field" value={s.weeek_project_id || ""} onChange={(e) => set("weeek_project_id", e.target.value)} placeholder="пусто = все" /></div>
             <div><label className="lbl">Часовой пояс</label>
-              <select className="field" value={s.timezone || "Europe/Moscow"} onChange={(e) => set("timezone", e.target.value)}>
-                <optgroup label="Россия">
-                  {TZ_RU.map((z) => <option key={z} value={z}>{tzLabel(z)}</option>)}
-                </optgroup>
-                <optgroup label="СНГ">
-                  {TZ_CIS.map((z) => <option key={z} value={z}>{tzLabel(z)}</option>)}
-                </optgroup>
-                {s.timezone && ![...TZ_RU, ...TZ_CIS, ...otherZones()].includes(s.timezone) && (
-                  <option value={s.timezone}>{s.timezone}</option>
-                )}
-                {otherZones().length > 0 && (
-                  <optgroup label="Все зоны">
-                    {otherZones().map((z) => <option key={z} value={z}>{tzLabel(z)}</option>)}
-                  </optgroup>
-                )}
-              </select></div>
+              <Select value={s.timezone || "Europe/Moscow"} onChange={(v) => set("timezone", v)}
+                options={[
+                  { label: "Россия", options: TZ_RU.map((z) => ({ value: z, label: tzLabel(z) })) },
+                  { label: "СНГ", options: TZ_CIS.map((z) => ({ value: z, label: tzLabel(z) })) },
+                  ...(otherZones().length ? [{ label: "Все зоны", options: otherZones().map((z) => ({ value: z, label: tzLabel(z) })) }] : []),
+                ]} /></div>
           </div>
           <div className="text-[12px] mt-1.5" style={{ color: "var(--muted)" }}>Пусто = все проекты</div>
           <div className="flex gap-2.5 mt-3 flex-wrap">

@@ -4,7 +4,7 @@ import {
   Download, FileText, X, ChevronRight,
 } from "lucide-react";
 import { Page } from "../components/Layout";
-import { Card, useToast } from "../components/ui";
+import { Card, Select, useToast } from "../components/ui";
 import { api } from "../lib/api";
 import { fmtDateTime } from "../lib/format";
 
@@ -164,14 +164,12 @@ export default function Recognition() {
               <div><label className="lbl">Язык</label>
                 <input className="field" value={opts.language} onChange={(e) => setOpts({ ...opts, language: e.target.value })} placeholder="ru" /></div>
               <div><label className="lbl">Модель</label>
-                <select className="field" value={opts.model} onChange={(e) => setOpts({ ...opts, model: e.target.value })}>
-                  {MODELS.map((m) => <option key={m.v} value={m.v}>{m.l}</option>)}</select></div>
+                <Select value={opts.model} onChange={(v) => setOpts({ ...opts, model: v })}
+                  options={MODELS.map((m) => ({ value: m.v, label: m.l }))} /></div>
             </div>
             <label className="lbl mt-3">Движок протокола</label>
-            <select className="field" value={opts.provider} onChange={(e) => setOpts({ ...opts, provider: e.target.value })}>
-              <option value="auto">Авто</option>
-              {engines.map((e) => <option key={e.value} value={e.value}>{e.label}</option>)}
-            </select>
+            <Select value={opts.provider} onChange={(v) => setOpts({ ...opts, provider: v })}
+              options={[{ value: "auto", label: "Авто" }, ...engines.map((e) => ({ value: e.value, label: e.label }))]} />
             <label className="lbl mt-3">Контекст (проект/тема)</label>
             <input className="field" value={opts.context_hint} onChange={(e) => setOpts({ ...opts, context_hint: e.target.value })}
               placeholder="подставит сохранённый контекст проекта" />
