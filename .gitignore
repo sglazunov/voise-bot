@@ -22,3 +22,8 @@ Thumbs.db
 # pytest / temp
 .pytest_cache/
 _td/
+
+# frontend build artifacts (dist is built in Docker / CI, node_modules is local)
+frontend/node_modules/
+frontend/dist/
+frontend/tsconfig.tsbuildinfo

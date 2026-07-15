@@ -5,6 +5,16 @@
 # Pin to Debian bookworm: the default slim tag moved to trixie, whose loader
 # rejects ctranslate2 4.4.0's executable-stack flag ("cannot enable executable
 # stack as shared object requires").
+
+# ---- Stage 1: build the React SPA (Vite) → /build/dist -----------------------
+FROM node:20-slim AS frontend
+WORKDIR /build
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+COPY frontend/ ./
+RUN npm run build
+
+# ---- Stage 2: the Python app + recorder bot ---------------------------------
 FROM python:3.12-slim-bookworm
 
 ENV PYTHONUNBUFFERED=1 \
@@ -46,6 +56,8 @@ RUN playwright install --with-deps chromium \
 
 # App code + entrypoint.
 COPY app/ ./app/
+# Built SPA from stage 1 — FastAPI serves it at /app (see main.py SPA_DIR).
+COPY --from=frontend /build/dist ./frontend/dist
 COPY Modelfile ./Modelfile
 COPY docker/ ./docker/
 RUN chmod +x docker/*.sh

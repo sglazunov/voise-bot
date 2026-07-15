@@ -9,6 +9,7 @@ from fastapi import (Depends, FastAPI, File, Form, HTTPException, Request,
                      Response, UploadFile)
 from fastapi.responses import (HTMLResponse, PlainTextResponse, FileResponse,
                                JSONResponse, RedirectResponse)
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
@@ -78,6 +79,32 @@ def _engine_list(user_keys: dict | None = None) -> list[dict]:
 
 app = FastAPI(title="Voice Transcriber", version="1.0")
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
+
+# Built React SPA (Vite → frontend/dist). Served under /app so the existing
+# Jinja pages keep working during/after the migration. Hashed assets are served
+# from /app/assets; every other /app/* path returns index.html so client-side
+# routing (deep links, refresh) works. The dir is absent in dev until `npm run
+# build`, so mounting is guarded.
+SPA_DIR = Path(__file__).parent.parent / "frontend" / "dist"
+if (SPA_DIR / "assets").is_dir():
+    app.mount("/app/assets", StaticFiles(directory=str(SPA_DIR / "assets")), name="spa-assets")
+
+
+def _register_spa() -> None:
+    """Serve the SPA shell for /app and any /app/* client route."""
+    index = SPA_DIR / "index.html"
+    if not index.exists():
+        return
+
+    @app.get("/app", include_in_schema=False)
+    @app.get("/app/{full_path:path}", include_in_schema=False)
+    def spa(full_path: str = "", user: str = Depends(current_user)):
+        # Real files (favicon, etc.) win; everything else is the SPA shell so
+        # deep links like /app/recognition resolve to client-side routing.
+        target = SPA_DIR / full_path
+        if full_path and target.is_file():
+            return FileResponse(target)
+        return FileResponse(index)
 
 
 # ===========================================================================
@@ -1109,3 +1136,7 @@ def automation_weeek_probe(task_id: str, user: str = Depends(current_user)):
 @app.get("/healthz")
 def healthz():
     return {"ok": True, "model": config.MODEL, "diarization": config.DIARIZATION_ENABLED}
+
+
+# Register the SPA routes last, once current_user (their auth dependency) exists.
+_register_spa()
