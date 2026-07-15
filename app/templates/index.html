@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Распознавание речи</title>
   <style>
-    :root{--bg:#0a0f1c;--card:#151f33;--card2:#0f1830;--accent:#5ec6ff;--accent2:#22d3ee;
+    :root{--bg:#0a141c;--card:#151f33;--card2:#0f1830;--accent:#2dd4bf;--accent2:#22d3ee;
           --txt:#eaf1fb;--muted:#93a6c4;--line:rgba(120,150,200,.18);--ok:#16a34a;--err:#dc2626;
           --warn:#d97706;}
     *{box-sizing:border-box}
@@ -77,7 +77,7 @@
     .hrow:first-child{border-top:none}
     .hlbl{color:var(--muted)}
     .hstate{font-weight:800;text-align:center}
-    .hstate.ok{color:#4ade80}.hstate.err{color:#f87171}.hstate.wait{color:#38bdf8}.hstate.skip{color:#94a3b8}
+    .hstate.ok{color:#4ade80}.hstate.err{color:#f87171}.hstate.wait{color:#2dd4bf}.hstate.skip{color:#94a3b8}
     .hdet{color:var(--txt);word-break:break-word}
     .hwhy{margin-top:12px;background:#2a0f0f;border:1px solid #7f1d1d;border-radius:10px;
           padding:10px 12px;font-size:13px;line-height:1.5;color:#fecaca}
@@ -135,8 +135,8 @@
     @keyframes fadeInUp{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
     @keyframes bgdrift{from{transform:translate3d(0,0,0)}to{transform:translate3d(0,-20px,0)}}
     @keyframes barflow{0%{background-position:0 0}100%{background-position:200% 0}}
-    @keyframes pulseGlow{0%,100%{box-shadow:0 0 0 0 rgba(56,189,248,0)}
-                         50%{box-shadow:0 0 0 4px rgba(56,189,248,.14)}}
+    @keyframes pulseGlow{0%,100%{box-shadow:0 0 0 0 rgba(45,212,191,0)}
+                         50%{box-shadow:0 0 0 4px rgba(45,212,191,.14)}}
 
     h1{letter-spacing:.2px}
     /* smooth interactions everywhere */
@@ -144,13 +144,13 @@
             background-position .35s ease, color .2s ease, border-color .2s ease}
     select,textarea,input{transition:border-color .2s ease, box-shadow .2s ease}
     select:focus,textarea:focus,input:focus{outline:none;border-color:var(--accent);
-            box-shadow:0 0 0 3px rgba(56,189,248,.15)}
+            box-shadow:0 0 0 3px rgba(45,212,191,.15)}
     a.dl{transition:color .15s ease, opacity .15s ease}
     a.dl:hover{filter:brightness(1.12)}
 
     /* primary button: gradient sheen + lift */
     button.go{background:linear-gradient(90deg,var(--accent),var(--accent2),var(--accent));
-            background-size:200% 100%;box-shadow:0 8px 20px -10px rgba(56,189,248,.6)}
+            background-size:200% 100%;box-shadow:0 8px 20px -10px rgba(45,212,191,.6)}
     button.go:hover{filter:brightness(1.06);transform:translateY(-1px);background-position:100% 0}
     button.go:active{transform:translateY(0) scale(.98)}
     button.ghost:hover{border-color:var(--accent);color:var(--accent);transform:translateY(-1px)}
@@ -167,7 +167,7 @@
     @media (prefers-reduced-motion:no-preference){
       /* living, layered background glow */
       body::before{content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;
-        background:radial-gradient(900px 520px at 82% -12%, rgba(56,189,248,.13), transparent 60%),
+        background:radial-gradient(900px 520px at 82% -12%, rgba(45,212,191,.13), transparent 60%),
                    radial-gradient(820px 480px at -12% 112%, rgba(34,211,238,.10), transparent 60%);
         animation:bgdrift 18s ease-in-out infinite alternate}
       /* cards glide in and lift on hover */
@@ -178,7 +178,7 @@
         box-shadow:0 1px 0 rgba(255,255,255,.05) inset, 0 20px 44px -24px rgba(0,0,0,.8)}
       .analysis-section{animation:fadeInUp .4s ease both}
       #jobs tbody tr{transition:background .15s ease}
-      #jobs tbody tr:hover{background:rgba(56,189,248,.06)}
+      #jobs tbody tr:hover{background:rgba(45,212,191,.06)}
       #drop{transition:border-color .25s ease, background .25s ease, transform .15s ease, box-shadow .25s ease}
       #drop:hover{border-color:#3a5a86}
       #drop.drag{animation:pulseGlow 1.2s ease-in-out infinite;transform:scale(1.005)}
@@ -187,7 +187,7 @@
     }
 
     /* ============ richer "glass + aurora" theme ============ */
-    :root{--accent:#38bdf8;--accent2:#a78bfa;--accent3:#22d3ee;
+    :root{--accent:#2dd4bf;--accent2:#22d3ee;--accent3:#22d3ee;
           --glass:rgba(20,30,52,.55);--glassline:rgba(125,160,210,.16)}
     body{background:#070b16}
     .wrap{max-width:980px}
@@ -196,7 +196,7 @@
     @media (prefers-reduced-motion:no-preference){
       body::after{content:"";position:fixed;inset:-25%;z-index:-2;pointer-events:none;
         background:
-         radial-gradient(40% 50% at 15% 18%, rgba(56,189,248,.20), transparent 60%),
+         radial-gradient(40% 50% at 15% 18%, rgba(45,212,191,.20), transparent 60%),
          radial-gradient(42% 55% at 86% 14%, rgba(167,139,250,.20), transparent 60%),
          radial-gradient(48% 60% at 72% 92%, rgba(34,211,238,.15), transparent 60%);
         filter:blur(28px);animation:aurora 24s ease-in-out infinite alternate}
@@ -204,7 +204,7 @@
 
     /* gradient hero title */
     h1{font-size:30px;font-weight:800;letter-spacing:-.4px;display:flex;align-items:center;gap:12px}
-    h1 .emoji{filter:drop-shadow(0 4px 14px rgba(56,189,248,.5))}
+    h1 .emoji{filter:drop-shadow(0 4px 14px rgba(45,212,191,.5))}
     h1 .grad{background:linear-gradient(90deg,#e6edf6 8%,#7dd3fc 48%,#c4b5fd 92%);
              -webkit-background-clip:text;background-clip:text;color:transparent}
     .sub{font-size:13px}
@@ -237,7 +237,7 @@
     .analysis-section h3{display:flex;align-items:center;gap:8px;color:#a9cbff}
     .analysis-section h3::before{content:"";width:6px;height:6px;border-radius:50%;
           background:linear-gradient(90deg,var(--accent),var(--accent2));
-          box-shadow:0 0 10px 1px rgba(56,189,248,.6)}
+          box-shadow:0 0 10px 1px rgba(45,212,191,.6)}
 
     /* live + generation panels a touch glassier */
     .live,.gen-text{background:rgba(8,14,28,.6)}
@@ -248,7 +248,7 @@
           border:2px solid transparent;background-clip:content-box}
     /* gradient badges */
     .badge.running{background:linear-gradient(90deg,#0369a1,#0ea5e9)}
-    .badge.analyzing{background:linear-gradient(90deg,#6d28d9,#a78bfa)}
+    .badge.analyzing{background:linear-gradient(90deg,#6d28d9,#22d3ee)}
     .badge.done{background:linear-gradient(90deg,#15803d,#22c55e)}
 
     /* ============ dashboard: fit one screen, no page scroll (wide) ============ */
