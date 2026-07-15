@@ -77,8 +77,8 @@
       <input id="username" name="username" autocomplete="username" autofocus
              placeholder="например, sergey">
       {% if mode == "register" %}
-      <label for="phone">Номер телефона</label>
-      <input id="phone" name="phone" type="tel" autocomplete="tel"
+      <label for="phone">Номер телефона <span style="color:var(--accent)">*</span></label>
+      <input id="phone" name="phone" type="tel" autocomplete="tel" required
              placeholder="+7 999 123-45-67">
       {% endif %}
       <label for="password">Пароль</label>

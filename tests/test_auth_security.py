@@ -136,7 +136,9 @@ class TestIsolation:
         import os
         os.environ.pop("VTX_REGISTRATION_CODE", None)
         os.environ["VTX_ALLOW_OPEN_REGISTRATION"] = "1"
-        register(c, username)
+        # Phones are unique now, so each user needs a distinct number.
+        suffix = str(sum(ord(ch) for ch in username)).rjust(7, "0")[-7:]
+        register(c, username, phone="+7999" + suffix)
         return c
 
     def test_one_user_cannot_read_anothers_token(self, client, monkeypatch):
@@ -225,6 +227,31 @@ class TestPhoneRecovery:
         assert register(client, phone="").status_code == 400
         assert register(client, phone="12345").status_code == 400   # implausible
         assert register(client, phone="+7 999 000-00-00").status_code == 200
+
+    def test_duplicate_phone_rejected_at_registration(self, client, monkeypatch):
+        monkeypatch.setenv("VTX_ALLOW_OPEN_REGISTRATION", "1")
+        assert register(client, "alice", phone="+79991112233").status_code == 200
+        from starlette.testclient import TestClient
+        from app.main import app
+        c2 = TestClient(app)
+        # same number (different formatting) -> rejected
+        assert register(c2, "bob", phone="8 (999) 111-22-33").status_code == 400
+        # a different number is fine
+        assert register(c2, "bob", phone="+79995556677").status_code == 200
+
+    def test_change_phone_to_taken_number_rejected(self, client, monkeypatch):
+        monkeypatch.setenv("VTX_ALLOW_OPEN_REGISTRATION", "1")
+        register(client, "alice", phone="+79991112233")
+        from starlette.testclient import TestClient
+        from app.main import app
+        bob = TestClient(app)
+        register(bob, "bob", phone="+79995556677")
+        # bob can't take alice's number...
+        assert bob.post("/api/profile/phone",
+                        json={"password": "password123", "phone": "+79991112233"}).status_code == 400
+        # ...but keeping his own is fine (self-exclusion)
+        assert bob.post("/api/profile/phone",
+                        json={"password": "password123", "phone": "+7 999 555-66-77"}).status_code == 200
 
     def test_recover_with_correct_code_resets_password(self, client):
         register(client, "alice", phone="8 (999) 000-00-00")  # 8XXX == +7XXX

@@ -194,6 +194,24 @@ def verify_phone(username: str, phone: str) -> bool:
     return bool(stored) and bool(given) and hmac.compare_digest(stored, given)
 
 
+def _phone_owner(users: dict, phone: str, exclude: str | None = None) -> str | None:
+    """Login that already owns `phone` (normalised), or None. `exclude` skips one
+    user (their own current number when changing it). Phones are UNIQUE: one
+    number belongs to at most one account."""
+    if not phone:
+        return None
+    for uname, rec in users.items():
+        if uname != exclude and (rec or {}).get("phone") == phone:
+            return uname
+    return None
+
+
+def phone_in_use(phone: str, exclude: str | None = None) -> bool:
+    """Whether `phone` is already registered to some (other) account."""
+    return _phone_owner(_load_users(), normalize_phone(phone),
+                        normalize_username(exclude) if exclude else None) is not None
+
+
 def set_phone(username: str, password: str, new_phone: str) -> dict:
     """Change the phone; requires the CURRENT password (so a stolen session
     can't silently re-point recovery to the attacker's number)."""
@@ -205,6 +223,8 @@ def set_phone(username: str, password: str, new_phone: str) -> dict:
         return {"ok": False, "error": "Укажите корректный номер телефона (10–15 цифр)."}
     with _LOCK:
         users = _load_users()
+        if _phone_owner(users, phone, exclude=username):
+            return {"ok": False, "error": "Этот номер уже привязан к другому аккаунту."}
         users[username]["phone"] = phone
         _save_users(users)
     return {"ok": True}
@@ -354,6 +374,8 @@ def create_user(username: str, password: str, code: str | None = None,
         users = _load_users()
         if username in users:
             return {"ok": False, "error": "Такой логин уже существует."}
+        if _phone_owner(users, norm_phone):
+            return {"ok": False, "error": "Этот номер телефона уже привязан к другому аккаунту."}
         users[username] = {"pw": hash_password(password), "created_at": time.time(),
                            "phone": norm_phone,
                            "is_admin": not bool(users)}  # first user = admin
