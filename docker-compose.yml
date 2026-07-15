@@ -45,10 +45,16 @@ services:
       POSTGRES_USER: "${POSTGRES_USER:-voise}"
       POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-voise}"
       POSTGRES_DB: "${POSTGRES_DB:-voise}"
+    # A Docker-managed named volume (NOT under ./data) — the app container's
+    # entrypoint chowns all of /data to its own user, which would break
+    # Postgres's data files if they lived inside that bind mount.
     volumes:
-      - ./data/postgres:/var/lib/postgresql/data
+      - pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-voise} -d ${POSTGRES_DB:-voise}"]
       interval: 5s
       timeout: 5s
       retries: 10
+
+volumes:
+  pgdata:
