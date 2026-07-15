@@ -27,7 +27,12 @@
     .alt a { color:var(--accent); text-decoration:none; }
     .err { display:none; margin-top:12px; padding:9px 11px; border-radius:9px;
            background:var(--badbg); color:var(--bad); font-size:13px; }
+    .ok { display:none; margin-top:12px; padding:9px 11px; border-radius:9px;
+          background:rgba(45,212,191,.14); color:var(--accent); font-size:13px; }
     .note { margin-top:12px; font-size:12px; color:var(--muted); }
+    .link { background:none; width:auto; margin:10px 0 0; padding:0; color:var(--accent);
+            font-size:13px; font-weight:500; }
+    .link:disabled { color:var(--muted); opacity:1; }
   </style>
 </head>
 <body>
@@ -43,16 +48,40 @@
       <p class="sub">Личный кабинет — ваши данные и токены доступны только вам.</p>
     {% endif %}
 
+    {% if mode == "recover" %}
     <form id="f" autocomplete="on">
       <label for="username">Логин</label>
       <input id="username" name="username" autocomplete="username" autofocus
              placeholder="например, sergey">
-      {% if mode == "register" or mode == "recover" %}
+      <div id="step1">
+        <label for="phone">Номер телефона</label>
+        <input id="phone" name="phone" type="tel" autocomplete="tel"
+               placeholder="+7 999 123-45-67">
+      </div>
+      <div id="step2" style="display:none">
+        <label for="code">Код из SMS</label>
+        <input id="code" name="code" inputmode="numeric" autocomplete="one-time-code"
+               maxlength="6" placeholder="6 цифр">
+        <label for="password">Новый пароль</label>
+        <input id="password" name="password" type="password" autocomplete="new-password"
+               placeholder="не короче 8 символов">
+        <button id="resend" type="button" class="link">Отправить код ещё раз</button>
+      </div>
+      <button id="btn" type="submit">Получить код по SMS</button>
+      <div id="err" class="err"></div>
+      <div id="ok" class="ok"></div>
+    </form>
+    {% else %}
+    <form id="f" autocomplete="on">
+      <label for="username">Логин</label>
+      <input id="username" name="username" autocomplete="username" autofocus
+             placeholder="например, sergey">
+      {% if mode == "register" %}
       <label for="phone">Номер телефона</label>
       <input id="phone" name="phone" type="tel" autocomplete="tel"
              placeholder="+7 999 123-45-67">
       {% endif %}
-      <label for="password">{{ "Новый пароль" if mode == "recover" else "Пароль" }}</label>
+      <label for="password">Пароль</label>
       <input id="password" name="password" type="password"
              autocomplete="{{ 'current-password' if mode == 'login' else 'new-password' }}"
              placeholder="{{ 'ваш пароль' if mode == 'login' else 'не короче 8 символов' }}">
@@ -60,9 +89,10 @@
       <label for="code">Код регистрации</label>
       <input id="code" name="code" placeholder="выдаётся администратором">
       {% endif %}
-      <button id="btn" type="submit">{{ "Зарегистрироваться" if mode == "register" else ("Сменить пароль" if mode == "recover" else "Войти") }}</button>
+      <button id="btn" type="submit">{{ "Зарегистрироваться" if mode == "register" else "Войти" }}</button>
       <div id="err" class="err"></div>
     </form>
+    {% endif %}
 
     {% if mode == "register" %}
       <div class="alt">Уже есть аккаунт? <a href="/login">Войти</a></div>
@@ -79,33 +109,97 @@
     const f = document.getElementById('f');
     const err = document.getElementById('err');
     const btn = document.getElementById('btn');
-    f.addEventListener('submit', async (e) => {
-      e.preventDefault();
-      err.style.display = 'none'; btn.disabled = true;
-      const username = document.getElementById('username').value.trim();
-      const password = document.getElementById('password').value;
-      const phone = (document.getElementById('phone')||{}).value || "";
-      let url, body;
-      if (MODE === 'recover') {
-        url = '/api/auth/recover';
-        body = { username, phone, new_password: password };
-      } else {
-        url = '/api/auth/' + MODE;
-        body = { username, password, phone,
-                 code: (document.getElementById('code')||{}).value || "" };
-      }
-      try {
-        const r = await fetch(url, {
-          method: 'POST', headers: {'Content-Type':'application/json'},
-          body: JSON.stringify(body)
-        });
-        const data = await r.json().catch(()=>({}));
-        if (!r.ok) throw new Error(data.detail || 'Ошибка');
-        window.location.href = (MODE === 'recover') ? '/login' : '/';
-      } catch (ex) {
-        err.textContent = ex.message; err.style.display = 'block'; btn.disabled = false;
-      }
-    });
+    const $ = (id) => document.getElementById(id);
+    const post = async (url, body) => {
+      const r = await fetch(url, { method:'POST', headers:{'Content-Type':'application/json'},
+                                   body: JSON.stringify(body) });
+      const data = await r.json().catch(()=>({}));
+      if (!r.ok) throw new Error(data.detail || 'Ошибка');
+      return data;
+    };
+    const showErr = (m) => { err.textContent = m; err.style.display = 'block'; };
+
+    if (MODE === 'recover') {
+      // Two steps: (1) request an SMS code, (2) verify it + set the new password.
+      let step = 1, resendTimer = null;
+      const ok = $('ok'), resend = $('resend');
+
+      const startCooldown = (secs) => {
+        clearInterval(resendTimer);
+        let left = secs || 60;
+        const tick = () => {
+          if (left <= 0) { clearInterval(resendTimer); resend.disabled = false;
+                           resend.textContent = 'Отправить код ещё раз'; return; }
+          resend.disabled = true;
+          resend.textContent = `Отправить код ещё раз (${left} с)`;
+          left--;
+        };
+        tick(); resendTimer = setInterval(tick, 1000);
+      };
+
+      const requestCode = async () => {
+        err.style.display = 'none';
+        const username = $('username').value.trim();
+        const phone = $('phone').value;
+        if (!username || !phone) { showErr('Укажите логин и телефон.'); return false; }
+        const data = await post('/api/auth/recover/request', { username, phone });
+        startCooldown(data.retry_after || 60);
+        return true;
+      };
+
+      const toStep2 = () => {
+        step = 2;
+        $('step1').style.display = 'none';
+        $('step2').style.display = 'block';
+        $('username').readOnly = true;
+        btn.textContent = 'Сменить пароль';
+        ok.textContent = 'Код отправлен по SMS, если логин и телефон совпадают. Введите его ниже.';
+        ok.style.display = 'block';
+        $('code').focus();
+      };
+
+      resend.addEventListener('click', async () => {
+        try { await requestCode(); } catch (ex) { showErr(ex.message); }
+      });
+
+      f.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        err.style.display = 'none'; btn.disabled = true;
+        try {
+          if (step === 1) {
+            if (await requestCode()) toStep2();
+          } else {
+            const username = $('username').value.trim();
+            const phone = $('phone').value;
+            const code = $('code').value.trim();
+            const new_password = $('password').value;
+            await post('/api/auth/recover/verify', { username, phone, code, new_password });
+            ok.textContent = 'Пароль изменён. Перенаправляем на вход…';
+            ok.style.display = 'block'; err.style.display = 'none';
+            setTimeout(() => { window.location.href = '/login'; }, 1200);
+            return;
+          }
+        } catch (ex) {
+          showErr(ex.message);
+        }
+        btn.disabled = false;
+      });
+    } else {
+      f.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        err.style.display = 'none'; btn.disabled = true;
+        const username = $('username').value.trim();
+        const password = $('password').value;
+        const phone = ($('phone')||{}).value || "";
+        try {
+          await post('/api/auth/' + MODE,
+            { username, password, phone, code: ($('code')||{}).value || "" });
+          window.location.href = '/';
+        } catch (ex) {
+          showErr(ex.message); btn.disabled = false;
+        }
+      });
+    }
   </script>
 <script>(function(){try{var t=localStorage.getItem('vtx-theme');if(t)document.documentElement.dataset.theme=t;}catch(e){}})();</script>
 </body>

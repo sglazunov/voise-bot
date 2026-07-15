@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
-from . import config, llm, analyze, security, user_creds
+from . import config, llm, analyze, security, sms, user_creds
 from .jobs import store, STATUS_DONE, STATUS_ANALYZING, STATUS_CANCELLED
 
 
@@ -112,7 +112,8 @@ def _register_spa() -> None:
 # ===========================================================================
 # Paths reachable WITHOUT a session. Everything else requires login.
 _PUBLIC_PATHS = {"/login", "/register", "/recover", "/healthz",
-                 "/api/auth/login", "/api/auth/register", "/api/auth/recover"}
+                 "/api/auth/login", "/api/auth/register",
+                 "/api/auth/recover/request", "/api/auth/recover/verify"}
 _SECURE_COOKIE = os.getenv("VTX_HTTPS", "0") == "1"
 
 
@@ -279,24 +280,61 @@ def recover_page(request: Request):
         "login.html", {"request": request, "mode": "recover", "first_run": False})
 
 
-class RecoverBody(BaseModel):
+class RecoverRequestBody(BaseModel):
     username: str
     phone: str
+
+
+class RecoverVerifyBody(BaseModel):
+    username: str
+    phone: str
+    code: str
     new_password: str
 
 
-@app.post("/api/auth/recover")
-def auth_recover(body: RecoverBody, request: Request):
-    """Reset the password when login + registered phone match. Every failure
-    counts against the brute-force window (phone numbers are guessable, so the
-    throttle is what makes this safe on a public domain)."""
+# Neutral answer to step 1: whatever happens, the client is told the same thing,
+# so it never reveals whether a given login/phone pair exists.
+_RECOVER_SENT = {"ok": True,
+                 "detail": "Если логин и телефон совпадают, код отправлен по SMS."}
+
+
+@app.post("/api/auth/recover/request")
+def auth_recover_request(body: RecoverRequestBody, request: Request):
+    """Step 1 — send a one-time code to the registered phone (if login+phone
+    match). Response is deliberately identical on success and failure. Throttled
+    per IP and per IP+login; a per-code resend cooldown prevents SMS spam."""
     ip = _client_ip(request)
     uname = security.normalize_username(body.username)
     keys = (f"rec:{ip}", f"rec:{ip}:{uname}")
     wait = security.throttle_check(*keys)
     if wait:
         raise HTTPException(429, f"Слишком много попыток. Подождите {wait} с.")
-    res = security.reset_password_by_phone(body.username, body.phone, body.new_password)
+    res = security.generate_recovery_code(body.username, body.phone)
+    if res.get("ok"):
+        code = res["code"]
+        msg = (f"Код восстановления пароля MeetFlowAI: {code}. "
+               f"Действует {security.RECOVERY_CODE_TTL // 60} мин. "
+               f"Никому его не сообщайте.")
+        sms.send("+" + res["phone"], msg)
+    elif res.get("error") == "cooldown":
+        # A live code was just sent — don't resend, and don't penalise as a miss.
+        return {**_RECOVER_SENT, "retry_after": res.get("retry_after")}
+    else:
+        security.throttle_fail(*keys)   # wrong login/phone counts as an attempt
+    return _RECOVER_SENT
+
+
+@app.post("/api/auth/recover/verify")
+def auth_recover_verify(body: RecoverVerifyBody, request: Request):
+    """Step 2 — check the code and set the new password; revokes all sessions."""
+    ip = _client_ip(request)
+    uname = security.normalize_username(body.username)
+    keys = (f"rec:{ip}", f"rec:{ip}:{uname}")
+    wait = security.throttle_check(*keys)
+    if wait:
+        raise HTTPException(429, f"Слишком много попыток. Подождите {wait} с.")
+    res = security.confirm_recovery_code(body.username, body.phone,
+                                         body.code, body.new_password)
     if not res.get("ok"):
         security.throttle_fail(*keys)
         raise HTTPException(400, res.get("error") or "Не удалось восстановить пароль.")

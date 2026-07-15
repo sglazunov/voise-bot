@@ -19,20 +19,21 @@ from pathlib import Path  # noqa: E402
 import pytest  # noqa: E402
 from starlette.testclient import TestClient  # noqa: E402
 
-from app import config, security  # noqa: E402
+from app import config, security, sms  # noqa: E402
 from app.jobs import store  # noqa: E402
 from app.main import app  # noqa: E402
 
 
 def _wipe_state() -> None:
     """Reset users, sessions, per-user dirs and the in-memory job store."""
-    for name in ("users.json", "sessions.json"):
+    for name in ("users.json", "sessions.json", "recovery.json"):
         Path(config.DATA_DIR / name).unlink(missing_ok=True)
     udir = config.DATA_DIR / "users"
     if udir.exists():
         shutil.rmtree(udir, ignore_errors=True)
     store._jobs.clear()
     security._FAILED.clear()   # brute-force windows must not leak between tests
+    sms.sent_messages.clear()  # sent-SMS log (recovery codes) must not leak
 
 
 @pytest.fixture(autouse=True)

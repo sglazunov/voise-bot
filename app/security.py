@@ -208,15 +208,94 @@ def _set_password(username: str, new: str) -> None:
         _atomic_write_json(_USERS_FILE, users)
 
 
-def reset_password_by_phone(username: str, phone: str, new_password: str) -> dict:
-    """Password recovery: login + registered phone must match. On success the
-    password is replaced and EVERY existing session of the user is revoked."""
+# --------------------------------------------------------------------------- #
+# Password recovery by SMS one-time code (two steps: request → verify)
+# --------------------------------------------------------------------------- #
+# A short numeric code is generated, hashed (salted PBKDF2) and stored with an
+# expiry + an attempt counter. The plaintext lives only in the SMS to the user's
+# registered phone. Brute force is bounded by: short TTL, per-code attempt cap,
+# and the IP/username login throttle applied at the API layer.
+_RECOVERY_FILE = config.DATA_DIR / "recovery.json"
+RECOVERY_CODE_TTL = int(os.getenv("VTX_RECOVERY_CODE_TTL_SEC", "600"))     # 10 мин
+RECOVERY_MAX_ATTEMPTS = int(os.getenv("VTX_RECOVERY_MAX_ATTEMPTS", "5"))
+RECOVERY_RESEND_SEC = int(os.getenv("VTX_RECOVERY_RESEND_SEC", "60"))       # anti-spam
+_RECOVERY_ITERS = 60_000
+
+
+def _load_recovery() -> dict:
+    if not _RECOVERY_FILE.exists():
+        return {}
+    try:
+        return json.loads(_RECOVERY_FILE.read_text(encoding="utf-8")) or {}
+    except (ValueError, OSError):
+        return {}
+
+
+def _hash_code(code: str, salt: str) -> str:
+    dk = hashlib.pbkdf2_hmac("sha256", code.encode("utf-8"),
+                             bytes.fromhex(salt), _RECOVERY_ITERS)
+    return dk.hex()
+
+
+def generate_recovery_code(username: str, phone: str) -> dict:
+    """Step 1: if login + registered phone match, mint a fresh 6-digit code and
+    store it (hashed). Returns {ok, code, phone} on match — the caller sends the
+    code by SMS and must otherwise stay silent (no account enumeration).
+
+    Returns {ok: False, retry_after} while a just-issued code is still within the
+    resend cooldown, so repeated requests can't spam SMS."""
+    username = normalize_username(username)
+    if not verify_phone(username, phone):
+        return {"ok": False, "error": "mismatch"}
+    now = time.time()
+    with _LOCK:
+        rec = _load_recovery()
+        prev = rec.get(username)
+        if prev and prev.get("expires", 0) > now:
+            elapsed = now - prev.get("created", 0)
+            if elapsed < RECOVERY_RESEND_SEC:
+                return {"ok": False, "error": "cooldown",
+                        "retry_after": int(RECOVERY_RESEND_SEC - elapsed) + 1}
+        code = f"{secrets.randbelow(1_000_000):06d}"
+        salt = secrets.token_hex(8)
+        rec[username] = {"hash": _hash_code(code, salt), "salt": salt,
+                         "phone": normalize_phone(phone), "created": now,
+                         "expires": now + RECOVERY_CODE_TTL, "attempts": 0}
+        _atomic_write_json(_RECOVERY_FILE, rec)
+    return {"ok": True, "code": code, "phone": normalize_phone(phone)}
+
+
+def confirm_recovery_code(username: str, phone: str, code: str,
+                          new_password: str) -> dict:
+    """Step 2: validate the code (matching login + phone, not expired, within the
+    attempt cap) and, on success, set the new password and revoke every session."""
     username = normalize_username(username)
     if len(new_password or "") < MIN_PASSWORD_LEN:
         return {"ok": False, "error": f"Пароль не короче {MIN_PASSWORD_LEN} символов."}
-    # One generic error for «no such user» and «wrong phone» — no enumeration.
-    if not verify_phone(username, phone):
-        return {"ok": False, "error": "Логин и номер телефона не совпадают."}
+    given = re.sub(r"\D", "", code or "")
+    with _LOCK:
+        rec = _load_recovery()
+        entry = rec.get(username)
+        if not entry or entry.get("expires", 0) < time.time():
+            rec.pop(username, None)
+            _atomic_write_json(_RECOVERY_FILE, rec)
+            return {"ok": False, "error": "Код не найден или истёк. Запросите новый."}
+        entry["attempts"] = entry.get("attempts", 0) + 1
+        if entry["attempts"] > RECOVERY_MAX_ATTEMPTS:
+            rec.pop(username, None)
+            _atomic_write_json(_RECOVERY_FILE, rec)
+            return {"ok": False, "error": "Слишком много попыток. Запросите новый код."}
+        matches = (bool(given)
+                   and verify_phone(username, phone)
+                   and hmac.compare_digest(_hash_code(given, entry["salt"]),
+                                           entry["hash"]))
+        if not matches:
+            left = RECOVERY_MAX_ATTEMPTS - entry["attempts"]
+            _atomic_write_json(_RECOVERY_FILE, rec)   # persist the used attempt
+            tail = f" Осталось попыток: {left}." if left > 0 else ""
+            return {"ok": False, "error": f"Неверный код.{tail}"}
+        rec.pop(username, None)
+        _atomic_write_json(_RECOVERY_FILE, rec)
     _set_password(username, new_password)
     destroy_user_sessions(username)
     return {"ok": True}

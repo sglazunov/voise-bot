@@ -194,31 +194,86 @@ class TestCryptoPrimitives:
 
 
 class TestPhoneRecovery:
-    """Password recovery by login+phone, plus the profile phone/password flows."""
+    """Password recovery by SMS one-time code, plus the profile phone/password flows.
+
+    Tests run with no SMS gateway configured, so `sms` uses its console provider
+    which records every message in `sms.sent_messages` — that's how we read the
+    code a real user would receive by SMS.
+    """
+
+    @staticmethod
+    def _last_code():
+        from app import sms
+        import re
+        assert sms.sent_messages, "no SMS was sent"
+        m = re.search(r"\b(\d{6})\b", sms.sent_messages[-1]["text"])
+        assert m, f"no 6-digit code in {sms.sent_messages[-1]['text']!r}"
+        return m.group(1)
+
+    @staticmethod
+    def _request(client, username="alice", phone="+79990000000"):
+        return client.post("/api/auth/recover/request",
+                           json={"username": username, "phone": phone})
+
+    def _recover(self, client, new_password, username="alice", phone="+79990000000"):
+        assert self._request(client, username, phone).status_code == 200
+        return client.post("/api/auth/recover/verify", json={
+            "username": username, "phone": phone,
+            "code": self._last_code(), "new_password": new_password})
 
     def test_registration_requires_phone(self, client):
         assert register(client, phone="").status_code == 400
         assert register(client, phone="12345").status_code == 400   # implausible
         assert register(client, phone="+7 999 000-00-00").status_code == 200
 
-    def test_recover_with_correct_phone_resets_password(self, client):
+    def test_recover_with_correct_code_resets_password(self, client):
         register(client, "alice", phone="8 (999) 000-00-00")  # 8XXX == +7XXX
         client.post("/api/auth/logout")
-        r = client.post("/api/auth/recover", json={
-            "username": "alice", "phone": "+79990000000",
-            "new_password": "brand-new-pass1"})
-        assert r.status_code == 200
+        assert self._recover(client, "brand-new-pass1").status_code == 200
         assert login(client, "alice", "password123").status_code == 401  # old dead
         assert login(client, "alice", "brand-new-pass1").status_code == 200
 
-    def test_recover_with_wrong_phone_rejected(self, client):
+    def test_request_is_generic_and_sends_no_code_for_wrong_phone(self, client):
+        from app import sms
         register(client, "alice")
         client.post("/api/auth/logout")
-        r = client.post("/api/auth/recover", json={
-            "username": "alice", "phone": "+79995554433",
-            "new_password": "brand-new-pass1"})
+        before = len(sms.sent_messages)
+        # Wrong phone → still a 200 generic answer (no account enumeration)…
+        assert self._request(client, phone="+79995554433").status_code == 200
+        # …but no SMS is actually sent.
+        assert len(sms.sent_messages) == before
+
+    def test_verify_with_wrong_code_rejected(self, client):
+        register(client, "alice")
+        client.post("/api/auth/logout")
+        assert self._request(client).status_code == 200
+        r = client.post("/api/auth/recover/verify", json={
+            "username": "alice", "phone": "+79990000000",
+            "code": "000000", "new_password": "brand-new-pass1"})
         assert r.status_code == 400
         assert login(client, "alice", "password123").status_code == 200  # unchanged
+
+    def test_verify_without_request_rejected(self, client):
+        register(client, "alice")
+        client.post("/api/auth/logout")
+        r = client.post("/api/auth/recover/verify", json={
+            "username": "alice", "phone": "+79990000000",
+            "code": "123456", "new_password": "brand-new-pass1"})
+        assert r.status_code == 400   # no code was ever issued
+
+    def test_code_burns_after_attempt_cap(self, client):
+        register(client, "alice")
+        client.post("/api/auth/logout")
+        assert self._request(client).status_code == 200
+        for _ in range(security.RECOVERY_MAX_ATTEMPTS):
+            client.post("/api/auth/recover/verify", json={
+                "username": "alice", "phone": "+79990000000",
+                "code": "000000", "new_password": "brand-new-pass1"})
+        # Even the CORRECT code now fails — the code was invalidated.
+        r = client.post("/api/auth/recover/verify", json={
+            "username": "alice", "phone": "+79990000000",
+            "code": self._last_code(), "new_password": "brand-new-pass1"})
+        assert r.status_code == 400
 
     def test_recover_revokes_existing_sessions(self, client):
         register(client, "alice")                       # logged in via cookie
@@ -226,9 +281,7 @@ class TestPhoneRecovery:
         from starlette.testclient import TestClient
         from app.main import app
         client2 = TestClient(app)
-        client2.post("/api/auth/recover", json={
-            "username": "alice", "phone": "+79990000000",
-            "new_password": "brand-new-pass1"})
+        assert self._recover(client2, "brand-new-pass1").status_code == 200
         # the old session cookie must be dead after the reset
         assert client.get("/api/auth/me").status_code == 401
 
@@ -241,13 +294,13 @@ class TestPhoneRecovery:
                          json={"password": "password123", "phone": "+79991112233"})
         assert ok.status_code == 200
         client.post("/api/auth/logout")
-        # recovery now works only with the NEW phone
-        assert client.post("/api/auth/recover", json={
-            "username": "alice", "phone": "+79990000000",
-            "new_password": "brand-new-pass1"}).status_code == 400
-        assert client.post("/api/auth/recover", json={
-            "username": "alice", "phone": "+79991112233",
-            "new_password": "brand-new-pass1"}).status_code == 200
+        # recovery now works only with the NEW phone: the old one sends no code.
+        from app import sms
+        before = len(sms.sent_messages)
+        assert self._request(client, phone="+79990000000").status_code == 200
+        assert len(sms.sent_messages) == before          # nothing sent to old phone
+        assert self._recover(client, "brand-new-pass1",
+                             phone="+79991112233").status_code == 200
 
     def test_profile_change_password_by_phone(self, client):
         register(client, "alice")
