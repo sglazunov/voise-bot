@@ -66,7 +66,9 @@ export default function Meetings() {
         const willRecord = m.record_flag !== false;
         return (
           <div key={String(m.task_id) + m.start} className="glass p-4 mb-2.5">
-            <div className="flex items-center gap-3.5">
+            {/* flex-wrap + w-full on the action cluster: on a phone the buttons drop
+                to their own row instead of squeezing the title down to nothing. */}
+            <div className="flex items-center gap-3 md:gap-3.5 flex-wrap">
               <div className="grid place-items-center rounded-xl flex-none"
                 style={{ width: 44, height: 44, background: rec ? "rgba(248,113,113,.16)" : "rgba(45,212,191,.13)" }}>
                 <Video size={20} color={rec ? "#fca5a5" : "var(--accent)"} />
@@ -78,21 +80,23 @@ export default function Meetings() {
                   {m.detail && <span className="glass2 rounded-full px-2 py-0.5">{m.detail}</span>}
                 </div>
               </div>
-              <div className="flex items-center gap-2.5 flex-none">
-                <StatusBadge state={m.state} />
-                {rec ? (
+              <div className="flex-none"><StatusBadge state={m.state} /></div>
+              {rec ? (
+                <div className="w-full lg:w-auto flex justify-end">
                   <button className="btn btn-danger" onClick={() => stopOne(m)}><Square size={13} /> Стоп</button>
-                ) : m.state === "scheduled" ? (
-                  <div className="flex items-center gap-2 text-[12.5px]" style={{ color: "var(--muted)" }}>
-                    <button className="btn btn-ghost" onClick={() => runNow(m)}>Сейчас</button>
-                    <span>Пишем</span><Switch size="sm" on={willRecord} onChange={() => setDecision(m, !willRecord)} />
-                  </div>
-                ) : JOINABLE.includes(m.state) ? (
+                </div>
+              ) : m.state === "scheduled" ? (
+                <div className="w-full lg:w-auto flex items-center justify-end gap-2 text-[12.5px]" style={{ color: "var(--muted)" }}>
+                  <button className="btn btn-ghost" onClick={() => runNow(m)}>Сейчас</button>
+                  <span>Пишем</span><Switch size="sm" on={willRecord} onChange={() => setDecision(m, !willRecord)} />
+                </div>
+              ) : JOINABLE.includes(m.state) ? (
+                <div className="w-full lg:w-auto flex justify-end">
                   <button className="btn btn-primary" onClick={() => runNow(m)}
                     title="Запустить бота на эту встречу вручную">
                     <Video size={14} /> Подключиться</button>
-                ) : null}
-              </div>
+                </div>
+              ) : null}
             </div>
             {rec && (
               <div className="mt-3" style={{ height: 6, borderRadius: 6, background: "rgba(120,140,150,.2)", overflow: "hidden" }}>

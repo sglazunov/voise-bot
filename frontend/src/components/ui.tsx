@@ -170,23 +170,26 @@ export function ToastProvider({ children }: { children: ReactNode }) {
 }
 
 /* ---- Status badge for meeting states ---- */
-const BADGE: Record<string, { t: string; c: string; bg: string }> = {
-  scheduled: { t: "Запланирована", c: "var(--muted)", bg: "rgba(120,140,150,.18)" },
-  recording: { t: "Идёт запись", c: "#fca5a5", bg: "rgba(248,113,113,.16)" },
-  uploading: { t: "Загрузка в облако", c: "#c4b5fd", bg: "rgba(139,92,246,.18)" },
-  transcribing: { t: "Распознавание", c: "var(--accent)", bg: "rgba(45,212,191,.14)" },
-  analyzing: { t: "Генерация протокола", c: "var(--accent)", bg: "rgba(45,212,191,.14)" },
+/* `s` is the phone-width label: the full wording would eat the meeting title. */
+const BADGE: Record<string, { t: string; s?: string; c: string; bg: string }> = {
+  scheduled: { t: "Запланирована", s: "План", c: "var(--muted)", bg: "rgba(120,140,150,.18)" },
+  recording: { t: "Идёт запись", s: "Запись", c: "#fca5a5", bg: "rgba(248,113,113,.16)" },
+  uploading: { t: "Загрузка в облако", s: "Загрузка", c: "#c4b5fd", bg: "rgba(139,92,246,.18)" },
+  transcribing: { t: "Распознавание", s: "Распозн.", c: "var(--accent)", bg: "rgba(45,212,191,.14)" },
+  analyzing: { t: "Генерация протокола", s: "Протокол", c: "var(--accent)", bg: "rgba(45,212,191,.14)" },
   done: { t: "Готово", c: "#5eead4", bg: "rgba(52,211,153,.16)" },
   error: { t: "Ошибка", c: "#fca5a5", bg: "rgba(248,113,113,.16)" },
-  missed: { t: "Пропущена", c: "#94a3b8", bg: "rgba(148,163,184,.16)" },
-  skipped: { t: "Не записываем", c: "var(--muted)", bg: "rgba(120,140,150,.18)" },
-  no_time: { t: "Без времени", c: "var(--warn)", bg: "rgba(251,191,36,.16)" },
+  missed: { t: "Пропущена", s: "Пропуск", c: "#94a3b8", bg: "rgba(148,163,184,.16)" },
+  skipped: { t: "Не записываем", s: "Без записи", c: "var(--muted)", bg: "rgba(120,140,150,.18)" },
+  no_time: { t: "Без времени", s: "Без врем.", c: "var(--warn)", bg: "rgba(251,191,36,.16)" },
 };
 export function StatusBadge({ state, dot = true }: { state: string; dot?: boolean }) {
   const b = BADGE[state] || BADGE.scheduled;
   return (
-    <span className="chip" style={{ color: b.c, background: b.bg }}>
-      {dot && <span style={{ width: 7, height: 7, borderRadius: "50%", background: b.c }} />} {b.t}
+    <span className="chip whitespace-nowrap" style={{ color: b.c, background: b.bg }} title={b.t}>
+      {dot && <span className="flex-none" style={{ width: 7, height: 7, borderRadius: "50%", background: b.c }} />}
+      <span className="lg:hidden">{b.s || b.t}</span>
+      <span className="hidden lg:inline">{b.t}</span>
     </span>
   );
 }
