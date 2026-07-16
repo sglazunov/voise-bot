@@ -56,5 +56,18 @@ services:
       timeout: 5s
       retries: 10
 
+  # Public HTTPS access without touching the router — a Cloudflare "quick tunnel"
+  # to the app. The public URL (…​.trycloudflare.com) is printed in this
+  # service's logs:  docker compose logs cloudflared | grep trycloudflare
+  # It's EPHEMERAL (changes whenever this container restarts). For a testing
+  # demo only — comment this service out to take the app back off the internet.
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: linux-voise-tunnel
+    restart: unless-stopped
+    command: tunnel --no-autoupdate --url http://app:8000
+    depends_on:
+      - app
+
 volumes:
   pgdata:

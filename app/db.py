@@ -80,12 +80,24 @@ JOB_COLS = JOB_SCALAR_COLS + JOB_JSON_COLS
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
-    username    TEXT PRIMARY KEY,
-    pw          TEXT NOT NULL,
-    phone       TEXT,
-    created_at  DOUBLE PRECISION,
-    is_admin    BOOLEAN DEFAULT FALSE
+    username        TEXT PRIMARY KEY,
+    pw              TEXT NOT NULL,
+    phone           TEXT,
+    created_at      DOUBLE PRECISION,
+    is_admin        BOOLEAN DEFAULT FALSE,
+    team            TEXT,
+    invite_code     TEXT,
+    invite_code_at  DOUBLE PRECISION,
+    is_super        BOOLEAN DEFAULT FALSE
 );
+-- Installs created before the team model: add the columns in place. Without
+-- these, team/invite_code were silently dropped on every save — the invite code
+-- appeared to change on every page load and could never be used to join.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS team           TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS invite_code    TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS invite_code_at DOUBLE PRECISION;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS is_super       BOOLEAN DEFAULT FALSE;
+CREATE INDEX IF NOT EXISTS idx_users_team ON users(team);
 CREATE TABLE IF NOT EXISTS sessions (
     token_hash  TEXT PRIMARY KEY,
     username    TEXT NOT NULL,
@@ -189,12 +201,24 @@ def init_schema() -> None:
 # --------------------------------------------------------------------------- #
 def users_load() -> dict:
     with _conn() as conn, _cur(conn) as cur:
-        cur.execute("SELECT username, pw, phone, created_at, is_admin FROM users")
+        cur.execute("SELECT username, pw, phone, created_at, is_admin, team, "
+                    "invite_code, invite_code_at, is_super FROM users")
         out = {}
         for r in cur.fetchall():
-            out[r["username"]] = {"pw": r["pw"], "phone": r.get("phone") or "",
-                                  "created_at": r.get("created_at"),
-                                  "is_admin": bool(r.get("is_admin"))}
+            rec = {"pw": r["pw"], "phone": r.get("phone") or "",
+                   "created_at": r.get("created_at"),
+                   "is_admin": bool(r.get("is_admin"))}
+            # Team fields are optional — keep them absent (not None) so the
+            # file/DB shapes match and legacy fallbacks behave the same.
+            if r.get("team"):
+                rec["team"] = r["team"]
+            if r.get("invite_code"):
+                rec["invite_code"] = r["invite_code"]
+            if r.get("invite_code_at") is not None:
+                rec["invite_code_at"] = r["invite_code_at"]
+            if r.get("is_super"):
+                rec["is_super"] = True
+            out[r["username"]] = rec
         return out
 
 
@@ -206,13 +230,19 @@ def users_save(users: dict) -> None:
             cur.execute("DELETE FROM users WHERE username=%s", (name,))
         for name, rec in users.items():
             cur.execute(
-                """INSERT INTO users (username, pw, phone, created_at, is_admin)
-                   VALUES (%s,%s,%s,%s,%s)
+                """INSERT INTO users (username, pw, phone, created_at, is_admin,
+                                      team, invite_code, invite_code_at, is_super)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
                    ON CONFLICT (username) DO UPDATE SET
                      pw=EXCLUDED.pw, phone=EXCLUDED.phone,
-                     created_at=EXCLUDED.created_at, is_admin=EXCLUDED.is_admin""",
+                     created_at=EXCLUDED.created_at, is_admin=EXCLUDED.is_admin,
+                     team=EXCLUDED.team, invite_code=EXCLUDED.invite_code,
+                     invite_code_at=EXCLUDED.invite_code_at,
+                     is_super=EXCLUDED.is_super""",
                 (name, rec.get("pw", ""), rec.get("phone") or None,
-                 rec.get("created_at"), bool(rec.get("is_admin"))))
+                 rec.get("created_at"), bool(rec.get("is_admin")),
+                 rec.get("team"), rec.get("invite_code"),
+                 rec.get("invite_code_at"), bool(rec.get("is_super"))))
 
 
 # --------------------------------------------------------------------------- #

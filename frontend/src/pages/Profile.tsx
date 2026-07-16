@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { UserCircle, Phone, KeyRound, ShieldCheck, Trash2, AlertTriangle, Users, Copy, Check } from "lucide-react";
+import { UserCircle, Phone, KeyRound, ShieldCheck, Trash2, AlertTriangle, Users, Copy, Check, UserMinus, User } from "lucide-react";
 import { Page } from "../components/Layout";
 import { Card, Modal, useToast } from "../components/ui";
 import { api, logout } from "../lib/api";
@@ -17,6 +17,17 @@ export default function Profile() {
     try { await navigator.clipboard.writeText(info?.invite_code || ""); setCopied(true); setTimeout(() => setCopied(false), 1500); }
     catch { toast("Не удалось скопировать", true); }
   }
+  async function kick(username: string) {
+    if (!confirm(`Исключить «${username}» из рабочего пространства?\n\nОн потеряет доступ к общим настройкам и данным команды (аккаунт останется, но окружение станет пустым).`)) return;
+    try {
+      const r = await api.post("/api/profile/team/remove", { username });
+      setInfo((i: any) => ({ ...i, team_members: r.team_members, team_size: r.team_size }));
+      toast(`«${username}» исключён из команды`);
+    } catch (e: any) { toast(e.message, true); }
+  }
+  const fmtExpiry = (ts?: number) => ts
+    ? new Date(ts * 1000).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })
+    : "";
 
   const load = () => api.get("/api/profile").then(setInfo).catch(() => {});
   useEffect(() => { load(); }, []);
@@ -76,7 +87,23 @@ export default function Profile() {
                   {copied ? <><Check size={14} /> Готово</> : <><Copy size={14} /> Копировать</>}</button>
               </div>
               <div className="text-[12px] mt-2" style={{ color: "var(--muted)" }}>
-                Участников в команде: <b style={{ color: "var(--txt)" }}>{info?.team_size ?? 1}</b>
+                Код обновляется раз в сутки — действует до <b style={{ color: "var(--txt)" }}>{fmtExpiry(info?.invite_expires_at)}</b>.
+                По одному коду может войти сколько угодно людей.
+              </div>
+
+              <div className="mt-4">
+                <label className="lbl">Участники рабочего пространства ({info?.team_size ?? 1})</label>
+                {(info?.team_members || []).map((m: any) => (
+                  <div key={m.username} className="glass2 rounded-xl px-3 py-2 mb-1.5 flex items-center gap-2">
+                    <User size={14} color="var(--muted)" className="flex-none" />
+                    <span className="text-[13px] font-semibold truncate">{m.username}</span>
+                    {m.is_admin
+                      ? <span className="chip" style={{ color: "var(--accent)" }}>админ</span>
+                      : <button className="ml-auto btn btn-danger flex-none" onClick={() => kick(m.username)}
+                          title="Убрать из рабочего пространства">
+                          <UserMinus size={13} /> Исключить</button>}
+                  </div>
+                ))}
               </div>
             </>
           ) : (

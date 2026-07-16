@@ -350,12 +350,33 @@ def auth_recover_verify(body: RecoverVerifyBody, request: Request):
 @app.get("/api/profile")
 def profile_info(user: str = Depends(current_user)):
     is_admin = security.is_admin(user)
+    team = security.team_of(user)
     return {"username": user, "phone_masked": security.masked_phone(user),
             "is_admin": is_admin,
-            "team": security.team_of(user),
+            "team": team,
             # The invite code lets others join THIS team; only the admin has one.
+            # It rotates daily — expires_at drives the countdown in the UI.
             "invite_code": security.invite_code_of(user) if is_admin else None,
-            "team_size": len(security.team_members(security.team_of(user)))}
+            "invite_expires_at": security.invite_code_expires_at(user) if is_admin else None,
+            "team_size": len(security.team_members(team)),
+            # Who is in this workspace (admin only — for managing the team).
+            "team_members": security.team_member_list(team) if is_admin else []}
+
+
+class TeamKick(BaseModel):
+    username: str
+
+
+@app.post("/api/profile/team/remove")
+def profile_team_remove(body: TeamKick, user: str = Depends(current_user)):
+    """Remove a member from the admin's workspace (they get their own empty one
+    and are logged out immediately)."""
+    res = security.remove_from_team(user, body.username)
+    if not res.get("ok"):
+        raise HTTPException(400, res.get("error"))
+    team = security.team_of(user)
+    return {"ok": True, "team_members": security.team_member_list(team),
+            "team_size": len(security.team_members(team))}
 
 
 class PhoneChange(BaseModel):

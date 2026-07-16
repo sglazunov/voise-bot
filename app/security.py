@@ -347,6 +347,12 @@ def confirm_recovery_code(username: str, phone: str, code: str,
 # creates a new team (you become its admin, with a personal invite code);
 # registering WITH a valid code joins that admin's team.
 # --------------------------------------------------------------------------- #
+# The invite code ROTATES DAILY: a code older than this no longer admits anyone,
+# and the admin's profile hands out a fresh one. It is NOT single-use — any
+# number of people may join with the same code while it's still valid.
+INVITE_CODE_TTL = int(os.getenv("VTX_INVITE_CODE_TTL_SEC", str(24 * 3600)))
+
+
 def _gen_invite_code(users: dict) -> str:
     existing = {(r or {}).get("invite_code") for r in users.values()}
     while True:
@@ -355,12 +361,19 @@ def _gen_invite_code(users: dict) -> str:
             return c
 
 
+def _code_alive(rec: dict) -> bool:
+    return bool(rec.get("invite_code")) and \
+        (time.time() - (rec.get("invite_code_at") or 0)) <= INVITE_CODE_TTL
+
+
 def _admin_by_code(users: dict, code: str | None) -> str | None:
-    code = (code or "").strip()
+    code = (code or "").strip().lower()
     if not code:
         return None
     for uname, rec in users.items():
-        if rec.get("is_admin") and rec.get("invite_code") == code:
+        if not rec.get("is_admin") or not _code_alive(rec):
+            continue
+        if hmac.compare_digest(str(rec.get("invite_code", "")).lower(), code):
             return uname
     return None
 
@@ -385,18 +398,64 @@ def list_teams() -> list[str]:
 
 
 def invite_code_of(username: str) -> str | None:
-    """The team's invite code — only admins have one; generated on demand so a
-    pre-teams admin also gets a code the first time they open their profile."""
+    """The team's invite code — only admins have one. Rotates daily: a fresh code
+    is minted on demand once the previous one is older than INVITE_CODE_TTL."""
     username = normalize_username(username)
     with _LOCK:
         users = _load_users()
         rec = users.get(username)
         if not rec or not rec.get("is_admin"):
             return None
-        if not rec.get("invite_code"):
+        if not _code_alive(rec):
             rec["invite_code"] = _gen_invite_code(users)
+            rec["invite_code_at"] = time.time()
             _save_users(users)
         return rec["invite_code"]
+
+
+def invite_code_expires_at(username: str) -> float | None:
+    """When the current code stops working (unix ts), for the UI countdown."""
+    rec = _load_users().get(normalize_username(username)) or {}
+    if not rec.get("is_admin") or not rec.get("invite_code"):
+        return None
+    return (rec.get("invite_code_at") or 0) + INVITE_CODE_TTL
+
+
+def team_member_list(admin: str) -> list[dict]:
+    """Logins in this workspace (for the admin's profile)."""
+    admin = normalize_username(admin)
+    out = []
+    for u, r in _load_users().items():
+        if (r.get("team") or u) != admin:
+            continue
+        out.append({"username": u, "is_admin": bool(r.get("is_admin")),
+                    "created_at": r.get("created_at")})
+    return sorted(out, key=lambda x: x.get("created_at") or 0)
+
+
+def remove_from_team(admin: str, member: str) -> dict:
+    """Kick a member out of the admin's workspace. They keep their login but get
+    their own EMPTY workspace, and every session of theirs is revoked at once."""
+    admin = normalize_username(admin)
+    member = normalize_username(member)
+    if admin == member:
+        return {"ok": False, "error": "Нельзя исключить самого себя."}
+    with _LOCK:
+        users = _load_users()
+        a, m = users.get(admin), users.get(member)
+        if not a or not a.get("is_admin"):
+            return {"ok": False, "error": "Только админ команды может исключать участников."}
+        if not m:
+            return {"ok": False, "error": "Пользователь не найден."}
+        if (m.get("team") or member) != admin:
+            return {"ok": False, "error": "Этот пользователь не в вашей команде."}
+        m["team"] = member          # own, empty workspace from now on
+        m["is_admin"] = True
+        m.pop("invite_code", None)
+        m.pop("invite_code_at", None)
+        _save_users(users)
+    destroy_user_sessions(member)    # log them out immediately
+    return {"ok": True}
 
 
 def admin_by_invite_code(code: str | None) -> str | None:
@@ -433,6 +492,7 @@ def create_user(username: str, password: str, code: str | None = None,
                "phone": norm_phone, "is_admin": is_admin, "team": team}
         if invite:
             rec["invite_code"] = invite
+            rec["invite_code_at"] = time.time()   # starts the daily rotation
         users[username] = rec
         _save_users(users)
     user_dir(username)  # create their private dir up-front

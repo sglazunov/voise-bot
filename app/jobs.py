@@ -31,6 +31,31 @@ STATUS_ERROR = "error"
 STATUS_CANCELLED = "cancelled"
 
 
+def _friendly_error(exc: BaseException) -> str:
+    """A SHORT human message for the UI instead of a raw Python traceback.
+    The full traceback still goes to the server log for debugging."""
+    traceback.print_exc()
+    s = str(exc) or exc.__class__.__name__
+    low = s.lower()
+    if "503" in low or "unavailable" in low or "high demand" in low or "overload" in low:
+        return ("Движок ИИ сейчас перегружен и не отвечает (503). Это временно — "
+                "нажмите «Пересобрать» чуть позже или выберите другой движок "
+                "во вкладке «Нейросети».")
+    if "429" in low or "rate limit" in low or "too many requests" in low or "quota" in low:
+        return ("Исчерпан лимит запросов к движку ИИ (429). Подождите сброса квоты, "
+                "добавьте ещё один ключ или выберите другой движок.")
+    if "401" in low or "403" in low or "api key" in low or "api_key" in low \
+            or "unauthorized" in low or "permission" in low:
+        return ("Ключ движка ИИ отклонён (нет доступа). Проверьте ключ "
+                "во вкладке «Нейросети».")
+    if "404" in low or "not found" in low or "no longer available" in low:
+        return ("Выбранная модель недоступна для этого ключа. Выберите другую "
+                "модель во вкладке «Нейросети».")
+    if "timed out" in low or "timeout" in low:
+        return "Движок ИИ не ответил вовремя (таймаут). Попробуйте «Пересобрать»."
+    return f"Не удалось собрать протокол: {s.splitlines()[0][:200]}"
+
+
 def _team(owner: str | None) -> str:
     """Resolve a login to its TEAM (team-admin login). Jobs are owned by the team
     so everyone in it shares the recognition history."""
@@ -354,9 +379,8 @@ class JobStore:
             self._control.pop(job.id, None)
             self._set(job, status=STATUS_DONE,
                       analysis_error="Сборка протокола отменена.")
-        except Exception:
-            self._set(job, status=STATUS_DONE,
-                      analysis_error=traceback.format_exc(limit=3))
+        except Exception as e:
+            self._set(job, status=STATUS_DONE, analysis_error=_friendly_error(e))
         finally:
             self._reanalyze_lock.release()
 
@@ -647,8 +671,8 @@ class JobStore:
                     self._control.pop(job.id, None)
                     self._set(job, status=STATUS_CANCELLED, finished_at=time.time())
                     return
-                except Exception:
-                    analysis_err = traceback.format_exc(limit=3)
+                except Exception as e:
+                    analysis_err = _friendly_error(e)
 
             self._set(
                 job,

@@ -76,6 +76,7 @@ export default function Recognition() {
   const [jobs, setJobs] = useState<any[]>([]);
   const [sel, setSel] = useState<string | null>(null);
   const [detail, setDetail] = useState<any>(null);
+  const [live, setLive] = useState<any>(null);   // live stage from /partial
   const [transcript, setTranscript] = useState<string>("");
   const [tab, setTab] = useState<"protocol" | "transcript">("protocol");
   const [busy, setBusy] = useState(false);
@@ -89,22 +90,29 @@ export default function Recognition() {
   useEffect(() => { loadJobs(); const t = setInterval(loadJobs, 4000); return () => clearInterval(t); }, []);
   useEffect(() => { api.get("/api/providers").then((d) => setEngines(d.engines || [])).catch(() => {}); }, []);
 
-  // Load selected job detail + transcript, poll while busy
+  // Load selected job detail + transcript, poll while busy.
+  // While it's working we also pull /partial — the LIVE stage of recognition and
+  // protocol building (stage + streamed characters), so the user sees progress.
   useEffect(() => {
-    if (!sel) { setDetail(null); setTranscript(""); return; }
+    if (!sel) { setDetail(null); setTranscript(""); setLive(null); return; }
     let alive = true;
     const tick = async () => {
       try {
         const j = await api.get(`/api/jobs/${sel}`);
         if (!alive) return;
         setDetail(j);
+        if (isBusy(j.status)) {
+          try { const p = await api.get(`/api/jobs/${sel}/partial`); if (alive) setLive(p); } catch { /* ignore */ }
+        } else {
+          setLive(null);
+        }
         if (j.status === "done" || j.status === "cancelled") {
           api.text(`/api/jobs/${sel}/result?format=txt`).then((t) => alive && setTranscript(t)).catch(() => {});
         }
       } catch { /* gone */ }
     };
     tick();
-    const t = setInterval(() => { if (detail && isBusy(detail.status)) tick(); }, 3000);
+    const t = setInterval(() => { if (detail && isBusy(detail.status)) tick(); }, 2000);
     return () => { alive = false; clearInterval(t); };
   }, [sel, detail?.status]);
 
@@ -229,11 +237,32 @@ export default function Recognition() {
               </div>
 
               {isBusy(detail.status) && (
-                <div className="glass2 rounded-2xl p-3 mb-3 flex items-center gap-3">
-                  <Loader2 size={17} className="animate-spin" color="var(--accent)" />
-                  <div className="flex-1"><div className="text-[13px] font-semibold">{RU_STATUS[detail.status]}…</div>
+                <div className="glass2 rounded-2xl p-3 mb-3 flex items-start gap-3">
+                  <Loader2 size={17} className="animate-spin flex-none mt-0.5" color="var(--accent)" />
+                  <div className="flex-1 min-w-0">
+                    <div className="text-[13px] font-semibold">{RU_STATUS[detail.status]}…</div>
+                    {/* Live stage of the protocol build / recognition, from /partial */}
+                    {detail.status === "analyzing" && (
+                      <div className="text-[12px] mt-0.5" style={{ color: "var(--muted)" }}>
+                        {live?.analysis?.stage || "готовлю запрос к ИИ"}
+                        {live?.analysis?.chars ? ` · получено ${live.analysis.chars} символов` : ""}
+                      </div>
+                    )}
+                    {detail.status === "running" && live?.segments?.length ? (
+                      <div className="text-[12px] mt-0.5" style={{ color: "var(--muted)" }}>
+                        распознано фрагментов: {live.segments.length}</div>
+                    ) : null}
                     <div className="mt-1.5" style={{ height: 6, borderRadius: 6, background: "rgba(120,140,150,.2)", overflow: "hidden" }}>
-                      <div style={{ height: "100%", width: `${Math.round((detail.progress || 0) * 100)}%`, background: "linear-gradient(90deg,var(--accent),var(--accent2))", transition: "width .4s" }} /></div></div>
+                      <div style={{ height: "100%",
+                        width: detail.status === "analyzing" ? "100%" : `${Math.round((detail.progress || 0) * 100)}%`,
+                        background: "linear-gradient(90deg,var(--accent),var(--accent2))",
+                        transition: "width .4s",
+                        opacity: detail.status === "analyzing" ? 0.55 : 1 }} /></div>
+                    {detail.status === "analyzing" && live?.analysis?.text ? (
+                      <pre className="text-[11px] mt-2 whitespace-pre-wrap font-sans max-h-24 overflow-y-auto"
+                        style={{ color: "var(--muted)" }}>{String(live.analysis.text).slice(-400)}</pre>
+                    ) : null}
+                  </div>
                 </div>
               )}
               {detail.error && <div className="glass2 rounded-2xl p-3 mb-3 text-[12.5px]" style={{ color: "#fca5a5" }}>{detail.error}</div>}
