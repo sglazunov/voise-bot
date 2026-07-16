@@ -62,7 +62,9 @@ def _write(user: str, raw: dict) -> None:
 
 
 def load(user: str) -> dict:
-    """{provider: [{'key':.., 'extra':..}, ...]} with values DECRYPTED."""
+    """{provider: [{'key':.., 'extra':..}, ...]} with values DECRYPTED. Keys are
+    shared per TEAM (stored/encrypted under the team-admin's login)."""
+    user = security.team_of(user)
     out = {}
     for prov, entries in _read_raw(user).items():
         dec = []
@@ -75,7 +77,8 @@ def load(user: str) -> dict:
 
 
 def add(user: str, provider: str, key: str, extra: str = "") -> None:
-    """Append a key to `provider`'s pool (skips exact duplicates)."""
+    """Append a key to the TEAM's `provider` pool (skips exact duplicates)."""
+    user = security.team_of(user)
     raw = _read_raw(user)
     entries = raw.get(provider) or []
     for e in entries:  # de-dupe by decrypted key
@@ -90,6 +93,7 @@ def add(user: str, provider: str, key: str, extra: str = "") -> None:
 
 
 def remove_at(user: str, provider: str, index: int) -> None:
+    user = security.team_of(user)
     raw = _read_raw(user)
     entries = raw.get(provider) or []
     if 0 <= index < len(entries):
@@ -102,12 +106,14 @@ def remove_at(user: str, provider: str, index: int) -> None:
 
 
 def clear(user: str, provider: str) -> None:
+    user = security.team_of(user)
     raw = _read_raw(user)
     if raw.pop(provider, None) is not None:
         _write(user, raw)
 
 
 def counts(user: str) -> dict:
-    """{provider: how many keys the user has} — for the UI (no secrets)."""
+    """{provider: how many keys the TEAM has} — for the UI (no secrets)."""
+    user = security.team_of(user)
     raw = _read_raw(user)
     return {p: len(raw.get(p) or []) for p in KEY_PROVIDERS}

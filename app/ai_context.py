@@ -34,7 +34,8 @@ def _path(user: str) -> Path:
 
 
 def load(user: str) -> dict:
-    """Return {'global': str, 'projects': [{'name','text'}, ...]}."""
+    """Return {'global': str, 'projects': [{'name','text'}, ...]} — shared per TEAM."""
+    user = security.team_of(user)
     if db.enabled():
         raw = db.aicontext_load(user) or {}
     else:
@@ -52,7 +53,8 @@ def load(user: str) -> dict:
 
 
 def save(user: str, data: dict) -> dict:
-    """Persist the user's context (sanitised) and return the stored value."""
+    """Persist the TEAM's context (sanitised) and return the stored value."""
+    user = security.team_of(user)
     clean = {
         "global": str((data or {}).get("global", "")).strip()[:_MAX_GLOBAL],
         "projects": [],

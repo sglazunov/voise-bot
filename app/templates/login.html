@@ -39,7 +39,7 @@
   <div class="card">
     {% if mode == "register" %}
       <h1>Создать аккаунт</h1>
-      <p class="sub">{% if first_run %}Первый аккаунт станет администратором.{% else %}Регистрация нового пользователя.{% endif %}</p>
+      <p class="sub">С кодом приглашения — войдёте в команду и её настройки. Без кода — создадите своё окружение и станете его админом.</p>
     {% elif mode == "recover" %}
       <h1>Восстановление пароля</h1>
       <p class="sub">Укажите логин и номер телефона, заданный при регистрации, — и новый пароль.</p>
@@ -85,9 +85,9 @@
       <input id="password" name="password" type="password"
              autocomplete="{{ 'current-password' if mode == 'login' else 'new-password' }}"
              placeholder="{{ 'ваш пароль' if mode == 'login' else 'не короче 8 символов' }}">
-      {% if mode == "register" and code_required %}
-      <label for="code">Код регистрации <span style="color:var(--accent)">*</span></label>
-      <input id="code" name="code" required placeholder="выдаётся администратором">
+      {% if mode == "register" %}
+      <label for="code">Код приглашения <span style="color:var(--muted);font-weight:400">(если есть)</span></label>
+      <input id="code" name="code" placeholder="пусто — создадите своё окружение">
       {% endif %}
       <button id="btn" type="submit">{{ "Зарегистрироваться" if mode == "register" else "Войти" }}</button>
       <div id="err" class="err"></div>

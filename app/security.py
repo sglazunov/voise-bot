@@ -339,30 +339,68 @@ def confirm_recovery_code(username: str, phone: str, code: str,
     return {"ok": True}
 
 
-def registration_allowed(code: str | None) -> tuple[bool, str]:
-    """Policy: the first user bootstraps freely; afterwards a registration code
-    (VTX_REGISTRATION_CODE) is required, unless VTX_ALLOW_OPEN_REGISTRATION=1."""
-    with _LOCK:
-        if not _load_users():
-            return True, ""
-    required = os.getenv("VTX_REGISTRATION_CODE", "")
-    if required:
-        if code and hmac.compare_digest(str(code), required):
-            return True, ""
-        return False, "Неверный код регистрации."
-    if os.getenv("VTX_ALLOW_OPEN_REGISTRATION") == "1":
-        return True, ""
-    return False, "Регистрация закрыта администратором."
+# --------------------------------------------------------------------------- #
+# Teams (multi-tenant): each account belongs to a TEAM identified by its
+# team-admin's login. All shared data (settings, tokens, LLM keys, AI context,
+# meetings, jobs) is stored/encrypted under the team-admin's login, so members
+# transparently work on the admin's configuration. Registering WITHOUT a code
+# creates a new team (you become its admin, with a personal invite code);
+# registering WITH a valid code joins that admin's team.
+# --------------------------------------------------------------------------- #
+def _gen_invite_code(users: dict) -> str:
+    existing = {(r or {}).get("invite_code") for r in users.values()}
+    while True:
+        c = secrets.token_hex(4)   # 8 hex chars, e.g. "a3f90c21"
+        if c not in existing:
+            return c
 
 
-def registration_requires_code() -> bool:
-    """Whether a new (non-first) registration must supply an invite code — true
-    only when a VTX_REGISTRATION_CODE is configured AND at least one user exists.
-    Drives whether the register form shows the «Код регистрации» field."""
+def _admin_by_code(users: dict, code: str | None) -> str | None:
+    code = (code or "").strip()
+    if not code:
+        return None
+    for uname, rec in users.items():
+        if rec.get("is_admin") and rec.get("invite_code") == code:
+            return uname
+    return None
+
+
+def team_of(username: str) -> str:
+    """The team-admin login this account belongs to (its own login for an admin,
+    or for legacy accounts without a team)."""
+    username = normalize_username(username)
+    rec = _load_users().get(username) or {}
+    return rec.get("team") or username
+
+
+def team_members(admin: str) -> list[str]:
+    admin = normalize_username(admin)
+    return [u for u, r in _load_users().items() if (r.get("team") or u) == admin]
+
+
+def list_teams() -> list[str]:
+    """Distinct team-admin logins (one automation workspace per team)."""
+    users = _load_users()
+    return sorted({(r.get("team") or u) for u, r in users.items()})
+
+
+def invite_code_of(username: str) -> str | None:
+    """The team's invite code — only admins have one; generated on demand so a
+    pre-teams admin also gets a code the first time they open their profile."""
+    username = normalize_username(username)
     with _LOCK:
-        if not _load_users():
-            return False
-    return bool(os.getenv("VTX_REGISTRATION_CODE", ""))
+        users = _load_users()
+        rec = users.get(username)
+        if not rec or not rec.get("is_admin"):
+            return None
+        if not rec.get("invite_code"):
+            rec["invite_code"] = _gen_invite_code(users)
+            _save_users(users)
+        return rec["invite_code"]
+
+
+def admin_by_invite_code(code: str | None) -> str | None:
+    return _admin_by_code(_load_users(), code)
 
 
 def create_user(username: str, password: str, code: str | None = None,
@@ -377,21 +415,28 @@ def create_user(username: str, password: str, code: str | None = None,
     if not norm_phone:
         return {"ok": False, "error": "Укажите номер телефона (10–15 цифр) — "
                 "он нужен для восстановления пароля."}
-    ok, why = registration_allowed(code)
-    if not ok:
-        return {"ok": False, "error": why}
     with _LOCK:
         users = _load_users()
         if username in users:
             return {"ok": False, "error": "Такой логин уже существует."}
         if _phone_owner(users, norm_phone):
             return {"ok": False, "error": "Этот номер телефона уже привязан к другому аккаунту."}
-        users[username] = {"pw": hash_password(password), "created_at": time.time(),
-                           "phone": norm_phone,
-                           "is_admin": not bool(users)}  # first user = admin
+        code = (code or "").strip()
+        if code:
+            admin = _admin_by_code(users, code)
+            if not admin:
+                return {"ok": False, "error": "Неверный код приглашения."}
+            team, is_admin, invite = admin, False, None
+        else:
+            team, is_admin, invite = username, True, _gen_invite_code(users)
+        rec = {"pw": hash_password(password), "created_at": time.time(),
+               "phone": norm_phone, "is_admin": is_admin, "team": team}
+        if invite:
+            rec["invite_code"] = invite
+        users[username] = rec
         _save_users(users)
     user_dir(username)  # create their private dir up-front
-    return {"ok": True, "username": username}
+    return {"ok": True, "username": username, "is_admin": is_admin, "team": team}
 
 
 def verify_user(username: str, password: str) -> bool:
@@ -435,13 +480,16 @@ def delete_account(username: str, password: str) -> dict:
         users = _load_users()
         if username not in users:
             return {"ok": False, "error": "Аккаунт не найден."}
-        was_admin = bool(users[username].get("is_admin"))
+        # A team-admin can't delete the workspace out from under its members
+        # (all shared data lives under the admin's login). They must remove the
+        # members first. A member deleting themselves only removes their login.
+        if users[username].get("is_admin"):
+            members = [u for u in users
+                       if u != username and (users[u].get("team") or u) == username]
+            if members:
+                return {"ok": False, "error": f"В вашей команде есть участники "
+                        f"({len(members)}). Сначала удалите их аккаунты."}
         users.pop(username, None)
-        # If we removed the last admin but other users remain, promote the
-        # earliest-created one so the workspace never ends up without an admin.
-        if was_admin and users and not any(u.get("is_admin") for u in users.values()):
-            oldest = min(users, key=lambda u: users[u].get("created_at") or 0)
-            users[oldest]["is_admin"] = True
         _save_users(users)
         rec = _load_recovery()
         if rec.pop(username, None) is not None:

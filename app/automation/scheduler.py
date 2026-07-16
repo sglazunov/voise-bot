@@ -76,6 +76,7 @@ class Scheduler:
         self._thread.start()
 
     def status(self, user: str) -> dict:
+        user = security.team_of(user)   # members see the team's meetings
         cfg = auto_settings.load(user)
         with self._lock:
             meetings = [s.public() for s in sorted(
@@ -101,9 +102,10 @@ class Scheduler:
                 "last_poll": self._last_poll.get(user, 0.0), "meetings": meetings}
 
     def poll_now(self, user: str) -> dict:
-        """Force an immediate Weeek re-poll for this user — the manual «Обновить
+        """Force an immediate Weeek re-poll for this team — the manual «Обновить
         статус» button — so new meetings and status appear without waiting for
         the next tick."""
+        user = security.team_of(user)
         cfg = auto_settings.load(user)
         if not cfg.get("weeek_token"):
             return {"ok": False, "error": "Сначала задайте токен Weeek."}
@@ -122,9 +124,9 @@ class Scheduler:
     def _loop(self) -> None:
         while not self._stop.is_set():
             try:
-                # Run automation independently for each registered user, under
-                # their own (decrypted) tokens and settings — full isolation.
-                for user in security.list_users():
+                # Run automation ONCE PER TEAM, under the team-admin's (decrypted)
+                # tokens and settings — members share it, so no duplicate records.
+                for user in security.list_teams():
                     try:
                         cfg = auto_settings.load(user)
                         if not (cfg.get("enabled") and cfg.get("weeek_token")):
@@ -134,7 +136,7 @@ class Scheduler:
                             self._poll(user, cfg)
                             self._last_poll[user] = time.time()
                         self._maybe_trigger(user, cfg)
-                    except Exception:  # one user's failure must not stop others
+                    except Exception:  # one team's failure must not stop others
                         pass
             except Exception:  # never let the loop die
                 pass
@@ -702,7 +704,9 @@ class Scheduler:
 
     def stop_recording(self, user: str | None = None, task_id=None) -> dict:
         """Stop recording(s) in progress. With `task_id` — just that meeting;
-        otherwise all of `user`'s active recordings."""
+        otherwise all of the team's active recordings."""
+        if user is not None:
+            user = security.team_of(user)
         n = 0
         with self._lock:
             for st in self._states.values():
@@ -719,7 +723,8 @@ class Scheduler:
         return {"ok": True, "detail": f"Останавливаю запись ({n})…"}
 
     def set_decision(self, user: str, task_id: str, record) -> dict:
-        """Record/skip a specific meeting for `user` (override the filters)."""
+        """Record/skip a specific meeting for the team (override the filters)."""
+        user = security.team_of(user)
         cfg = auto_settings.load(user)
         decisions = dict(cfg.get("rec_decisions") or {})
         if record is None:
@@ -737,7 +742,8 @@ class Scheduler:
         return {"ok": True, "task_id": str(task_id), "record": record}
 
     def run_now(self, user: str, task_id: str) -> dict:
-        """Manually trigger recording for one of `user`'s meetings."""
+        """Manually trigger recording for one of the team's meetings."""
+        user = security.team_of(user)
         with self._lock:
             st = next((s for s in self._states.values()
                        if s.owner == user and str(s.task_id) == str(task_id)), None)

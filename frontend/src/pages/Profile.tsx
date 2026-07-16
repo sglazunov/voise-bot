@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { UserCircle, Phone, KeyRound, ShieldCheck, Trash2, AlertTriangle } from "lucide-react";
+import { UserCircle, Phone, KeyRound, ShieldCheck, Trash2, AlertTriangle, Users, Copy, Check } from "lucide-react";
 import { Page } from "../components/Layout";
 import { Card, Modal, useToast } from "../components/ui";
 import { api, logout } from "../lib/api";
@@ -10,7 +10,13 @@ export default function Profile() {
   const [phone, setPhone] = useState(""); const [phonePwd, setPhonePwd] = useState("");
   const [oldPwd, setOldPwd] = useState(""); const [newPwd, setNewPwd] = useState("");
   const [delOpen, setDelOpen] = useState(false); const [delPwd, setDelPwd] = useState(""); const [deleting, setDeleting] = useState(false);
+  const [copied, setCopied] = useState(false);
   const toast = useToast();
+
+  async function copyCode() {
+    try { await navigator.clipboard.writeText(info?.invite_code || ""); setCopied(true); setTimeout(() => setCopied(false), 1500); }
+    catch { toast("Не удалось скопировать", true); }
+  }
 
   const load = () => api.get("/api/profile").then(setInfo).catch(() => {});
   useEffect(() => { load(); }, []);
@@ -51,6 +57,34 @@ export default function Profile() {
               <span className="text-[13px]">Телефон восстановления</span></div>
             <span className="text-[13px] font-semibold">{info?.phone_masked || "не задан"}</span>
           </div>
+        </Card>
+
+        <Card>
+          <div className="flex items-center gap-2 mb-3"><Users size={17} color="var(--accent)" />
+            <div className="font-bold text-[15px]">Команда</div></div>
+          {info?.is_admin ? (
+            <>
+              <div className="text-[12.5px] mb-2.5 leading-relaxed" style={{ color: "var(--muted)" }}>
+                Вы — админ своего окружения. Передайте <b style={{ color: "var(--txt)" }}>код приглашения</b>:
+                человек регистрируется с ним и получает доступ к вашим настройкам, токенам и API-ключам.
+              </div>
+              <label className="lbl">Код приглашения</label>
+              <div className="glass2 rounded-2xl px-4 py-3 flex items-center gap-3">
+                <code className="text-[16px] font-mono tracking-widest flex-1" style={{ color: "var(--accent)" }}>
+                  {info?.invite_code || "…"}</code>
+                <button className="btn btn-ghost flex-none" onClick={copyCode}>
+                  {copied ? <><Check size={14} /> Готово</> : <><Copy size={14} /> Копировать</>}</button>
+              </div>
+              <div className="text-[12px] mt-2" style={{ color: "var(--muted)" }}>
+                Участников в команде: <b style={{ color: "var(--txt)" }}>{info?.team_size ?? 1}</b>
+              </div>
+            </>
+          ) : (
+            <div className="text-[13px] leading-relaxed" style={{ color: "var(--muted)" }}>
+              Вы в команде <b style={{ color: "var(--txt)" }}>{info?.team}</b> и работаете на её общих
+              настройках, токенах и ключах.
+            </div>
+          )}
         </Card>
 
         <Card>

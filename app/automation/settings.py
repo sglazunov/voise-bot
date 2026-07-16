@@ -160,7 +160,10 @@ def _deep_update(base: dict, extra: dict) -> None:
 
 
 def load(user: str) -> dict[str, Any]:
-    """Return `user`'s settings with secrets DECRYPTED in memory."""
+    """Return the TEAM's settings (shared across the team) with secrets DECRYPTED.
+    Storage + encryption key are the team-admin's login, so members read exactly
+    what the admin configured."""
+    user = security.team_of(user)
     with _LOCK:
         data = _read_raw(user)
     _transform_secrets(user, data, security.decrypt_secret)
@@ -173,8 +176,9 @@ _NESTED_KEYS = ("yandex_disk", "gdrive")
 
 
 def save(user: str, values: dict[str, Any]) -> dict[str, Any]:
-    """Merge `values` (plaintext) into `user`'s settings and persist, with
-    secrets ENCRYPTED at rest. Returns the new decrypted state."""
+    """Merge `values` (plaintext) into the TEAM's settings and persist, with
+    secrets ENCRYPTED at rest under the team-admin's key. Returns the new state."""
+    user = security.team_of(user)
     with _LOCK:
         # Work in plaintext: decrypt current, apply update, then re-encrypt to disk.
         data = _read_raw(user)

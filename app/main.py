@@ -201,8 +201,7 @@ def login_page(request: Request):
 def register_page(request: Request):
     return templates.TemplateResponse(
         "login.html", {"request": request, "mode": "register",
-                       "first_run": not security.list_users(),
-                       "code_required": security.registration_requires_code()})
+                       "first_run": not security.list_users()})
 
 
 @app.post("/api/auth/register")
@@ -344,8 +343,13 @@ def auth_recover_verify(body: RecoverVerifyBody, request: Request):
 # ---- Profile (phone + password management) ---------------------------------
 @app.get("/api/profile")
 def profile_info(user: str = Depends(current_user)):
+    is_admin = security.is_admin(user)
     return {"username": user, "phone_masked": security.masked_phone(user),
-            "is_admin": security.is_admin(user)}
+            "is_admin": is_admin,
+            "team": security.team_of(user),
+            # The invite code lets others join THIS team; only the admin has one.
+            "invite_code": security.invite_code_of(user) if is_admin else None,
+            "team_size": len(security.team_members(security.team_of(user)))}
 
 
 class PhoneChange(BaseModel):

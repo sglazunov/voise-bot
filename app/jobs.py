@@ -31,6 +31,18 @@ STATUS_ERROR = "error"
 STATUS_CANCELLED = "cancelled"
 
 
+def _team(owner: str | None) -> str:
+    """Resolve a login to its TEAM (team-admin login). Jobs are owned by the team
+    so everyone in it shares the recognition history."""
+    if not owner:
+        return owner or ""
+    try:
+        from . import security
+        return security.team_of(owner)
+    except Exception:
+        return owner
+
+
 def _owner_keys(owner: str | None):
     """The owner's per-user LLM API keys, so the protocol is built with THEIR
     keys (not another user's). None → fall back to server env keys."""
@@ -177,7 +189,7 @@ class JobStore:
             deliver_weeek_task=(deliver_weeek_task or "").strip(),
             context_hint=(context_hint or "").strip(),
             delete_audio_when_done=delete_audio_when_done,
-            owner=owner,
+            owner=_team(owner),   # jobs belong to the TEAM, not the individual
         )
         with self._lock:
             self._jobs[job.id] = job
@@ -192,7 +204,7 @@ class JobStore:
         """Return the job only if it belongs to `owner` — the isolation check
         every per-job endpoint must use so one login can't touch another's jobs."""
         job = self._jobs.get(job_id)
-        if job is None or job.owner != owner:
+        if job is None or job.owner != _team(owner):
             return None
         return job
 
@@ -214,7 +226,8 @@ class JobStore:
     def list(self, owner: str | None = None) -> list[Job]:
         jobs = self._jobs.values()
         if owner is not None:
-            jobs = [j for j in jobs if j.owner == owner]
+            team = _team(owner)
+            jobs = [j for j in jobs if j.owner == team]
         return sorted(jobs, key=lambda j: j.created_at, reverse=True)
 
     def result_path(self, job_id: str, fmt: str) -> Path:

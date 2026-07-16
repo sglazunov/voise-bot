@@ -58,18 +58,30 @@ class TestRegistration:
         assert register(client, "carol").status_code == 200
         assert register(client, "carol").status_code == 400
 
-    def test_registration_closed_after_first_user(self, client, monkeypatch):
-        # First user is the admin (free). Afterwards registration needs a code.
-        assert register(client, "admin").status_code == 200
-        monkeypatch.delenv("VTX_REGISTRATION_CODE", raising=False)
-        monkeypatch.delenv("VTX_ALLOW_OPEN_REGISTRATION", raising=False)
-        assert register(client, "intruder").status_code == 400
+    def test_register_without_code_creates_own_team_admin(self, client):
+        # No invite code -> you're the admin of your OWN team (own workspace).
+        assert register(client, "alice").status_code == 200
+        assert security.is_admin("alice") is True
+        assert security.team_of("alice") == "alice"
+        assert security.invite_code_of("alice")             # admins get a code
 
-    def test_registration_code_required_and_checked(self, client, monkeypatch):
-        assert register(client, "admin").status_code == 200
-        monkeypatch.setenv("VTX_REGISTRATION_CODE", "let-me-in")
-        assert register(client, "guest", code="wrong").status_code == 400
-        assert register(client, "guest", code="let-me-in").status_code == 200
+    def test_register_with_valid_code_joins_that_team(self, client):
+        register(client, "admin")
+        code = security.invite_code_of("admin")
+        from starlette.testclient import TestClient
+        from app.main import app
+        member = TestClient(app)
+        assert register(member, "member", phone="+79995556677", code=code).status_code == 200
+        assert security.is_admin("member") is False         # a member, not an admin
+        assert security.team_of("member") == "admin"        # joined admin's team
+        assert security.invite_code_of("member") is None    # members have no code
+
+    def test_register_with_bad_code_rejected(self, client):
+        register(client, "admin")
+        from starlette.testclient import TestClient
+        from app.main import app
+        c2 = TestClient(app)
+        assert register(c2, "bob", phone="+79995556677", code="deadbeef").status_code == 400
 
 
 class TestLogin:
@@ -169,6 +181,46 @@ class TestIsolation:
         assert all(j["id"] != job.id for j in bob.get("/api/jobs").json())
         assert bob.get(f"/api/jobs/{job.id}").status_code == 404
         assert bob.get(f"/api/jobs/{job.id}/result").status_code == 404
+
+
+# --------------------------------------------------------------------------- #
+# D2. Teams — a member who joined by code shares the admin's workspace
+# --------------------------------------------------------------------------- #
+class TestTeams:
+    def _member_client(self, admin_username):
+        from starlette.testclient import TestClient
+        from app.main import app
+        code = security.invite_code_of(admin_username)
+        c = TestClient(app)
+        assert register(c, "member", phone="+79995556677", code=code).status_code == 200
+        return c
+
+    def test_member_sees_admins_secrets_and_settings(self, client):
+        register(client, "admin")
+        # admin configures a secret token
+        client.post("/api/automation/settings", json={"weeek_token": "TEAM-TOKEN", "poll_interval_sec": 77})
+        member = self._member_client("admin")
+        got = member.get("/api/automation/settings").json()
+        assert got["weeek_token"] is True          # present (redacted) for the member too
+        assert got["poll_interval_sec"] == 77
+        # and decrypted server-side it's the SAME token the admin set
+        from app.automation import settings as s
+        assert s.load("member")["weeek_token"] == "TEAM-TOKEN"
+
+    def test_member_shares_admins_llm_keys(self, client):
+        register(client, "admin")
+        from app import user_creds
+        user_creds.add("admin", "groq", "SHARED-KEY")
+        member = self._member_client("admin")
+        keys = user_creds.load("member").get("groq", [])
+        assert [e["key"] for e in keys] == ["SHARED-KEY"]
+
+    def test_admin_with_members_cannot_delete_account(self, client):
+        register(client, "admin")
+        self._member_client("admin")
+        r = client.post("/api/profile/delete", json={"password": "password123"})
+        assert r.status_code == 400            # blocked: team has members
+        assert security.user_exists("admin")
 
 
 # --------------------------------------------------------------------------- #
