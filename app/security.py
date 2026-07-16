@@ -44,7 +44,7 @@ _KEY_FILE = config.DATA_DIR / "secret.key"
 _LOCK = threading.RLock()
 
 PBKDF2_ITERS = 200_000
-MIN_PASSWORD_LEN = 8
+MIN_PASSWORD_LEN = 6
 _USERNAME_RE = re.compile(r"^[a-z0-9][a-z0-9_.\-]{2,31}$")
 SESSION_TTL = int(os.getenv("VTX_SESSION_TTL_HOURS", "168")) * 3600  # default 7 days
 SESSION_COOKIE = "vtx_session"
@@ -630,11 +630,34 @@ def destroy_user_sessions(username: str) -> None:
 
 
 def is_admin(username: str | None) -> bool:
-    """Whether this login is the administrator (the first registered user)."""
+    """Whether this login is a TEAM admin (owns its workspace). NOTE: with the
+    multi-tenant model almost everyone is a team admin, so this must NOT gate
+    server-wide operations — use is_super_admin for those."""
     if not username:
         return False
     rec = _load_users().get(normalize_username(username))
     return bool(rec and rec.get("is_admin"))
+
+
+def is_super_admin(username: str | None) -> bool:
+    """The SERVER founder — the earliest-registered account. Only they may run
+    GLOBAL server operations (package installs, server-wide HF token) that affect
+    every team on the shared host. Distinct from a team admin. The founder is
+    marked with a persistent `is_super` flag, back-filled once for legacy data."""
+    if not username:
+        return False
+    username = normalize_username(username)
+    with _LOCK:
+        users = _load_users()
+        if not users:
+            return False
+        supers = [u for u, r in users.items() if r.get("is_super")]
+        if not supers:  # back-fill: the earliest account is the founder
+            founder = min(users, key=lambda u: users[u].get("created_at") or 0)
+            users[founder]["is_super"] = True
+            _save_users(users)
+            supers = [founder]
+        return username in supers
 
 
 def _prune(sessions: dict) -> None:

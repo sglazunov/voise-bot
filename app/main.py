@@ -96,6 +96,7 @@ def _register_spa() -> None:
     index = SPA_DIR / "index.html"
     if not index.exists():
         return
+    spa_root = SPA_DIR.resolve()
 
     @app.get("/", include_in_schema=False)
     @app.get("/{full_path:path}", include_in_schema=False)
@@ -103,10 +104,14 @@ def _register_spa() -> None:
         # Unknown API paths must 404, not return the HTML shell.
         if full_path.startswith("api/"):
             raise HTTPException(404, "Not found")
-        # Real files (favicon, etc.) win; everything else is the SPA shell.
-        target = SPA_DIR / full_path
-        if full_path and target.is_file():
-            return FileResponse(target)
+        # Real files (favicon, etc.) win — but ONLY inside the built SPA dir.
+        # Resolve and confirm containment so "../../data/secret.key" can't escape
+        # (path-traversal guard: without it any logged-in user could read
+        # arbitrary server files, e.g. the master key or users.json).
+        if full_path:
+            target = (spa_root / full_path).resolve()
+            if target.is_file() and target.is_relative_to(spa_root):
+                return FileResponse(target)
         return FileResponse(index)
 
 
@@ -157,13 +162,14 @@ def _client_ip(request: Request) -> str:
 
 def require_admin(request: Request) -> str:
     """Dependency for endpoints that change GLOBAL server state (installs,
-    server-wide tokens): only the administrator (first user) may call them."""
+    server-wide tokens): only the SERVER FOUNDER may call them. A team admin
+    (is_admin) only owns their own workspace and must NOT touch shared infra."""
     user = getattr(request.state, "user", None)
     if not user:
         raise HTTPException(401, "Требуется вход.")
-    if not security.is_admin(user):
-        raise HTTPException(403, "Только администратор (первый пользователь) "
-                                 "может менять серверные настройки.")
+    if not security.is_super_admin(user):
+        raise HTTPException(403, "Только администратор сервера (первый "
+                                 "зарегистрированный) может менять серверные настройки.")
     return user
 
 

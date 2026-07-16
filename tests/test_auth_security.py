@@ -222,6 +222,20 @@ class TestTeams:
         assert r.status_code == 400            # blocked: team has members
         assert security.user_exists("admin")
 
+    def test_only_founder_is_super_admin(self, client):
+        # First user = server founder (super admin). A separate team admin is NOT.
+        register(client, "founder")
+        assert security.is_super_admin("founder") is True
+        from starlette.testclient import TestClient
+        from app.main import app
+        other = TestClient(app)
+        register(other, "other", phone="+79995556677")     # own team, is_admin=True
+        assert security.is_admin("other") is True
+        assert security.is_super_admin("other") is False    # but NOT server admin
+        # server-infra endpoints reject the non-founder team admin (403 before
+        # the handler runs — nothing is installed)
+        assert other.post("/api/setup/deps/ffmpeg/install").status_code == 403
+
 
 # --------------------------------------------------------------------------- #
 # E. Crypto primitives (unit level)
