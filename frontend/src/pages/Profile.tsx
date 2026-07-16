@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { UserCircle, Phone, KeyRound, ShieldCheck, Trash2, AlertTriangle, Users, Copy, Check, UserMinus, User, ChevronDown } from "lucide-react";
 import { Page } from "../components/Layout";
 import { Card, Modal, useToast } from "../components/ui";
@@ -12,6 +12,20 @@ export default function Profile() {
   const [delOpen, setDelOpen] = useState(false); const [delPwd, setDelPwd] = useState(""); const [deleting, setDeleting] = useState(false);
   const [copied, setCopied] = useState(false);
   const [membersOpen, setMembersOpen] = useState(false);
+  const membersRef = useRef<HTMLDivElement>(null);
+
+  // The members list is a floating panel (like the app's other dropdowns), so
+  // opening it never reflows the cards below. Close on outside click / Esc.
+  useEffect(() => {
+    if (!membersOpen) return;
+    const onDoc = (e: MouseEvent) => {
+      if (membersRef.current && !membersRef.current.contains(e.target as Node)) setMembersOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setMembersOpen(false); };
+    document.addEventListener("mousedown", onDoc);
+    document.addEventListener("keydown", onKey);
+    return () => { document.removeEventListener("mousedown", onDoc); document.removeEventListener("keydown", onKey); };
+  }, [membersOpen]);
   const toast = useToast();
 
   async function copyCode() {
@@ -108,7 +122,7 @@ export default function Profile() {
                 По одному коду может войти сколько угодно людей.
               </div>
 
-              <div className="mt-4">
+              <div className="mt-4 relative" ref={membersRef}>
                 <label className="lbl">Участники рабочего пространства</label>
                 <button type="button" onClick={() => setMembersOpen((o) => !o)}
                   className="field flex items-center justify-between gap-2 text-left"
@@ -122,7 +136,9 @@ export default function Profile() {
                     style={{ flex: "0 0 auto", transition: ".18s", transform: membersOpen ? "rotate(180deg)" : "none" }} />
                 </button>
                 {membersOpen && (
-                  <div className="mt-1.5 space-y-1.5" style={{ maxHeight: 260, overflowY: "auto" }}>
+                  // Floats over the content below — opening it must not reflow the page.
+                  <div className="glass absolute top-full left-0 right-0 mt-1.5 p-1.5 z-50 space-y-1.5"
+                    style={{ maxHeight: 260, overflowY: "auto", borderRadius: 14 }}>
                     {(info?.team_members || []).map((m: any) => (
                       <div key={m.username} className="glass2 rounded-xl px-3 py-2 flex items-center gap-2">
                         <User size={14} color="var(--muted)" className="flex-none" />
