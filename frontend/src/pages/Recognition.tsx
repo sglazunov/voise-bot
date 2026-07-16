@@ -13,6 +13,12 @@ const MODELS = [
   { v: "medium", l: "medium — баланс" }, { v: "large-v3-turbo", l: "large-v3-turbo" },
   { v: "large-v3", l: "large-v3 — точнее всего" },
 ];
+// Transcript download formats (backend: /api/jobs/{id}/result?format=…)
+const TRANSCRIPT_FORMATS = [
+  { value: "txt", label: "TXT" },
+  { value: "srt", label: "SRT" },
+  { value: "json", label: "JSON" },
+];
 const RU_STATUS: Record<string, string> = {
   queued: "в очереди", running: "распознаётся", paused: "пауза", analyzing: "формируется протокол",
   done: "готово", error: "ошибка", cancelled: "отменено",
@@ -79,6 +85,7 @@ export default function Recognition() {
   const [live, setLive] = useState<any>(null);   // live stage from /partial
   const [transcript, setTranscript] = useState<string>("");
   const [tab, setTab] = useState<"protocol" | "transcript">("protocol");
+  const [fmt, setFmt] = useState("txt");   // transcript download format
   const [busy, setBusy] = useState(false);
   const [prog, setProg] = useState(0);
   const [engines, setEngines] = useState<{ value: string; label: string }[]>([]);
@@ -282,7 +289,11 @@ export default function Recognition() {
                     <a className="btn btn-ghost" href={`/api/jobs/${detail.id}/result?format=docx`}><Download size={14} /> Word</a>
                   ) : null}
                   {(detail.status === "done" || detail.status === "cancelled") && (
-                    <a className="btn btn-ghost" href={`/api/jobs/${detail.id}/result?format=srt`}><Download size={14} /> SRT</a>
+                    <>
+                      <Select className="w-[104px]" value={fmt} onChange={setFmt} options={TRANSCRIPT_FORMATS} />
+                      <a className="btn btn-ghost" href={`/api/jobs/${detail.id}/result?format=${fmt}`}>
+                        <Download size={14} /> Скачать</a>
+                    </>
                   )}
                   {detail.status === "error" && <button className="btn btn-ghost" onClick={() => retry(detail.id)}><RotateCcw size={14} /> Повторить</button>}
                   {detail.status === "done" && <button className="btn btn-ghost" onClick={() => reanalyze(detail.id)}><Sparkles size={14} /> Пересобрать</button>}
