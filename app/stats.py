@@ -1,0 +1,142 @@
+"""Business metrics for the Overview page.
+
+Job rows are purged by retention (VTX_RETENTION_HOURS, 24h by default), so the
+numbers that matter for the business — how many meetings ran, how many hours,
+how many tasks/decisions the AI captured — are recorded HERE once, when a job
+finishes, and survive that cleanup. One row per finished meeting, per team.
+
+Everything reported is measured. The single estimate (time saved on writing
+minutes) is derived with an explicit, stated coefficient — never presented as a
+measurement.
+"""
+from __future__ import annotations
+
+import json
+import time
+from typing import Any
+
+from . import config, db, security
+
+# How long writing minutes by hand takes, as a share of the meeting itself
+# (listening back + typing). Deliberately conservative; shown in the UI as an
+# estimate with the assumption spelled out.
+MANUAL_MINUTES_COEFF = float(__import__("os").getenv("VTX_MINUTES_COEFF", "0.5"))
+_MAX_ROWS = 5000     # file backend: keep the log bounded
+
+
+def _path(team: str):
+    return security.user_dir(team) / "meeting_stats.json"
+
+
+def _file_load(team: str) -> list[dict]:
+    try:
+        return json.loads(_path(team).read_text(encoding="utf-8")) or []
+    except (OSError, ValueError):
+        return []
+
+
+def _file_save(team: str, rows: list[dict]) -> None:
+    p = _path(team)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(".tmp")
+    tmp.write_text(json.dumps(rows[-_MAX_ROWS:], ensure_ascii=False), encoding="utf-8")
+    tmp.replace(p)
+
+
+def record(job: Any) -> None:
+    """Store one finished job's outcome. Best-effort: never breaks the pipeline."""
+    try:
+        team = security.team_of(getattr(job, "owner", "") or "")
+        if not team:
+            return
+        a = getattr(job, "analysis", None) or {}
+        row = {
+            "id": job.id,
+            "team": team,
+            "at": getattr(job, "finished_at", None) or time.time(),
+            "title": (getattr(job, "filename", "") or "")[:200],
+            "duration_sec": float(getattr(job, "duration", 0) or 0),
+            "speakers": int(getattr(job, "speakers", 0) or 0),
+            "tasks": len(a.get("tasks") or []) + len(a.get("minor_tasks") or []),
+            "decisions": len(a.get("decisions") or []),
+            "participants": len(a.get("participants") or []),
+            "has_protocol": bool(a),
+            "ok": getattr(job, "status", "") != "error",
+        }
+        if db.enabled():
+            db.stats_add(row)
+        else:
+            rows = [r for r in _file_load(team) if r.get("id") != row["id"]]
+            rows.append(row)
+            _file_save(team, rows)
+    except Exception:
+        pass
+
+
+def summary(user: str, days: int = 30) -> dict:
+    """Aggregate the team's metrics over the last `days`."""
+    team = security.team_of(user)
+    since = time.time() - max(1, int(days)) * 86400
+    if db.enabled():
+        rows = db.stats_load(team, since)
+    else:
+        rows = [r for r in _file_load(team) if (r.get("at") or 0) >= since]
+
+    ok = [r for r in rows if r.get("ok")]
+    secs = sum(float(r.get("duration_sec") or 0) for r in ok)
+    # Person-hours: how much of the org's combined time these meetings consumed.
+    person_secs = sum(float(r.get("duration_sec") or 0) * max(1, int(r.get("speakers") or 1))
+                      for r in ok)
+    tasks = sum(int(r.get("tasks") or 0) for r in ok)
+    decisions = sum(int(r.get("decisions") or 0) for r in ok)
+    protocols = sum(1 for r in ok if r.get("has_protocol"))
+    failed = sum(1 for r in rows if not r.get("ok"))
+
+    # Per-day counts for the trend bars (oldest -> newest).
+    by_day: dict[str, int] = {}
+    for i in range(int(days)):
+        d = time.strftime("%Y-%m-%d", time.localtime(time.time() - (days - 1 - i) * 86400))
+        by_day[d] = 0
+    for r in ok:
+        d = time.strftime("%Y-%m-%d", time.localtime(r.get("at") or 0))
+        if d in by_day:
+            by_day[d] += 1
+
+    # Which recurring meetings eat the most time (title -> count + hours).
+    agg: dict[str, dict] = {}
+    for r in ok:
+        key = _norm_title(r.get("title") or "—")
+        e = agg.setdefault(key, {"title": key, "count": 0, "hours": 0.0})
+        e["count"] += 1
+        e["hours"] += float(r.get("duration_sec") or 0) / 3600
+    top = sorted(agg.values(), key=lambda x: x["hours"], reverse=True)[:5]
+
+    return {
+        "days": int(days),
+        "meetings": len(ok),
+        "hours": round(secs / 3600, 1),
+        "person_hours": round(person_secs / 3600, 1),
+        "protocols": protocols,
+        "tasks": tasks,
+        "decisions": decisions,
+        "avg_minutes": round((secs / 60 / len(ok)) if ok else 0),
+        "failed": failed,
+        "reliability": round(100 * len(ok) / len(rows)) if rows else 100,
+        # ESTIMATE — see MANUAL_MINUTES_COEFF; the UI states the assumption.
+        "hours_saved": round(secs / 3600 * MANUAL_MINUTES_COEFF, 1),
+        "saved_coeff": MANUAL_MINUTES_COEFF,
+        "by_day": [{"date": d, "count": c} for d, c in by_day.items()],
+        "top": top,
+    }
+
+
+def _norm_title(t: str) -> str:
+    """Group recurring meetings: strip the date/time prefix the recorder adds."""
+    t = (t or "").strip()
+    # "16.07.2026, 14:35. - Операционная встреча.mp4" -> "Операционная встреча"
+    if " - " in t:
+        t = t.split(" - ", 1)[1]
+    for ext in (".mp4", ".mp3", ".wav", ".m4a", ".mkv", ".webm"):
+        if t.lower().endswith(ext):
+            t = t[: -len(ext)]
+    return t.strip(" .") or "—"

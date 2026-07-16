@@ -494,6 +494,12 @@ class JobStore:
                 if now - self._last_persist > 3:
                     self._save()
                     self._last_persist = now
+        # A finished job's outcome is recorded for the business metrics — job
+        # rows themselves are purged by retention. Upsert by id, so re-running
+        # (retry / reanalyze) just refreshes the row.
+        if kw.get("status") in (STATUS_DONE, STATUS_ERROR):
+            from . import stats
+            stats.record(job)
 
     def _worker_loop(self) -> None:
         while True:

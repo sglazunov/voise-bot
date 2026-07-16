@@ -177,6 +177,22 @@ CREATE TABLE IF NOT EXISTS meetings (
     saved_at     DOUBLE PRECISION,
     PRIMARY KEY (username, meeting_key)
 );
+-- One row per finished meeting/recording. Job rows are purged by retention
+-- (VTX_RETENTION_HOURS), so the business numbers are recorded here to survive it.
+CREATE TABLE IF NOT EXISTS meeting_stats (
+    id            TEXT PRIMARY KEY,      -- job id
+    team          TEXT NOT NULL,
+    at            DOUBLE PRECISION,      -- when it finished
+    title         TEXT,
+    duration_sec  DOUBLE PRECISION,
+    speakers      INTEGER,
+    tasks         INTEGER,
+    decisions     INTEGER,
+    participants  INTEGER,
+    has_protocol  BOOLEAN DEFAULT FALSE,
+    ok            BOOLEAN DEFAULT TRUE
+);
+CREATE INDEX IF NOT EXISTS idx_meeting_stats_team_at ON meeting_stats(team, at);
 CREATE TABLE IF NOT EXISTS ai_context (
     username     TEXT PRIMARY KEY,
     global_text  TEXT DEFAULT ''
@@ -457,3 +473,28 @@ def delete_user_data(user: str) -> None:
         for table in ("user_settings", "user_creds", "meetings",
                       "ai_context_projects", "ai_context"):
             cur.execute(f"DELETE FROM {table} WHERE username=%s", (user,))
+        cur.execute("DELETE FROM meeting_stats WHERE team=%s", (user,))
+
+
+# --------------------------------------------------------------------------- #
+# meeting_stats — outcome of each finished meeting (for the Overview metrics)
+# --------------------------------------------------------------------------- #
+_STAT_COLS = ["id", "team", "at", "title", "duration_sec", "speakers",
+              "tasks", "decisions", "participants", "has_protocol", "ok"]
+
+
+def stats_add(row: dict) -> None:
+    with _conn() as conn, _cur(conn) as cur:
+        cols = ", ".join(_STAT_COLS)
+        ph = ", ".join(["%s"] * len(_STAT_COLS))
+        upd = ", ".join(f"{c}=EXCLUDED.{c}" for c in _STAT_COLS if c != "id")
+        cur.execute(f"INSERT INTO meeting_stats ({cols}) VALUES ({ph}) "
+                    f"ON CONFLICT (id) DO UPDATE SET {upd}",
+                    [row.get(c) for c in _STAT_COLS])
+
+
+def stats_load(team: str, since: float) -> list[dict]:
+    with _conn() as conn, _cur(conn) as cur:
+        cur.execute(f"SELECT {', '.join(_STAT_COLS)} FROM meeting_stats "
+                    "WHERE team=%s AND at >= %s ORDER BY at", (team, since))
+        return [{c: r.get(c) for c in _STAT_COLS} for r in cur.fetchall()]

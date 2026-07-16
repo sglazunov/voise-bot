@@ -530,6 +530,13 @@ def list_jobs(user: str = Depends(current_user)):
     return [j.to_public() for j in store.list(owner=user)]
 
 
+@app.get("/api/stats")
+def team_stats(days: int = 30, user: str = Depends(current_user)):
+    """Business metrics for the Overview page, aggregated over the team."""
+    from . import stats
+    return stats.summary(user, days=max(1, min(int(days), 365)))
+
+
 # ---- LLM providers (protocol engine) --------------------------------------
 class ProviderKey(BaseModel):
     provider: str
