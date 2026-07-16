@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { UserCircle, Phone, KeyRound, ShieldCheck, Trash2, AlertTriangle, Users, Copy, Check, UserMinus, User } from "lucide-react";
+import { UserCircle, Phone, KeyRound, ShieldCheck, Trash2, AlertTriangle, Users, Copy, Check, UserMinus, User, ChevronDown } from "lucide-react";
 import { Page } from "../components/Layout";
 import { Card, Modal, useToast } from "../components/ui";
 import { api, logout } from "../lib/api";
@@ -11,6 +11,7 @@ export default function Profile() {
   const [oldPwd, setOldPwd] = useState(""); const [newPwd, setNewPwd] = useState("");
   const [delOpen, setDelOpen] = useState(false); const [delPwd, setDelPwd] = useState(""); const [deleting, setDeleting] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [membersOpen, setMembersOpen] = useState(false);
   const toast = useToast();
 
   async function copyCode() {
@@ -92,18 +93,33 @@ export default function Profile() {
               </div>
 
               <div className="mt-4">
-                <label className="lbl">Участники рабочего пространства ({info?.team_size ?? 1})</label>
-                {(info?.team_members || []).map((m: any) => (
-                  <div key={m.username} className="glass2 rounded-xl px-3 py-2 mb-1.5 flex items-center gap-2">
-                    <User size={14} color="var(--muted)" className="flex-none" />
-                    <span className="text-[13px] font-semibold truncate">{m.username}</span>
-                    {m.is_admin
-                      ? <span className="chip" style={{ color: "var(--accent)" }}>админ</span>
-                      : <button className="ml-auto btn btn-danger flex-none" onClick={() => kick(m.username)}
-                          title="Убрать из рабочего пространства">
-                          <UserMinus size={13} /> Исключить</button>}
+                <label className="lbl">Участники рабочего пространства</label>
+                <button type="button" onClick={() => setMembersOpen((o) => !o)}
+                  className="field flex items-center justify-between gap-2 text-left"
+                  style={{ cursor: "pointer", borderColor: membersOpen ? "var(--accent)" : undefined }}>
+                  <span className="flex items-center gap-2 min-w-0">
+                    <Users size={15} color="var(--muted)" className="flex-none" />
+                    <span className="truncate">Логины в команде</span>
+                    <span className="chip flex-none" style={{ color: "var(--accent)" }}>{info?.team_size ?? 1}</span>
+                  </span>
+                  <ChevronDown size={16} color="var(--muted)"
+                    style={{ flex: "0 0 auto", transition: ".18s", transform: membersOpen ? "rotate(180deg)" : "none" }} />
+                </button>
+                {membersOpen && (
+                  <div className="mt-1.5 space-y-1.5" style={{ maxHeight: 260, overflowY: "auto" }}>
+                    {(info?.team_members || []).map((m: any) => (
+                      <div key={m.username} className="glass2 rounded-xl px-3 py-2 flex items-center gap-2">
+                        <User size={14} color="var(--muted)" className="flex-none" />
+                        <span className="text-[13px] font-semibold truncate">{m.username}</span>
+                        {m.is_admin
+                          ? <span className="chip flex-none" style={{ color: "var(--accent)" }}>админ</span>
+                          : <button className="ml-auto btn btn-danger flex-none" onClick={() => kick(m.username)}
+                              title="Убрать из рабочего пространства">
+                              <UserMinus size={13} /> Исключить</button>}
+                      </div>
+                    ))}
                   </div>
-                ))}
+                )}
               </div>
             </>
           ) : (
