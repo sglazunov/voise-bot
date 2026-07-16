@@ -56,6 +56,9 @@ export default function Profile() {
   return (
     <Page title="Профиль" subtitle="Учётная запись, телефон восстановления и пароль">
       <div className="grid lg:grid-cols-2 gap-3.5 items-start">
+        {/* Left column packs on its own, so «Сменить телефон» sits right under the
+            account card instead of waiting out the tall Team card next to it. */}
+        <div className="flex flex-col gap-3.5">
         <Card>
           <div className="flex items-center gap-3">
             <div className="grid place-items-center rounded-2xl flex-none" style={{ width: 52, height: 52, background: "linear-gradient(135deg,var(--accent),var(--accent2))" }}>
@@ -71,6 +74,19 @@ export default function Profile() {
           </div>
         </Card>
 
+        <Card>
+          <div className="flex items-center gap-2 mb-3"><Phone size={17} color="var(--accent)" />
+            <div className="font-bold text-[15px]">Сменить телефон</div></div>
+          <label className="lbl">Новый телефон</label>
+          <input className="field" value={phone} onChange={(e) => setPhone(formatRuPhone(e.target.value))} placeholder="+7 900 000-00-00" />
+          <label className="lbl mt-3">Текущий пароль</label>
+          <input className="field" type="password" value={phonePwd} onChange={(e) => setPhonePwd(e.target.value)} />
+          <button className="btn btn-primary mt-3" onClick={savePhone}>Сохранить телефон</button>
+        </Card>
+        </div>
+
+        {/* Right column — team + password */}
+        <div className="flex flex-col gap-3.5">
         <Card>
           <div className="flex items-center gap-2 mb-3"><Users size={17} color="var(--accent)" />
             <div className="font-bold text-[15px]">Команда</div></div>
@@ -131,16 +147,6 @@ export default function Profile() {
         </Card>
 
         <Card>
-          <div className="flex items-center gap-2 mb-3"><Phone size={17} color="var(--accent)" />
-            <div className="font-bold text-[15px]">Сменить телефон</div></div>
-          <label className="lbl">Новый телефон</label>
-          <input className="field" value={phone} onChange={(e) => setPhone(formatRuPhone(e.target.value))} placeholder="+7 900 000-00-00" />
-          <label className="lbl mt-3">Текущий пароль</label>
-          <input className="field" type="password" value={phonePwd} onChange={(e) => setPhonePwd(e.target.value)} />
-          <button className="btn btn-primary mt-3" onClick={savePhone}>Сохранить телефон</button>
-        </Card>
-
-        <Card>
           <div className="flex items-center gap-2 mb-3"><KeyRound size={17} color="var(--accent)" />
             <div className="font-bold text-[15px]">Сменить пароль</div></div>
           <div className="grid md:grid-cols-2 gap-3">
@@ -151,9 +157,11 @@ export default function Profile() {
           </div>
           <button className="btn btn-primary mt-3" onClick={savePassword}>Изменить пароль</button>
         </Card>
+        </div>
+      </div>
 
-        {/* Danger zone — permanent account deletion */}
-        <Card className="lg:col-span-2" >
+      {/* Danger zone — permanent account deletion (full width, below both columns) */}
+      <Card className="mt-3.5">
           <div style={{ border: "1px solid rgba(248,113,113,.4)", borderRadius: 16, padding: 16, background: "rgba(248,113,113,.05)" }}>
             <div className="flex items-center gap-2 mb-1"><AlertTriangle size={17} color="#f87171" />
               <div className="font-bold text-[15px]" style={{ color: "#fca5a5" }}>Опасная зона</div></div>
@@ -165,7 +173,6 @@ export default function Profile() {
               <Trash2 size={14} /> Удалить аккаунт</button>
           </div>
         </Card>
-      </div>
 
       <Modal open={delOpen} onClose={() => !deleting && setDelOpen(false)}
         title={<span style={{ color: "#fca5a5" }}>Точно удалить аккаунт навсегда?</span>}>
