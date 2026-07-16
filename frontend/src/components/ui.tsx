@@ -1,5 +1,51 @@
-import { createContext, useCallback, useContext, useEffect, useRef, useState, ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useRef, useState, ReactNode, RefObject } from "react";
+import { createPortal } from "react-dom";
 import { ChevronDown, Check } from "lucide-react";
+
+/* ---- Popover (floating panel, rendered in a PORTAL) ----
+   Cards use backdrop-filter, which creates a stacking context: a z-indexed panel
+   inside a card is still painted UNDER the next card, and any overflow:auto
+   ancestor would clip it. So every popup renders into <body> with fixed
+   positioning — always above everything, never reflows the page. */
+export function Popover({ anchorRef, open, onClose, children, className = "" }: {
+  anchorRef: RefObject<HTMLElement | null>; open: boolean; onClose: () => void;
+  children: ReactNode; className?: string;
+}) {
+  const [rect, setRect] = useState<DOMRect | null>(null);
+  const panel = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const measure = () => { if (anchorRef.current) setRect(anchorRef.current.getBoundingClientRect()); };
+    measure();
+    const onDoc = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (anchorRef.current?.contains(t) || panel.current?.contains(t)) return;
+      onClose();
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("scroll", measure, true);   // reposition on any scroll
+    window.addEventListener("resize", measure);
+    document.addEventListener("mousedown", onDoc);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("scroll", measure, true);
+      window.removeEventListener("resize", measure);
+      document.removeEventListener("mousedown", onDoc);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open, onClose, anchorRef]);
+
+  if (!open || !rect) return null;
+  // Always opens downward; cap the height to the space left so it can't run off.
+  const maxH = Math.max(150, Math.min(300, window.innerHeight - rect.bottom - 16));
+  return createPortal(
+    <div ref={panel} className={`glass p-1.5 ${className}`}
+      style={{ position: "fixed", top: rect.bottom + 6, left: rect.left, width: rect.width,
+        zIndex: 1000, maxHeight: maxH, overflowY: "auto", borderRadius: 14 }}>
+      {children}
+    </div>, document.body);
+}
 
 /* ---- Switch (rounded pill toggle) ---- */
 export function Switch({ on, onChange, size = "md" }: { on: boolean; onChange: () => void; size?: "sm" | "md" }) {
@@ -30,8 +76,10 @@ export function Modal({ open, onClose, title, children }:
     return () => document.removeEventListener("keydown", onKey);
   }, [open, onClose]);
   if (!open) return null;
-  return (
-    <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 200,
+  // Portal to <body>: cards create stacking contexts (backdrop-filter), so a
+  // modal rendered inside one could be painted under later siblings.
+  return createPortal(
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 2000,
       background: "rgba(4,12,16,.62)", backdropFilter: "blur(2px)",
       display: "grid", placeItems: "center", padding: 16 }}>
       <div onClick={(e) => e.stopPropagation()} className="glass"
@@ -39,8 +87,7 @@ export function Modal({ open, onClose, title, children }:
         {title && <div className="font-bold text-[16px] mb-2">{title}</div>}
         {children}
       </div>
-    </div>
-  );
+    </div>, document.body);
 }
 
 /* ---- Select (themed dropdown; replaces native <select> app-wide) ----
@@ -55,19 +102,11 @@ export function Select({ value, onChange, options, placeholder = "—", classNam
   { value: string; onChange: (v: string) => void; options: SelItem[]; placeholder?: string; className?: string }) {
   const [open, setOpen] = useState(false);
   const wrap = useRef<HTMLDivElement>(null);
+  const close = useCallback(() => setOpen(false), []);
 
   const flat: SelOpt[] = [];
   options.forEach((i) => (isGroup(i) ? flat.push(...i.options) : flat.push(i)));
   const current = flat.find((o) => o.value === value);
-
-  useEffect(() => {
-    if (!open) return;
-    const onDoc = (e: MouseEvent) => { if (wrap.current && !wrap.current.contains(e.target as Node)) setOpen(false); };
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false); };
-    document.addEventListener("mousedown", onDoc);
-    document.addEventListener("keydown", onKey);
-    return () => { document.removeEventListener("mousedown", onDoc); document.removeEventListener("keydown", onKey); };
-  }, [open]);
 
   const Row = (o: SelOpt) => {
     const sel = o.value === value;
@@ -93,17 +132,14 @@ export function Select({ value, onChange, options, placeholder = "—", classNam
         <ChevronDown size={16} color="var(--muted)"
           style={{ flex: "0 0 auto", transition: ".18s", transform: open ? "rotate(180deg)" : "none" }} />
       </button>
-      {open && (
-        <div className="glass absolute top-full left-0 right-0 mt-1.5 p-1.5 z-50"
-          style={{ maxHeight: 288, overflowY: "auto", borderRadius: 14 }}>
-          {options.map((i, idx) => isGroup(i) ? (
-            <div key={idx}>
-              <div className="px-2.5 pt-2 pb-1 text-[11px] font-bold uppercase tracking-wide" style={{ color: "var(--muted)" }}>{i.label}</div>
-              {i.options.map(Row)}
-            </div>
-          ) : Row(i))}
-        </div>
-      )}
+      <Popover anchorRef={wrap} open={open} onClose={close}>
+        {options.map((i, idx) => isGroup(i) ? (
+          <div key={idx}>
+            <div className="px-2.5 pt-2 pb-1 text-[11px] font-bold uppercase tracking-wide" style={{ color: "var(--muted)" }}>{i.label}</div>
+            {i.options.map(Row)}
+          </div>
+        ) : Row(i))}
+      </Popover>
     </div>
   );
 }

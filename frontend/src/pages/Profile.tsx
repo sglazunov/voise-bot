@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { UserCircle, Phone, KeyRound, ShieldCheck, Trash2, AlertTriangle, Users, Copy, Check, UserMinus, User, ChevronDown } from "lucide-react";
 import { Page } from "../components/Layout";
-import { Card, Modal, useToast } from "../components/ui";
+import { Card, Modal, Popover, useToast } from "../components/ui";
 import { api, logout } from "../lib/api";
 import { formatRuPhone } from "../lib/phone";
 
@@ -12,20 +12,7 @@ export default function Profile() {
   const [delOpen, setDelOpen] = useState(false); const [delPwd, setDelPwd] = useState(""); const [deleting, setDeleting] = useState(false);
   const [copied, setCopied] = useState(false);
   const [membersOpen, setMembersOpen] = useState(false);
-  const membersRef = useRef<HTMLDivElement>(null);
-
-  // The members list is a floating panel (like the app's other dropdowns), so
-  // opening it never reflows the cards below. Close on outside click / Esc.
-  useEffect(() => {
-    if (!membersOpen) return;
-    const onDoc = (e: MouseEvent) => {
-      if (membersRef.current && !membersRef.current.contains(e.target as Node)) setMembersOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setMembersOpen(false); };
-    document.addEventListener("mousedown", onDoc);
-    document.addEventListener("keydown", onKey);
-    return () => { document.removeEventListener("mousedown", onDoc); document.removeEventListener("keydown", onKey); };
-  }, [membersOpen]);
+  const membersRef = useRef<HTMLDivElement>(null);   // anchor for the members Popover
   const toast = useToast();
 
   async function copyCode() {
@@ -135,23 +122,20 @@ export default function Profile() {
                   <ChevronDown size={16} color="var(--muted)"
                     style={{ flex: "0 0 auto", transition: ".18s", transform: membersOpen ? "rotate(180deg)" : "none" }} />
                 </button>
-                {membersOpen && (
-                  // Floats over the content below — opening it must not reflow the page.
-                  <div className="glass absolute top-full left-0 right-0 mt-1.5 p-1.5 z-50 space-y-1.5"
-                    style={{ maxHeight: 260, overflowY: "auto", borderRadius: 14 }}>
-                    {(info?.team_members || []).map((m: any) => (
-                      <div key={m.username} className="glass2 rounded-xl px-3 py-2 flex items-center gap-2">
-                        <User size={14} color="var(--muted)" className="flex-none" />
-                        <span className="text-[13px] font-semibold truncate">{m.username}</span>
-                        {m.is_admin
-                          ? <span className="chip flex-none" style={{ color: "var(--accent)" }}>админ</span>
-                          : <button className="ml-auto btn btn-danger flex-none" onClick={() => kick(m.username)}
-                              title="Убрать из рабочего пространства">
-                              <UserMinus size={13} /> Исключить</button>}
-                      </div>
-                    ))}
-                  </div>
-                )}
+                <Popover anchorRef={membersRef} open={membersOpen}
+                  onClose={() => setMembersOpen(false)} className="space-y-1.5">
+                  {(info?.team_members || []).map((m: any) => (
+                    <div key={m.username} className="glass2 rounded-xl px-3 py-2 flex items-center gap-2">
+                      <User size={14} color="var(--muted)" className="flex-none" />
+                      <span className="text-[13px] font-semibold truncate">{m.username}</span>
+                      {m.is_admin
+                        ? <span className="chip flex-none" style={{ color: "var(--accent)" }}>админ</span>
+                        : <button className="ml-auto btn btn-danger flex-none" onClick={() => kick(m.username)}
+                            title="Убрать из рабочего пространства">
+                            <UserMinus size={13} /> Исключить</button>}
+                    </div>
+                  ))}
+                </Popover>
               </div>
             </>
           ) : (
