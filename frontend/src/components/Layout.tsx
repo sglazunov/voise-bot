@@ -6,6 +6,7 @@ import {
 } from "lucide-react";
 import { useTheme } from "../lib/theme";
 import { api, logout } from "../lib/api";
+import { confirmLeave } from "../lib/unsaved";
 import { Switch } from "./ui";
 
 const nav = [
@@ -26,6 +27,8 @@ const tools = [
 function NavItem({ to, icon: Icon, label, end }: any) {
   return (
     <NavLink to={to} end={end}
+      // Don't silently drop unsaved edits (e.g. the AI-context page).
+      onClick={(e) => { if (!confirmLeave()) e.preventDefault(); }}
       className={({ isActive }) =>
         "flex items-center gap-3 rounded-xl px-3 py-2.5 text-[13.5px] font-semibold transition " +
         (isActive ? "text-[color:var(--accent-ink)]" : "text-[color:var(--muted)] hover:text-[color:var(--txt)]")}

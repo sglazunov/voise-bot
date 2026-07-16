@@ -1,21 +1,41 @@
 import { useEffect, useState } from "react";
-import { Brain, Plus, Trash2, Save, Globe, FolderKanban } from "lucide-react";
+import { Brain, Plus, Trash2, Save, Globe, FolderKanban, AlertTriangle } from "lucide-react";
 import { Page } from "../components/Layout";
 import { Card, useToast } from "../components/ui";
 import { api } from "../lib/api";
+import { setUnsaved } from "../lib/unsaved";
 
 type Project = { name: string; text: string };
+const snap = (glob: string, projects: Project[]) => JSON.stringify({ glob, projects });
 
 export default function Context() {
   const [glob, setGlob] = useState("");
   const [projects, setProjects] = useState<Project[]>([]);
   const [saving, setSaving] = useState(false);
+  // Snapshot of the last saved state — anything different means unsaved edits.
+  const [savedSnap, setSavedSnap] = useState<string | null>(null);
   const toast = useToast();
 
   const load = () => api.get("/api/context").then((d) => {
-    setGlob(d.global || ""); setProjects(d.projects || []);
+    const g = d.global || "", p = d.projects || [];
+    setGlob(g); setProjects(p); setSavedSnap(snap(g, p));
   }).catch(() => {});
   useEffect(() => { load(); }, []);
+
+  const dirty = savedSnap !== null && snap(glob, projects) !== savedSnap;
+
+  // Tell the sidebar guard, and warn on tab close/reload too.
+  useEffect(() => {
+    setUnsaved(dirty, "Контекст не сохранён. Уверены, что хотите покинуть страницу? "
+      + "Введённые изменения будут потеряны.");
+  }, [dirty]);
+  useEffect(() => () => setUnsaved(false), []);   // leaving the page clears it
+  useEffect(() => {
+    if (!dirty) return;
+    const h = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = ""; };
+    window.addEventListener("beforeunload", h);
+    return () => window.removeEventListener("beforeunload", h);
+  }, [dirty]);
 
   const setP = (i: number, k: keyof Project, v: string) =>
     setProjects((ps) => ps.map((p, j) => (j === i ? { ...p, [k]: v } : p)));
@@ -27,14 +47,24 @@ export default function Context() {
     try {
       const clean = projects.filter((p) => p.name.trim());
       const d = await api.post("/api/context", { global: glob, projects: clean });
-      setGlob(d.global || ""); setProjects(d.projects || []);
+      const g = d.global || "", p = d.projects || [];
+      setGlob(g); setProjects(p); setSavedSnap(snap(g, p));   // now clean again
       toast("Контекст сохранён");
     } catch (e: any) { toast(e.message, true); } finally { setSaving(false); }
   }
 
   return (
     <Page title="Контекст для ИИ" subtitle="Постоянные знания, чтобы протокол не путал роли, названия и суть проектов"
-      actions={<button className="btn btn-primary" onClick={onSave} disabled={saving}><Save size={15} /> Сохранить</button>}>
+      actions={<>
+        {dirty && (
+          <span className="chip" style={{ color: "var(--warn)", background: "rgba(251,191,36,.14)" }}>
+            <AlertTriangle size={12} /> не сохранено</span>
+        )}
+        {/* stays enabled if the initial load failed (savedSnap === null) */}
+        <button className="btn btn-primary" onClick={onSave}
+          disabled={saving || (savedSnap !== null && !dirty)}>
+          <Save size={15} /> {saving ? "Сохраняю…" : "Сохранить"}</button>
+      </>}>
       <Card className="mb-3.5">
         <div className="flex items-start gap-3">
           <div className="grid place-items-center rounded-xl flex-none" style={{ width: 40, height: 40, background: "rgba(45,212,191,.13)" }}>
