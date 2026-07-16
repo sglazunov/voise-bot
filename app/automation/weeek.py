@@ -119,14 +119,15 @@ def list_tasks(token: str, project_id: Any = None,
                extra_params: dict | None = None, max_tasks: int = 500) -> list[dict]:
     """Return raw task dicts. `project_id` narrows to one project if given.
 
-    Weeek caps a page at 100 tasks and signals more with `hasMore`, so we
-    paginate by `offset` (up to `max_tasks`). Without this, meetings past the
-    first 100 — e.g. an older task that was RESCHEDULED into the future — were
-    never fetched and so never appeared in the app."""
+    Weeek caps a page at 100 tasks, so we paginate by `offset` (up to
+    `max_tasks`) — otherwise meetings past the first 100 (e.g. an older task
+    RESCHEDULED into the future) are never fetched. The pages are fetched
+    CONCURRENTLY: sequentially, 5 pages of a ~3 s API took ~15 s (and made the
+    «Обновить» button feel dead); in parallel it's ~one round-trip."""
     per = 100
-    collected: list[dict] = []
-    offset = 0
-    while len(collected) < max_tasks:
+    n_pages = max(1, (int(max_tasks) + per - 1) // per)
+
+    def fetch(offset: int) -> list[dict]:
         params: dict = {"perPage": per, "offset": offset}
         if project_id is not None:
             params["projectId"] = project_id
@@ -134,16 +135,20 @@ def list_tasks(token: str, project_id: Any = None,
             params.update(extra_params)
         out = _request("GET", "/tm/tasks", token, params=params)
         if isinstance(out, dict):
-            tasks = out.get("tasks") or []
-            has_more = bool(out.get("hasMore"))
-        elif isinstance(out, list):
-            tasks, has_more = out, len(out) >= per
-        else:
-            tasks, has_more = [], False
-        collected.extend(tasks)
-        if not has_more or len(tasks) < per:
+            return out.get("tasks") or []
+        return out if isinstance(out, list) else []
+
+    if n_pages == 1:
+        return fetch(0)
+    from concurrent.futures import ThreadPoolExecutor
+    offsets = [i * per for i in range(n_pages)]
+    with ThreadPoolExecutor(max_workers=min(n_pages, 6)) as ex:
+        pages = list(ex.map(fetch, offsets))
+    collected: list[dict] = []
+    for pg in pages:                 # keep order; stop at the first short page
+        collected.extend(pg)
+        if len(pg) < per:
             break
-        offset += per
     return collected
 
 

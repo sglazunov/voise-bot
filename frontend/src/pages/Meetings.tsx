@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Video, RefreshCw, Square, Clock, Tag } from "lucide-react";
+import { Video, RefreshCw, Square, Clock, Tag, Loader2 } from "lucide-react";
 import { Page } from "../components/Layout";
 import { Switch, StatusBadge, useToast } from "../components/ui";
 import { api } from "../lib/api";
@@ -20,9 +20,13 @@ export default function Meetings() {
   const load = () => api.get("/api/automation/scheduler/status").then(setS).catch(() => {});
   useEffect(() => { load(); const t = setInterval(load, 4000); return () => clearInterval(t); }, []);
 
+  const [polling, setPolling] = useState(false);
   async function pollNow() {
-    try { const r = await api.post("/api/automation/scheduler/poll-now"); toast(r.detail || "Обновлено из Weeek"); load(); }
+    if (polling) return;
+    setPolling(true);
+    try { const r = await api.post("/api/automation/scheduler/poll-now"); toast(r.detail || "Обновлено из Weeek"); await load(); }
     catch (e: any) { toast(e.message, true); }
+    finally { setPolling(false); }
   }
   async function setDecision(m: Meeting, record: boolean) {
     try { await api.post(`/api/automation/meetings/${encodeURIComponent(String(m.task_id))}/decision`, { record }); load(); }
@@ -44,7 +48,9 @@ export default function Meetings() {
 
   return (
     <Page title="Встречи" subtitle="Ближайшие и прошедшие встречи с их статусами записи" onRefresh={load}
-      actions={<button className="btn btn-ghost" onClick={pollNow}><RefreshCw size={15} /> Обновить из Weeek</button>}>
+      actions={<button className="btn btn-ghost" onClick={pollNow} disabled={polling}>
+        {polling ? <Loader2 size={15} className="animate-spin" /> : <RefreshCw size={15} />}
+        {polling ? "Обновляю…" : "Обновить из Weeek"}</button>}>
       <div className="glass p-2.5 flex items-center gap-2 mb-3.5 flex-wrap">
         {FILTERS.map((f) => (
           <button key={f.id} onClick={() => setFilter(f.id)}
