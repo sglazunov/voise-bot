@@ -105,7 +105,10 @@ export function Layout() {
 
   return (
     <AutoCtx.Provider value={{ enabled, toggle: toggleAuto }}>
-      <div className="flex min-h-screen">
+      {/* overflow-x:clip is the backstop: a stray wide element must never scroll the
+          shell sideways, which would slide the sticky header off the right edge.
+          `clip` (unlike `hidden`) makes no scroll container, so sticky still works. */}
+      <div className="flex min-h-screen w-full" style={{ overflowX: "clip" }}>
         {/* ---- Desktop sidebar ---- */}
         <aside className="hidden lg:flex w-[248px] flex-none self-start sticky top-0 h-screen overflow-y-auto flex-col gap-1 p-3.5"
           style={{ background: "var(--side)", borderRight: "1px solid var(--line)",

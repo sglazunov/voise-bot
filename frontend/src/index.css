@@ -25,6 +25,12 @@
 
 * { box-sizing: border-box; }
 html, body, #root { height: 100%; }
+
+/* A grid track sized `auto` takes its minimum from the item's min-content, and
+   `truncate` reports the WHOLE string as min-content (it sets white-space:nowrap).
+   Without this, one long meeting title widens the track past the phone viewport
+   and the whole page scrolls sideways. */
+:where(.grid) > * { min-width: 0; }
 body {
   margin: 0; color: var(--txt);
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;

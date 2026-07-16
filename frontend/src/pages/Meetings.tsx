@@ -77,7 +77,9 @@ export default function Meetings() {
                 <div className="font-bold text-[14px] truncate">{m.title}</div>
                 <div className="flex items-center gap-2 text-[11.5px] mt-1 flex-wrap" style={{ color: "var(--muted)" }}>
                   <span className="flex items-center gap-1"><Clock size={12} /> {fmtDateTime(m.start)}</span>
-                  {m.detail && <span className="glass2 rounded-full px-2 py-0.5">{m.detail}</span>}
+                  {/* the detail line runs long ("…распознавание+протокол — job 6ca…"),
+                      so a pill shape only looks right when it stays short */}
+                  {m.detail && <span className="glass2 rounded-lg px-2 py-0.5 line-clamp-2 min-w-0">{m.detail}</span>}
                 </div>
               </div>
               <div className="flex-none"><StatusBadge state={m.state} /></div>
