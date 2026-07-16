@@ -284,7 +284,7 @@ export default function Recognition() {
                       {t === "protocol" ? "Протокол" : "Расшифровка"}</button>
                   ))}
                 </div>
-                <div className="ml-auto flex gap-2">
+                <div className="w-full lg:w-auto lg:ml-auto flex gap-2 flex-wrap justify-end">
                   {detail.status === "done" && detail.docx_providers?.length ? (
                     <a className="btn btn-ghost" href={`/api/jobs/${detail.id}/result?format=docx`}><Download size={14} /> Word</a>
                   ) : null}
