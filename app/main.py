@@ -1082,6 +1082,57 @@ def automation_scheduler_poll_now(user: str = Depends(current_user)):
     return res
 
 
+class MeetingLinksIn(BaseModel):
+    task_id: str
+    video_url: str = ""
+    protocol_url: str = ""
+
+
+@app.post("/api/automation/meetings/links")
+def automation_meeting_links(inp: MeetingLinksIn, user: str = Depends(current_user)):
+    """Manually attach the video and/or protocol link to a Weeek task — for
+    meetings where automation could not deliver them (cloud refused the upload,
+    the LLM was down, the file only exists on someone's laptop…)."""
+    from .automation import settings as auto_settings, weeek
+    team = security.team_of(user)
+    cfg = auto_settings.load(team)
+    token = cfg.get("weeek_token")
+    if not token:
+        raise HTTPException(400, "Сначала подключите Weeek в «Автоматизации».")
+    task_id = (inp.task_id or "").strip()
+    if not task_id:
+        raise HTTPException(400, "Не указана задача Weeek.")
+    pairs = []   # (человекочитаемое имя, поле Weeek, url, эмодзи)
+    for label, field_key, default, url, emoji in (
+            ("видео", "weeek_video_field", "Видео встречи", inp.video_url, "🎥"),
+            ("протокол", "weeek_protocol_field", "Протокол встречи", inp.protocol_url, "📄")):
+        url = (url or "").strip()
+        if not url:
+            continue
+        if not url.startswith(("http://", "https://")):
+            raise HTTPException(400, f"Ссылка на {label} должна начинаться с http(s)://")
+        pairs.append((label, (cfg.get(field_key) or default).strip(), url, emoji))
+    if not pairs:
+        raise HTTPException(400, "Укажите хотя бы одну ссылку.")
+    attached, failed = [], []
+    for label, field, url, emoji in pairs:
+        res = weeek.set_custom_field(token, task_id, field, url)
+        if res.get("ok"):
+            attached.append(f"{label} → поле «{field}»")
+            continue
+        # The link must not get lost — leave it as a comment instead.
+        if weeek.add_comment(token, task_id, f"{emoji} {label.capitalize()} встречи: {url}"):
+            attached.append(f"{label} → комментарий (поле: {res.get('error')})")
+        else:
+            failed.append(f"{label}: {res.get('error') or 'ошибка Weeek'}")
+    if failed and not attached:
+        raise HTTPException(502, "Не удалось прикрепить: " + "; ".join(failed))
+    detail = "Прикреплено: " + "; ".join(attached)
+    if failed:
+        detail += ". Не удалось: " + "; ".join(failed)
+    return {"ok": not failed, "detail": detail}
+
+
 @app.post("/api/automation/scheduler/stop-recording")
 def automation_scheduler_stop_recording(task_id: str | None = None,
                                         user: str = Depends(current_user)):

@@ -308,7 +308,9 @@ def _stream_complete(backend, prompt, max_tokens, on_progress, stage,
     max_tokens = _fit_max_tokens(backend, prompt, max_tokens)
     if on_progress:
         on_progress(stage, "")
-    if isinstance(backend, llm.OllamaProvider):
+    # A fallback chain streams too (when Ollama is one of its links) — it takes
+    # the same kwargs and forwards them only to the backend that supports them.
+    if isinstance(backend, llm.OllamaProvider) or getattr(backend, "supports_stream", False):
         try:
             return backend.complete(
                 prompt, max_tokens=max_tokens, force_json=force_json,
@@ -335,7 +337,9 @@ def analyze_transcript(transcript_text: str, provider: str | None = None,
     Returns a dict with keys: summary, detailed, key_thoughts, conclusions,
     decisions, done_tasks, tasks, minor_tasks, _provider.
     """
-    backend = llm.get_provider(provider, keys)
+    # Chain, not a single provider: a 503 from the pinned engine must degrade to
+    # the next configured one (e.g. Gemini down → Groq → Ollama), not kill the job.
+    backend = llm.get_provider_chain(provider, keys)
     text = (transcript_text or "").strip()
     custom = (custom_prompt or "").strip()
 
