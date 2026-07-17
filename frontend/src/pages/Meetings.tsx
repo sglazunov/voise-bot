@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
-import { Video, RefreshCw, Square, Clock, Tag, Loader2 } from "lucide-react";
+import { Video, RefreshCw, Square, Clock, Loader2, Link2 } from "lucide-react";
 import { Page } from "../components/Layout";
-import { Switch, StatusBadge, useToast } from "../components/ui";
+import { Switch, StatusBadge, Modal, useToast } from "../components/ui";
 import { api } from "../lib/api";
 import { Status, Meeting, isToday, fmtDateTime } from "../lib/format";
 
@@ -39,6 +39,27 @@ export default function Meetings() {
   async function stopOne(m: Meeting) {
     try { const r = await api.post(`/api/automation/scheduler/stop-recording?task_id=${encodeURIComponent(String(m.task_id))}`); toast(r.detail || "Останавливаю…"); load(); }
     catch (e: any) { toast(e.message, true); }
+  }
+
+  // Manual attach: when automation couldn't deliver (LLM was down, cloud
+  // refused the video…), the user pastes the links and we write them into the
+  // task's Weeek fields ourselves.
+  const [linksFor, setLinksFor] = useState<Meeting | null>(null);
+  const [videoUrl, setVideoUrl] = useState("");
+  const [protoUrl, setProtoUrl] = useState("");
+  const [sending, setSending] = useState(false);
+  function openLinks(m: Meeting) {
+    setLinksFor(m); setVideoUrl(m.cloud_url || ""); setProtoUrl("");
+  }
+  async function sendLinks() {
+    if (!linksFor || sending) return;
+    setSending(true);
+    try {
+      const r = await api.post("/api/automation/meetings/links", {
+        task_id: String(linksFor.task_id), video_url: videoUrl.trim(), protocol_url: protoUrl.trim() });
+      toast(r.detail || "Ссылки прикреплены"); setLinksFor(null);
+    } catch (e: any) { toast(e.message, true); }
+    finally { setSending(false); }
   }
 
   const all = s?.meetings ?? [];
@@ -82,7 +103,15 @@ export default function Meetings() {
                   {m.detail && <span className="glass2 rounded-lg px-2 py-0.5 line-clamp-2 min-w-0">{m.detail}</span>}
                 </div>
               </div>
-              <div className="flex-none"><StatusBadge state={m.state} /></div>
+              <div className="flex-none flex items-center gap-2">
+                <StatusBadge state={m.state} />
+                {!rec && (
+                  <button className="btn-ghost grid place-items-center flex-none"
+                    style={{ width: 30, height: 30, borderRadius: 9 }}
+                    title="Прикрепить ссылки на видео/протокол к задаче Weeek"
+                    onClick={() => openLinks(m)}><Link2 size={14} /></button>
+                )}
+              </div>
               {rec ? (
                 <div className="w-full lg:w-auto flex justify-end">
                   <button className="btn btn-danger" onClick={() => stopOne(m)}><Square size={13} /> Стоп</button>
@@ -107,6 +136,28 @@ export default function Meetings() {
           </div>
         );
       }) : <div className="glass p-8 text-center text-[13px]" style={{ color: "var(--muted)" }}>Встреч нет.</div>}
+
+      <Modal open={!!linksFor} onClose={() => setLinksFor(null)}
+        title={<span className="flex items-center gap-2"><Link2 size={16} color="var(--accent)" /> Ссылки для задачи Weeek</span>}>
+        <div className="text-[12.5px] mb-3" style={{ color: "var(--muted)" }}>
+          {linksFor?.title || "Встреча"} · попадут в поля
+          «Видео встречи» / «Протокол встречи» (или комментарием)
+        </div>
+        <label className="lbl">Ссылка на видео</label>
+        <input className="field mb-3" placeholder="https://…" value={videoUrl}
+          onChange={(e) => setVideoUrl(e.target.value)} />
+        <label className="lbl">Ссылка на протокол</label>
+        <input className="field mb-4" placeholder="https://…" value={protoUrl}
+          onChange={(e) => setProtoUrl(e.target.value)} />
+        <div className="flex gap-2 justify-end">
+          <button className="btn btn-ghost" onClick={() => setLinksFor(null)}>Отмена</button>
+          <button className="btn btn-primary" onClick={sendLinks}
+            disabled={sending || !(videoUrl.trim() || protoUrl.trim())}>
+            {sending ? <Loader2 size={14} className="animate-spin" /> : <Link2 size={14} />}
+            Прикрепить
+          </button>
+        </div>
+      </Modal>
     </Page>
   );
 }

@@ -434,14 +434,38 @@ class JobStore:
                     return
                 tid = _weeek_task_id(job.deliver_weeek_task)
                 field = (cfg.get("weeek_protocol_field") or "Протокол встречи").strip()
-                res = weeek.set_custom_field(token, tid, field, url)
-                if not res.get("ok"):
-                    # Fall back to a comment if the custom field write fails.
+                if cfg.get("weeek_set_protocol_field", True) and field:
+                    res = weeek.set_custom_field(token, tid, field, url)
+                    if not res.get("ok"):
+                        # Fall back to a comment if the custom field write fails.
+                        if not weeek.add_comment(token, tid, f"📄 Протокол встречи: {url}"):
+                            self._set(job, delivery_error=(res.get("error")
+                                      or "Не удалось записать ссылку в задачу Weeek."))
+                elif cfg.get("post_back_to_weeek", True):
+                    # Field writing is switched off — the link still must reach
+                    # the task, as a comment.
                     if not weeek.add_comment(token, tid, f"📄 Протокол встречи: {url}"):
-                        self._set(job, delivery_error=(res.get("error")
-                                  or "Не удалось записать ссылку в задачу Weeek."))
+                        self._set(job, delivery_error="Не удалось оставить комментарий в Weeek.")
         except Exception as e:  # noqa: BLE001 — delivery must never break a job
             self._set(job, delivery_error=str(e))
+
+    def redeliver(self, job_id: str, weeek_task: str | None = None,
+                  cloud: bool | None = None) -> str:
+        """(Re)attach the protocol of an existing job: set/refresh the delivery
+        flags and, if the protocol is already built, deliver right now
+        (synchronously). For a still-running job the flags alone are enough —
+        the worker delivers at completion. Used by the scheduler's post-restart
+        resume and by manual re-attach."""
+        job = self._require(job_id)
+        if weeek_task is not None:
+            job.deliver_weeek_task = str(weeek_task).strip()
+        if cloud is not None:
+            job.deliver_protocol_cloud = bool(cloud)
+        provs = job.docx_providers or []
+        if job.status != STATUS_DONE or not provs:
+            return "pending"    # worker (or «Пересобрать») delivers later
+        self._deliver_protocol(job, self.docx_path(job.id, provs[-1]))
+        return job.delivery_error or "delivered"
 
     # ---- retention / cleanup -----------------------------------------------
     def _purge_old(self) -> None:

@@ -74,6 +74,10 @@ class Scheduler:
         self._thread = threading.Thread(target=self._loop, daemon=True,
                                         name="vtx-scheduler")
         self._thread.start()
+        # A restart killed the previous process's delivery threads; pick their
+        # meetings back up so Weeek links don't silently get lost on deploys.
+        threading.Thread(target=self._resume_pending, daemon=True,
+                         name="vtx-resume").start()
 
     def status(self, user: str) -> dict:
         user = security.team_of(user)   # members see the team's meetings
@@ -355,10 +359,16 @@ class Scheduler:
                 stage = ("Распознаю речь и собираю протокол…" if do_protocol
                          else "Распознаю речь…")
                 self._set(st, "transcribing", stage)
+                deliver = bool(do_protocol and cfg.get("upload_protocol", True))
                 job = store.create(
                     filename=Path(out).name, audio_path=out,
                     language=config.DEFAULT_LANGUAGE, diarize=False,
                     analyze=do_protocol,
+                    # Delivery (cloud upload + Weeek link) lives IN the job: it
+                    # survives service restarts and re-runs on «Пересобрать»,
+                    # unlike a waiter thread of this process.
+                    deliver_protocol_cloud=deliver,
+                    deliver_weeek_task=str(st.task_id) if deliver else "",
                     provider=cfg.get("analyze_provider") or "auto",
                     capture_screen=bool(cfg.get("ocr_screen", True)),
                     # Telemost recordings always show the active speaker (green
@@ -526,10 +536,12 @@ class Scheduler:
 
     def _await_and_upload_protocol(self, st: MeetingState, job_id: str,
                                    cfg: dict, base_name: str) -> None:
-        """Wait for the job's protocol (.docx), upload it to the cloud and write
-        its link into the Weeek field. NEVER fails silently: every problem is
-        written to the meeting log and posted as a Weeek comment, so an empty
-        «Протокол встречи» field is always explained."""
+        """Wait for the job to finish and REPORT the protocol outcome. The
+        upload + Weeek attach itself is done by the job (deliver_* flags), so it
+        survives restarts and re-runs on «Пересобрать»; this waiter only makes
+        sure the result is never silent: a missing «Протокол встречи» field is
+        always explained by a Weeek comment, and the meeting snapshot is closed
+        (done/error) instead of hanging in «распознаю» forever."""
         task_id = st.task_id
         token = cfg.get("weeek_token")
 
@@ -560,50 +572,27 @@ class Scheduler:
         job = store.get(job_id)
         if not job:
             return
+        where = "в облаке" if st.cloud_url else "локально"
         provs = getattr(job, "docx_providers", None)
         if job.status != "done" or not provs:
             why = (job.analysis_error or "").strip().splitlines()
             reason = why[-1] if why else f"статус задачи «{job.status}»"
             report(f"⚠ Протокол не собрался, поэтому не прикреплён. Причина: "
-                   f"{reason}. Откройте задачу распознавания и нажмите «Повторить "
-                   f"анализ» (при лимите ключа — добавьте ключ/смените движок).")
+                   f"{reason}. Откройте задачу распознавания и нажмите "
+                   f"«Пересобрать» — готовый протокол прикрепится сам.")
+            self._set(st, "error",
+                      f"Протокол не собрался — job {job_id}. «Пересобрать» "
+                      f"допоставит его в Weeek. Запись {where}.")
             return
-        docx = store.docx_path(job_id, provs[-1])
-        if not docx.exists():
-            report("⚠ Файл протокола (.docx) не найден на сервере — не прикреплён.")
+        err = (getattr(job, "delivery_error", "") or "").strip()
+        if err:
+            report(f"⚠ Протокол готов, но прикрепить не удалось: {err}")
+            self._set(st, "error",
+                      f"Протокол готов, но не прикреплён: {err} — job {job_id}.")
             return
-
-        # Protocols go into their OWN cloud folder (separate from the recordings).
-        # One network hiccup must not lose the delivery — retry a few times.
-        folder = (cfg.get("protocol_folder") or "").strip() or None
-        up = {}
-        for i in range(3):
-            if i:
-                time.sleep(20 * i)
-            up = clouds.upload(str(docx), f"{base_name} - протокол.docx", cfg,
-                               folder=folder)
-            if up.get("ok"):
-                break
-        if not up.get("ok"):
-            report(f"⚠ Протокол не выгрузился в облако: {up.get('error') or 'ошибка'}. "
-                   "Он доступен для скачивания в интерфейсе распознавания.")
-            return
-        url = up.get("url")
-        if not url:
-            report("Протокол выгружен в облако, но публичную ссылку получить не "
-                   "удалось (нужен доступ на чтение у токена Я.Диска).")
-            return
-
-        field = (cfg.get("weeek_protocol_field") or "").strip()
-        if cfg.get("weeek_set_protocol_field", True) and field:
-            ok = self._write_weeek_field(token, task_id, field, url, log)
-            if ok:
-                log("Ссылка на протокол записана в поле Weeek ✓")
-            else:
-                # The link must not get lost — leave it as a comment instead.
-                report(f"📄 Протокол встречи: {url}")
-        elif cfg.get("post_back_to_weeek", True):
-            report(f"📄 Протокол встречи: {url}")
+        log("Протокол прикреплён к задаче Weeek ✓")
+        self._set(st, "done",
+                  f"Готово. Запись {where}, протокол прикреплён — job {job_id}.")
 
     def _enrich_from_job(self, m: dict) -> None:
         """Overlay the live transcription/protocol stage onto a meeting dict,
@@ -676,6 +665,60 @@ class Scheduler:
             os.replace(tmp, p)
         except Exception:  # persistence is best-effort, never breaks the loop
             pass
+
+    def _resume_pending(self) -> None:
+        """After a restart: meetings whose snapshot froze mid-pipeline still have
+        a job in the store — re-arm their delivery. redeliver() puts the deliver
+        flags (back) onto the job: a finished protocol attaches right now, a
+        running job attaches at completion, and even a failed one attaches later
+        when the user hits «Пересобрать». A fresh waiter thread then closes the
+        snapshot and explains any failure in Weeek."""
+        pending = ("recording", "uploading", "transcribing", "analyzing")
+        cutoff = time.time() - 48 * 3600
+        for team in security.list_teams():
+            try:
+                cfg = auto_settings.load(team)
+                if not cfg.get("weeek_token"):
+                    continue
+                snaps = self._load_snaps(team)
+            except Exception:  # noqa: BLE001 — one broken team must not stop the rest
+                continue
+            for key, snap in snaps.items():
+                jid = snap.get("job_id")
+                if (not jid or snap.get("state") not in pending
+                        or (snap.get("saved_at") or 0) < cutoff):
+                    continue
+                job = store.get(jid)
+                if job is None:
+                    continue    # job already purged by retention — nothing left
+                parts = key.split(":", 2)
+                task_id = parts[1] if len(parts) > 1 else None
+                if not task_id:
+                    continue
+                try:
+                    start = (datetime.fromisoformat(parts[2])
+                             if len(parts) > 2 else None)
+                except ValueError:
+                    start = None
+                st = MeetingState(
+                    key=key, task_id=task_id, title=Path(job.filename).stem,
+                    url="", start=start, owner=team,
+                    state=snap.get("state") or "transcribing",
+                    detail=snap.get("detail") or "", job_id=jid,
+                    cloud_url=snap.get("cloud_url"),
+                    do_protocol=bool(snap.get("do_protocol")))
+                with self._lock:
+                    st = self._states.setdefault(key, st)
+                if not (st.do_protocol and cfg.get("upload_protocol", True)):
+                    continue
+                try:
+                    store.redeliver(jid, weeek_task=task_id, cloud=True)
+                except Exception:  # noqa: BLE001
+                    pass
+                threading.Thread(
+                    target=self._await_and_upload_protocol,
+                    args=(st, jid, cfg, Path(job.filename).stem),
+                    daemon=True).start()
 
     def _restore_snapshot(self, st: MeetingState) -> None:
         """Fill a freshly discovered MeetingState from its saved outcome."""

@@ -470,3 +470,66 @@ class _RotatingProvider:
         raise RuntimeError(
             f"Все {n} API-ключа(ей) исчерпали лимит (ключи {limited}). "
             "Добавьте ещё ключ, подождите сброса лимита или выберите другой движок.")
+
+
+class _FallbackChain:
+    """Provider-level failover: when the chosen engine is down (5xx, network,
+    every key rate-limited), the next CONFIGURED provider takes over instead of
+    the whole protocol dying with one cloud. The chain remembers which provider
+    answered last and starts there — one meeting's map-reduce makes many calls,
+    and flip-flopping back to a dead provider would pay the timeout every time."""
+
+    def __init__(self, backends: list):
+        self._backends = backends
+        self._i = 0     # index of the provider that served the last call
+
+    @property
+    def name(self) -> str:
+        return str(getattr(self._backends[self._i], "name", "llm"))
+
+    @property
+    def supports_stream(self) -> bool:
+        return any(isinstance(b, OllamaProvider) for b in self._backends)
+
+    def complete(self, prompt: str, max_tokens: int = 2000, force_json: bool = True,
+                 on_token=None, should_stop=None) -> str:
+        errors = []
+        for k in range(len(self._backends)):
+            i = (self._i + k) % len(self._backends)
+            b = self._backends[i]
+            # The caller sized max_tokens for the PRIMARY provider; re-clamp for
+            # the one actually being tried, or Groq rejects the request with 413.
+            mt = max_tokens
+            tpm = config.PROVIDER_TPM.get(str(getattr(b, "name", "")).split(":")[0])
+            if tpm:
+                mt = max(1200, min(mt, tpm - len(prompt) // 3 - 400))
+            try:
+                if isinstance(b, OllamaProvider):
+                    out = b.complete(prompt, max_tokens=mt, force_json=force_json,
+                                     on_token=on_token, should_stop=should_stop)
+                else:
+                    out = b.complete(prompt, mt, force_json)
+                self._i = i
+                return out
+            except GenerationCancelled:
+                raise               # user cancellation is not a provider failure
+            except Exception as e:  # noqa: BLE001
+                errors.append(f"{getattr(b, 'name', '?')}: {e}")
+        raise RuntimeError("Ни один движок ИИ не ответил. " + " | ".join(errors[:3]))
+
+
+def get_provider_chain(name: str | None, keys: dict | None = None):
+    """The requested provider first, then every other configured one as fallback
+    (in PROVIDER_ORDER — free/local engines first). With a single configured
+    provider this is just that provider."""
+    primary = get_provider(name, keys)
+    pname = str(getattr(primary, "name", "")).split(":")[0]
+    backends = [primary]
+    for p in config.available_providers(keys):
+        if p == pname:
+            continue
+        try:
+            backends.append(get_provider(p, keys))
+        except Exception:  # noqa: BLE001 — an unconfigurable fallback just drops out
+            continue
+    return _FallbackChain(backends) if len(backends) > 1 else primary
