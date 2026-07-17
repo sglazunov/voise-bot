@@ -461,6 +461,9 @@ class JobStore:
             job.deliver_weeek_task = str(weeek_task).strip()
         if cloud is not None:
             job.deliver_protocol_cloud = bool(cloud)
+        if not (job.deliver_protocol_cloud or job.deliver_weeek_task):
+            return ("у задачи не настроена доставка (не из планировщика и без "
+                    "привязки к задаче Weeek)")
         provs = job.docx_providers or []
         if job.status != STATUS_DONE or not provs:
             return "pending"    # worker (or «Пересобрать») delivers later

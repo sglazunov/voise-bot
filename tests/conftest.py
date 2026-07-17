@@ -12,6 +12,9 @@ os.environ.setdefault("VTX_RECORDER_ENABLED", "0")
 os.environ.setdefault("VTX_OLLAMA", "0")
 # Deterministic master key for the secret-encryption tests.
 os.environ.setdefault("VTX_SECRET_KEY", "test-master-key-do-not-use-in-prod")
+# NEVER let tests touch a real Postgres: inside the app container DATABASE_URL
+# points at the PRODUCTION db, and _wipe_state would corrupt live users.
+os.environ.pop("DATABASE_URL", None)
 
 import shutil  # noqa: E402
 from pathlib import Path  # noqa: E402
