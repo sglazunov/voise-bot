@@ -46,6 +46,11 @@ function Protocol({ a }: { a: any }) {
   if (!a) return null;
   return (
     <div>
+      {a._warning && (
+        <div className="glass2 rounded-2xl p-3 mb-4 text-[12.5px]" style={{ color: "var(--warn)" }}>
+          ⚠ {a._warning}
+        </div>
+      )}
       {a.participants?.length ? (
         <div className="mb-4">
           <div className="font-bold text-[13.5px] mb-1.5" style={{ color: "var(--accent)" }}>Участники</div>
