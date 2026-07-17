@@ -718,6 +718,19 @@ def reanalyze_job(job_id: str, body: ReanalyzeBody, user: str = Depends(current_
     return job.to_public()
 
 
+@app.post("/api/jobs/{job_id}/redeliver")
+def redeliver_job(job_id: str, user: str = Depends(current_user)):
+    """Re-attempt the protocol DELIVERY only (cloud upload + Weeek link) — for
+    when the protocol built fine but the upload/attach failed. No LLM re-run."""
+    _require_owned(job_id, user)
+    res = store.redeliver(job_id)
+    if res == "delivered":
+        return {"ok": True, "detail": "Протокол выгружен и прикреплён к задаче Weeek."}
+    if res == "pending":
+        raise HTTPException(409, "Протокол ещё не готов — доставка выполнится сама после сборки.")
+    raise HTTPException(502, f"Доставка не удалась: {res}")
+
+
 @app.get("/api/prompt/default")
 def prompt_default():
     """The built-in analysis prompt, for the expert-mode editor."""

@@ -41,7 +41,9 @@ class TestParseStart:
 
 
 class TestPagination:
-    def test_list_tasks_follows_hasmore_by_offset(self, monkeypatch):
+    def test_list_tasks_collects_pages_by_offset(self, monkeypatch):
+        # Pages are fetched CONCURRENTLY (up to max_tasks/100 of them), so
+        # offsets past the data come back empty — that's the real API's shape.
         pages = {
             0: {"tasks": [{"id": i} for i in range(100)], "hasMore": True},
             100: {"tasks": [{"id": i} for i in range(100, 150)], "hasMore": False},
@@ -51,12 +53,13 @@ class TestPagination:
         def fake_request(method, path, token, params=None, **kw):
             off = (params or {}).get("offset", 0)
             seen_offsets.append(off)
-            return pages[off]
+            return pages.get(off, {"tasks": [], "hasMore": False})
 
         monkeypatch.setattr(weeek, "_request", fake_request)
         tasks = weeek.list_tasks("tok")
-        assert len(tasks) == 150                 # both pages collected
-        assert seen_offsets == [0, 100]          # paginated by offset, stopped on hasMore=False
+        assert len(tasks) == 150                     # both pages collected, in order
+        assert [t["id"] for t in tasks] == list(range(150))
+        assert {0, 100} <= set(seen_offsets)         # paginated by offset
 
     def test_list_tasks_stops_at_cap(self, monkeypatch):
         def fake_request(method, path, token, params=None, **kw):

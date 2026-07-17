@@ -143,6 +143,11 @@ export default function Recognition() {
     } catch (e: any) { toast(e.message, true); } finally { setBusy(false); setProg(0); }
   }
   async function retry(id: string) { try { await api.post(`/api/jobs/${id}/retry`); loadJobs(); } catch (e: any) { toast(e.message, true); } }
+  // Delivery only (cloud upload + Weeek link) — no expensive LLM re-run.
+  async function redeliver(id: string) {
+    try { const r = await api.post(`/api/jobs/${id}/redeliver`); toast(r.detail || "Прикреплено"); loadJobs(); }
+    catch (e: any) { toast(e.message, true); }
+  }
   async function reanalyze(id: string) {
     try { await api.post(`/api/jobs/${id}/reanalyze`, { provider: opts.provider }); toast("Пересобираю протокол…"); loadJobs(); }
     catch (e: any) { toast(e.message, true); }
@@ -274,6 +279,13 @@ export default function Recognition() {
               )}
               {detail.error && <div className="glass2 rounded-2xl p-3 mb-3 text-[12.5px]" style={{ color: "#fca5a5" }}>{detail.error}</div>}
               {detail.analysis_error && <div className="glass2 rounded-2xl p-3 mb-3 text-[12.5px]" style={{ color: "var(--warn)" }}>{detail.analysis_error}</div>}
+              {detail.delivery_error && (
+                <div className="glass2 rounded-2xl p-3 mb-3 flex items-center gap-3 flex-wrap text-[12.5px]" style={{ color: "var(--warn)" }}>
+                  <span className="min-w-0 flex-1">Протокол готов, но не прикрепился: {detail.delivery_error}</span>
+                  <button className="btn btn-ghost flex-none" onClick={() => redeliver(detail.id)}>
+                    <RotateCcw size={14} /> Прикрепить снова</button>
+                </div>
+              )}
 
               <div className="flex items-center gap-2 mb-3 flex-wrap">
                 <div className="glass2 rounded-full p-1 flex gap-1">
