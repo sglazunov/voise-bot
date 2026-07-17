@@ -13,11 +13,88 @@ truncated away.
 """
 from __future__ import annotations
 
+import difflib
 import json
 import re
 import time
 
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
 from . import config, llm
+
+
+# --------------------------------------------------------------------------- #
+# Pydantic contract for the LLM answers. One schema serves every provider:
+# Ollama gets it as a structured-output grammar (can't produce invalid JSON),
+# cloud providers get their answer validated against it with one retry.
+# Lenient by design (extra fields ignored, everything defaulted) — a weak
+# model's imperfect answer should degrade, not explode.
+# --------------------------------------------------------------------------- #
+class TopicNote(BaseModel):
+    model_config = ConfigDict(extra="ignore", coerce_numbers_to_str=True)
+    t: str | None = None
+    topic: str = ""
+    details: str = ""
+    quotes: list[str] = Field(default_factory=list)
+
+
+class DecisionNote(BaseModel):
+    model_config = ConfigDict(extra="ignore", coerce_numbers_to_str=True)
+    t: str | None = None
+    text: str = ""
+    quote: str | None = None
+
+
+class TaskNote(BaseModel):
+    model_config = ConfigDict(extra="ignore", coerce_numbers_to_str=True)
+    t: str | None = None
+    task: str = ""
+    owner: str | None = None
+    owner_evidence: str | None = None
+    done: bool = False
+
+
+class MapNotes(BaseModel):
+    model_config = ConfigDict(extra="ignore", coerce_numbers_to_str=True)
+    time_range: str = ""
+    participants: list[str] = Field(default_factory=list)
+    topics: list[TopicNote] = Field(default_factory=list)
+    decisions: list[DecisionNote] = Field(default_factory=list)
+    tasks: list[TaskNote] = Field(default_factory=list)
+
+
+# Final-protocol models are deliberately null-tolerant: a weak cloud model
+# answering owner:null must be normalised to «—» downstream, not bounced into
+# a needless retry round.
+class ProtoParticipant(BaseModel):
+    model_config = ConfigDict(extra="ignore", coerce_numbers_to_str=True)
+    name: str | None = ""
+    role: str | None = ""
+
+
+class ProtoTopic(BaseModel):
+    model_config = ConfigDict(extra="ignore", coerce_numbers_to_str=True)
+    topic: str | None = ""
+    details: str | None = ""
+
+
+class ProtoTask(BaseModel):
+    model_config = ConfigDict(extra="ignore", coerce_numbers_to_str=True)
+    task: str | None = ""
+    owner: str | None = "—"
+
+
+class Protocol(BaseModel):
+    model_config = ConfigDict(extra="ignore", coerce_numbers_to_str=True)
+    participants: list[ProtoParticipant] = Field(default_factory=list)
+    summary: str | None = ""
+    detailed: list[ProtoTopic] = Field(default_factory=list)
+    key_thoughts: list[str | None] = Field(default_factory=list)
+    conclusions: list[str | None] = Field(default_factory=list)
+    decisions: list[str | None] = Field(default_factory=list)
+    done_tasks: list[ProtoTask] = Field(default_factory=list)
+    tasks: list[ProtoTask] = Field(default_factory=list)
+    minor_tasks: list[ProtoTask] = Field(default_factory=list)
 
 # Single-pass threshold. Above this we chunk (map-reduce) so the WHOLE meeting
 # is analysed, not just the first part.
@@ -160,6 +237,9 @@ _RULES = (
     "только при явном назначении. Сомневаешься — ставь '—'.\n"
     "- Не путай сделанное с тем, что нужно сделать: done_tasks — прошедшее время, "
     "tasks и minor_tasks — будущее.\n"
+    "- Метки времени [мм:сс] в расшифровке/заметках — служебные: используй их, чтобы "
+    "сохранить ХРОНОЛОГИЮ (порядок тем в detailed = порядок по времени встречи), но "
+    "НЕ переноси сами таймкоды в текст протокола.\n"
     "- Всё на русском языке. Верни ТОЛЬКО JSON, без markdown и пояснений."
 )
 
@@ -170,45 +250,82 @@ _PROMPT_TEMPLATE = (
     "Формат ответа:\n" + _SCHEMA + "\n\n" + _RULES
 )
 
-# Map step: condense one chunk into plain-text notes (not JSON).
+# Map step: extract one chunk into STRUCTURED notes with timecodes. Structure
+# (instead of flat prose) is what lets the reduce step keep the meeting's
+# chronology, dedup overlap-zone tasks mechanically and never lose late tasks.
+_MAP_SCHEMA = (
+    "{{\n"
+    '  "time_range": "мм:сс–мм:сс — какой отрезок встречи покрывает фрагмент (по меткам [мм:сс])",\n'
+    '  "participants": ["имена, проявившиеся в этом фрагменте"],\n'
+    '  "topics": [{{"t": "мм:сс — таймкод начала темы", "topic": "информативное название темы",\n'
+    '    "details": "подробное описание на 8-12 предложений: контекст, что обсуждали, кто что '
+    'предложил/возразил (по именам, только когда однозначно), конкретика (числа, названия, сроки), '
+    'к чему пришли", "quotes": ["1-2 дословные ключевые фразы из фрагмента"]}}],\n'
+    '  "decisions": [{{"t": "мм:сс", "text": "что решили/договорились", '
+    '"quote": "дословная фраза-основание"}}],\n'
+    '  "tasks": [{{"t": "мм:сс", "task": "что сделать (включая мелкие задачи)", '
+    '"owner": "имя, ТОЛЬКО если явно взял/поручили, иначе null", '
+    '"owner_evidence": "дословная фраза, из которой видно, КТО берёт задачу, иначе null", '
+    '"done": false}}]\n'
+    "}}"
+)
+
 _MAP_TEMPLATE = (
     "Это часть {i} из {n} расшифровки рабочей встречи (автоматическая, возможны "
-    "ошибки). Подробно по-русски выпиши из ЭТОГО фрагмента:\n"
-    "• Участников, которые проявились (имена из обращений/самопредставлений; если "
-    "имени нет — «Спикер N»), и их роли, если ясны.\n"
-    "• Темы, которые обсуждались — ПОДРОБНО по каждой: о чём и в каком контексте шла "
-    "речь, что именно обсуждали, какие были предложения/возражения и аргументы, "
-    "конкретика (числа, проценты, названия, сроки, примеры), к чему пришли; и КТО что "
-    "сказал/предложил/возразил, где понятно из контекста. Не сжимай темы до одной строки "
-    "— сохрани достаточно деталей, чтобы по ним можно было восстановить тему целиком.\n"
-    "• Ключевые мысли, решения и договорённости.\n"
-    "• ВСЕ шаги и действия, которые проговаривались: что уже сделано и что решили "
-    "делать дальше, В КАКОМ ПОРЯДКЕ — дословно сохраняя порядок и детали шагов.\n"
-    "• Если во фрагменте есть строки «ТЕКСТ С ЭКРАНА» — перечисли, что показывали, "
-    "и как это связано с обсуждением (показанное учитывается в протоколе наравне "
-    "с речью).\n"
-    "• ВСЕ задачи и действия, включая мелкие и второстепенные (мелкие правки UI, "
-    "договорённости об именовании — названия тегов/кнопок/сущностей, кто кому даёт "
-    "доступ/что-то скидывает, мелкие техдоделки). Для каждой задачи укажи "
-    "ОТВЕТСТВЕННОГО ТОЛЬКО если в тексте прямо сказано, кто её берёт / кому поручили "
-    "(«я возьму», «за мной», «Кирилл, сделай»). Если явного назначения нет — пометь "
-    "«ответственный не назван». НЕ угадывай и НЕ назначай ответственным того, кто просто "
-    "рассказывал о задаче или обсуждал её.\n"
-    "Это автоматическая расшифровка БЕЗ пометок, кто говорит, — поэтому не приписывай "
-    "реплики и ответственность наугад: имя автора ставь только там, где оно однозначно "
-    "следует из текста. Выпиши ВСЁ существенное из этого фрагмента, ничего не пропускай. "
-    "Сохраняй дословно имена, числа, проценты, сроки/даты, названия и термины. Не "
-    "выдумывай того, чего нет в тексте. Пиши списком, без вступления и заключения.\n\n"
+    "ошибки распознавания). Реплики размечены таймкодами вида [мм:сс] (иногда с "
+    "именем говорящего — тогда это ДОСТОВЕРНЫЙ автор реплики, считанный с видео). "
+    "Извлеки из ЭТОГО фрагмента структурированные заметки и верни ТОЛЬКО JSON:\n\n"
+    + _MAP_SCHEMA + "\n\n"
+    "Правила:\n"
+    "- Таймкоды t бери из меток [мм:сс] рядом с местом, где тема/решение/задача "
+    "прозвучали. time_range — от первой до последней метки фрагмента.\n"
+    "- topics: раздели фрагмент на реальные темы В ХРОНОЛОГИЧЕСКОМ ПОРЯДКЕ; details "
+    "пиши подробно, НЕ сжимай до одной строки — по ним будут восстанавливать тему.\n"
+    "- tasks: выпиши ВСЕ задачи, включая мелкие (правки UI, названия тегов/кнопок, "
+    "кто кому что скинет). done=true — если задача уже СДЕЛАНА (прошедшее время).\n"
+    "- owner: ТОЛЬКО при явном назначении в тексте («я возьму», «за мной», «Кирилл, "
+    "сделай»). owner_evidence — та самая дословная фраза. Нет фразы → owner=null, "
+    "owner_evidence=null. НЕ назначай того, кто просто рассказывал о задаче.\n"
+    "- Если во фрагменте есть «ТЕКСТ С ЭКРАНА» — отрази показанное в topics.\n"
+    "- Сохраняй дословно имена, числа, проценты, сроки, названия, термины. Ничего "
+    "не выдумывай. Всё существенное из фрагмента должно попасть в заметки.\n"
+    "- Верни ТОЛЬКО валидный JSON без markdown.\n\n"
     "Фрагмент:\n{chunk}"
 )
 
-# Reduce step: merge all chunk notes into the final protocol JSON.
+# Pairwise merge for the hierarchical reduce: when all the map notes together
+# don't fit the engine's context, neighbours are first merged pairwise (same
+# schema, chronology preserved) until the final reduce fits.
+_MERGE_TEMPLATE = (
+    "Ниже — структурированные заметки по ДВУМ ПОСЛЕДОВАТЕЛЬНЫМ отрезкам одной "
+    "рабочей встречи (JSON). Объедини их в ОДИН JSON ТОЙ ЖЕ схемы:\n"
+    "- time_range — от начала первого до конца второго;\n"
+    "- topics — все темы обоих отрезков в хронологическом порядке (по t); одну и ту "
+    "же тему, продолжившуюся во втором отрезке, слей в одну (t — начало), сохранив "
+    "детали обеих частей; details можно уплотнять, но БЕЗ потери фактов, имён, "
+    "чисел и договорённостей;\n"
+    "- decisions и tasks — ВСЕ пункты обоих отрезков (кроме точных дублей), с их t, "
+    "owner и owner_evidence как есть; НИЧЕГО не выбрасывай и не сокращай;\n"
+    "- participants — объединение.\n"
+    "Верни ТОЛЬКО валидный JSON без markdown.\n\n"
+    "Отрезок A:\n{a}\n\nОтрезок B:\n{b}"
+)
+
+# Reduce step: merge the structured chunk notes into the final protocol JSON.
 _REDUCE_TEMPLATE = (
-    "Ниже — заметки, собранные по последовательным частям одной рабочей встречи. "
-    "Объедини их в ЕДИНЫЙ ПОДРОБНЫЙ протокол: убери только дословные дубли, но "
-    "СОХРАНИ ВСЕ детали, темы, договорённости и задачи (включая мелкие) — НЕ "
-    "сокращай и не выбрасывай содержательные пункты, агрегируй без потери смысла. "
-    "Объединяй сведения об участниках и ответственных из разных частей. "
+    "Ниже — структурированные заметки (JSON) по последовательным частям одной "
+    "рабочей встречи, В ХРОНОЛОГИЧЕСКОМ ПОРЯДКЕ, с таймкодами t. Дубликаты задач "
+    "из зон перекрытия частей уже удалены. Собери из них ЕДИНЫЙ ПОДРОБНЫЙ протокол:\n"
+    "- порядок тем в detailed = ХРОНОЛОГИЯ встречи (по t из заметок); темы, "
+    "продолжавшиеся в нескольких частях, слей в одну, сохранив детали всех частей;\n"
+    "- СОХРАНИ ВСЕ решения и задачи из заметок (включая мелкие) — каждая задача из "
+    "заметок должна попасть в tasks / minor_tasks / done_tasks (done=true → "
+    "done_tasks); НЕ выбрасывай и не сокращай содержательные пункты;\n"
+    "- owner бери из заметок ТОЛЬКО там, где есть owner_evidence; owner без "
+    "owner_evidence считай неназначенным (owner: '—');\n"
+    "- таймкоды и поля quotes/owner_evidence — служебные: используй их для порядка "
+    "и проверки, но В ТЕКСТ протокола не переноси;\n"
+    "- объединяй сведения об участниках из всех частей.\n"
     "Верни ответ ТОЛЬКО в виде JSON.\n\n"
     "Заметки по частям:\n{notes}\n\n"
     "Формат ответа:\n" + _SCHEMA + "\n\n" + _RULES
@@ -269,6 +386,96 @@ def _split_chunks(text: str) -> list[str]:
     return chunks
 
 
+def _parse_ts(t) -> float | None:
+    """«мм:сс» / «чч:мм:сс» → seconds; None when absent/unparseable."""
+    if not t:
+        return None
+    m = re.match(r"^\s*(?:(\d+):)?(\d{1,2}):(\d{2})\s*$", str(t))
+    if not m:
+        return None
+    h = int(m.group(1) or 0)
+    return h * 3600 + int(m.group(2)) * 60 + int(m.group(3))
+
+
+# Overlap-zone duplicates: the same task shows up in two neighbouring chunks
+# with slightly different wording. Close in time + near-identical text = dup.
+_DEDUP_WINDOW_SEC = 120
+_DEDUP_RATIO = 0.85
+
+
+def _dedup_maps(maps: list[dict]) -> list[dict]:
+    """Drop duplicate tasks/decisions across the chunk notes (overlap zone).
+
+    The FIRST occurrence survives; a duplicate's owner/evidence/done enrich the
+    survivor when it lacked them (the second chunk often sees the assignment)."""
+    for key, text_field in (("tasks", "task"), ("decisions", "text")):
+        seen: list[tuple[float | None, str, dict]] = []
+        for m in maps:
+            kept = []
+            for it in (m.get(key) or []):
+                if not isinstance(it, dict):
+                    continue
+                txt = str(it.get(text_field) or "").strip()
+                sec = _parse_ts(it.get("t"))
+                dup = None
+                if txt:
+                    low = txt.lower()
+                    for s2, low2, prev in seen:
+                        close = (sec is None or s2 is None
+                                 or abs(sec - s2) <= _DEDUP_WINDOW_SEC)
+                        if close and difflib.SequenceMatcher(
+                                None, low, low2).ratio() >= _DEDUP_RATIO:
+                            dup = prev
+                            break
+                if dup is not None:
+                    if not dup.get("owner") and it.get("owner"):
+                        dup["owner"] = it["owner"]
+                        dup["owner_evidence"] = it.get("owner_evidence")
+                    if it.get("done"):
+                        dup["done"] = True
+                    continue
+                kept.append(it)
+                seen.append((sec, txt.lower(), it))
+            m[key] = kept
+    return maps
+
+
+def _est_tokens(text: str) -> int:
+    return len(text) // 3   # ~3 chars per token for mixed ru/en text
+
+
+def _ctx_budget(backend) -> int:
+    """How many PROMPT tokens one request to this engine can safely carry."""
+    base = str(getattr(backend, "name", "")).split(":")[0]
+    tpm = config.PROVIDER_TPM.get(base)
+    if tpm:
+        return tpm
+    if base == "ollama":
+        return llm.OLLAMA_NUM_CTX
+    return 100_000   # big-context clouds (Gemini, Claude, Yandex…)
+
+
+def _mech_merge(a: dict, b: dict) -> dict:
+    """Lossless no-LLM merge of two neighbouring note-sets (fallback when the
+    LLM merge fails): concatenates lists, unions participants."""
+    ra, rb = str(a.get("time_range") or ""), str(b.get("time_range") or "")
+    return {
+        "time_range": (ra.split("–")[0] + "–" + rb.split("–")[-1]) if ra and rb else ra or rb,
+        "participants": list(dict.fromkeys(
+            (a.get("participants") or []) + (b.get("participants") or []))),
+        "topics": (a.get("topics") or []) + (b.get("topics") or []),
+        "decisions": (a.get("decisions") or []) + (b.get("decisions") or []),
+        "tasks": (a.get("tasks") or []) + (b.get("tasks") or []),
+    }
+
+
+def _notes_blob(maps: list[dict]) -> str:
+    return "\n\n".join(
+        f"=== Часть {i} ({m.get('time_range') or '?'}) ===\n"
+        + json.dumps(m, ensure_ascii=False)
+        for i, m in enumerate(maps, 1))
+
+
 def _with_extra(prompt: str, extra: str) -> str:
     """Append the user's custom instructions to a prompt, if any."""
     extra = (extra or "").strip()
@@ -298,13 +505,15 @@ def _fit_max_tokens(backend, prompt: str, want: int) -> int:
 
 
 def _stream_complete(backend, prompt, max_tokens, on_progress, stage,
-                     force_json=True, cancel_check=None):
+                     force_json=True, cancel_check=None, json_schema=None):
     """Call backend.complete, streaming tokens to on_progress when supported.
 
     Only Ollama streams; other providers return the full text in one shot (we
     still emit the stage so the UI shows what's happening). `cancel_check` lets a
     streaming (Ollama) generation be aborted mid-way, so «Отменить» is responsive
-    even inside one long chunk — not only between chunks."""
+    even inside one long chunk — not only between chunks. `json_schema` reaches
+    Ollama as a structured-output grammar; cloud providers ignore it (their
+    answers are validated by the caller instead)."""
     max_tokens = _fit_max_tokens(backend, prompt, max_tokens)
     if on_progress:
         on_progress(stage, "")
@@ -315,10 +524,47 @@ def _stream_complete(backend, prompt, max_tokens, on_progress, stage,
             return backend.complete(
                 prompt, max_tokens=max_tokens, force_json=force_json,
                 on_token=(lambda full: on_progress(stage, full)) if on_progress else None,
-                should_stop=cancel_check)
+                should_stop=cancel_check, json_schema=json_schema)
         except llm.GenerationCancelled:
             raise AnalysisCancelled()
     return backend.complete(prompt, max_tokens=max_tokens, force_json=force_json)
+
+
+def _complete_validated(backend, prompt, model_cls, max_tokens, on_progress,
+                        stage, cancel_check=None) -> dict:
+    """One LLM call whose answer must satisfy `model_cls` (Pydantic).
+
+    Ollama gets the JSON schema as a decoding grammar, so its answer is valid by
+    construction. Cloud answers are validated after the fact; on failure the
+    model gets ONE retry with the validation error quoted — that fixes the
+    typical «wrapped in prose / field renamed» misses of weaker models. Raises
+    ValueError if the retry still doesn't validate; the caller decides how to
+    degrade."""
+    schema = model_cls.model_json_schema()
+    raw = _stream_complete(backend, prompt, max_tokens, on_progress, stage,
+                           cancel_check=cancel_check, json_schema=schema)
+    try:
+        return model_cls.model_validate(_extract_json(raw)).model_dump()
+    except (ValidationError, ValueError) as e:
+        err = str(e)[:600]
+    retry = (prompt + "\n\nТвой прошлый ответ не прошёл проверку схемы: "
+             + err + "\nВерни ИСПРАВЛЕННЫЙ ответ строго по требуемой JSON-схеме, "
+             "без markdown и пояснений.")
+    raw = _stream_complete(backend, retry, max_tokens, on_progress, stage,
+                           cancel_check=cancel_check, json_schema=schema)
+    try:
+        return model_cls.model_validate(_extract_json(raw)).model_dump()
+    except (ValidationError, ValueError) as e:
+        raise _SchemaMiss(f"Ответ модели не прошёл валидацию схемы: {e}", raw) from e
+
+
+class _SchemaMiss(ValueError):
+    """Both attempts failed validation; carries the last raw answer so the
+    caller can degrade gracefully instead of losing the model's work."""
+
+    def __init__(self, msg: str, raw: str = ""):
+        super().__init__(msg)
+        self.raw = raw or ""
 
 
 def analyze_transcript(transcript_text: str, provider: str | None = None,
@@ -348,39 +594,105 @@ def analyze_transcript(transcript_text: str, provider: str | None = None,
             raise AnalysisCancelled()
 
     _ck()
+    warning = None
+    result = None
     if len(text) <= _MAX_CHARS:
         if custom:
             prompt = custom + "\n\nТранскрипция:\n" + text
+            raw = _stream_complete(backend, _with_extra(prompt, extra_instructions),
+                                   10000, on_progress, "Генерация протокола…",
+                                   cancel_check=cancel_check)
+            result = _extract_json(raw)
         else:
-            prompt = _PROMPT_TEMPLATE.format(transcript=text)
-        raw = _stream_complete(backend, _with_extra(prompt, extra_instructions),
-                               10000, on_progress, "Генерация протокола…",
-                               cancel_check=cancel_check)
+            prompt = _with_extra(_PROMPT_TEMPLATE.format(transcript=text),
+                                 extra_instructions)
+            try:
+                result = _complete_validated(backend, prompt, Protocol, 10000,
+                                             on_progress, "Генерация протокола…",
+                                             cancel_check)
+            except _SchemaMiss as e:
+                result = _extract_json(e.raw)  # lenient legacy path
     else:
         chunks = _split_chunks(text)
-        notes_parts = []
+        n = len(chunks)
+        maps: list[dict] = []
         for i, chunk in enumerate(chunks, 1):
             _ck()  # cancel between chunks
-            note = _stream_complete(
-                backend, _MAP_TEMPLATE.format(i=i, n=len(chunks), chunk=chunk),
-                3500, on_progress, f"Читаю встречу: часть {i} из {len(chunks)}…",
-                force_json=False, cancel_check=cancel_check)
-            notes_parts.append(f"=== Часть {i} ===\n{note.strip()}")
+            stage = f"Читаю встречу: часть {i} из {n}…"
+            try:
+                m = _complete_validated(
+                    backend, _MAP_TEMPLATE.format(i=i, n=n, chunk=chunk),
+                    MapNotes, 3500, on_progress, stage, cancel_check)
+            except _SchemaMiss as e:
+                # The model's notes didn't fit the schema even after a retry —
+                # keep them as one flat topic rather than losing the chunk.
+                m = MapNotes(topics=[TopicNote(
+                    topic=f"Фрагмент {i}", details=e.raw[:6000])]).model_dump()
+            maps.append(m)
             # Free cloud tiers rate-limit easily; pace the chunk calls a bit.
-            if backend.name == "groq" and i < len(chunks):
+            if backend.name == "groq" and i < n:
                 time.sleep(2)
-        notes = "\n\n".join(notes_parts)
+
+        # Mechanical dedup of overlap-zone tasks/decisions (±2 мин + похожесть
+        # текста) — BEFORE the LLM sees the notes, so it can't «объединить»
+        # два разных пункта или продублировать один.
+        maps = _dedup_maps(maps)
+
+        # Context-budget control: if all the notes together overflow the
+        # engine's window, merge neighbours pairwise (hierarchical reduce)
+        # until the final merge fits. Silent truncation is the enemy — it eats
+        # the END of the meeting.
+        budget = _ctx_budget(backend)
+        rounds = 0
+        while (len(maps) > 1 and rounds < 4
+               and _est_tokens(_notes_blob(maps)) > 0.8 * budget):
+            merged: list[dict] = []
+            for j in range(0, len(maps), 2):
+                if j + 1 >= len(maps):
+                    merged.append(maps[j])
+                    continue
+                _ck()
+                a, b = maps[j], maps[j + 1]
+                stage = (f"Уплотняю заметки: {j // 2 + 1} из "
+                         f"{(len(maps) + 1) // 2}…")
+                try:
+                    mm = _complete_validated(
+                        backend,
+                        _MERGE_TEMPLATE.format(
+                            a=json.dumps(a, ensure_ascii=False),
+                            b=json.dumps(b, ensure_ascii=False)),
+                        MapNotes, 3500, on_progress, stage, cancel_check)
+                except AnalysisCancelled:
+                    raise
+                except Exception:  # noqa: BLE001 — degrade, the merge is an optimisation
+                    mm = _mech_merge(a, b)  # lossless, no LLM
+                merged.append(mm)
+            maps = merged
+            rounds += 1
+
+        notes = _notes_blob(maps)
         _ck()  # cancel before the final merge
         if custom:
-            prompt = (custom + "\n\nНиже — заметки по последовательным частям "
-                      "встречи; объедини их в итог по требованиям выше:\n" + notes)
+            prompt = (custom + "\n\nНиже — структурированные заметки (JSON) по "
+                      "последовательным частям встречи, в хронологическом порядке; "
+                      "объедини их в итог по требованиям выше:\n" + notes)
+            raw = _stream_complete(backend, _with_extra(prompt, extra_instructions),
+                                   10000, on_progress, "Свожу протокол…",
+                                   cancel_check=cancel_check)
+            result = _extract_json(raw)
         else:
-            prompt = _REDUCE_TEMPLATE.format(notes=notes)
-        raw = _stream_complete(backend, _with_extra(prompt, extra_instructions),
-                               10000, on_progress, "Свожу протокол…",
-                               cancel_check=cancel_check)
-
-    result = _extract_json(raw)
+            prompt = _with_extra(_REDUCE_TEMPLATE.format(notes=notes),
+                                 extra_instructions)
+            if _fit_max_tokens(backend, prompt, 10000) < 4000:
+                warning = ("Протокол мог потерять детали: у движка "
+                           f"«{backend.name}» осталось мало лимита на ответ. "
+                           "Попробуйте «Пересобрать» другим движком.")
+            try:
+                result = _complete_validated(backend, prompt, Protocol, 10000,
+                                             on_progress, "Свожу протокол…",
+                                             cancel_check)
+            except _SchemaMiss as e:
+                result = _extract_json(e.raw)  # lenient legacy path
 
     # Normalise — guarantee the shape the rest of the app expects.
     result.setdefault("summary", "")
@@ -397,6 +709,8 @@ def analyze_transcript(transcript_text: str, provider: str | None = None,
         result[list_key] = _normalise_tasks(result.get(list_key, []))
     result["detailed"] = _normalise_detailed(result["detailed"])
     result["_provider"] = backend.name
+    if warning:
+        result["_warning"] = warning
     return result
 
 

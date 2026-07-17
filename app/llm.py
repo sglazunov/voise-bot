@@ -13,6 +13,7 @@ parsing/validation happens in analyze.py.
 from __future__ import annotations
 
 import json
+import os
 import re
 import ssl
 import time
@@ -127,6 +128,11 @@ def ollama_status() -> str:
     return "installed" if shutil.which("ollama") else "missing"
 
 
+# The ceiling for Ollama's context window (matches Modelfile's num_ctx). The
+# ACTUAL window per request is sized to the prompt, so short calls stay fast.
+OLLAMA_NUM_CTX = int(os.getenv("VTX_OLLAMA_NUM_CTX", "32768"))
+
+
 class OllamaProvider:
     """Local Ollama server. Free, offline, no API key.
 
@@ -139,15 +145,26 @@ class OllamaProvider:
         self.name = f"ollama:{self.model}"
 
     def complete(self, prompt: str, max_tokens: int = 2000, force_json: bool = True,
-                 on_token=None, should_stop=None) -> str:
+                 on_token=None, should_stop=None, json_schema: dict | None = None) -> str:
         url = config.OLLAMA_URL.rstrip("/") + "/api/generate"
+        options = {"temperature": 0.1, "num_predict": max_tokens}
+        # Ollama's DEFAULT context is tiny (~2-4k tokens) and overflow is SILENT
+        # truncation — the model just never sees the end of a long prompt. Size
+        # num_ctx to the actual request (prompt + answer + margin), capped.
+        est = len(prompt) // 3 + max_tokens + 512
+        if est > 8192:
+            options["num_ctx"] = min(OLLAMA_NUM_CTX, ((est // 1024) + 1) * 1024)
         payload = {
             "model": self.model,
             "prompt": prompt,
             "stream": bool(on_token),
-            "options": {"temperature": 0.1, "num_predict": max_tokens},
+            "options": options,
         }
-        if force_json:
+        if json_schema:
+            # Structured outputs: the schema constrains decoding, so the model
+            # physically can't return invalid JSON or drop a required field.
+            payload["format"] = json_schema
+        elif force_json:
             payload["format"] = "json"  # constrain output to valid JSON
         if not on_token:
             out = _http_post_json(url, payload, headers={}, timeout=600)
@@ -492,10 +509,11 @@ class _FallbackChain:
         return any(isinstance(b, OllamaProvider) for b in self._backends)
 
     def complete(self, prompt: str, max_tokens: int = 2000, force_json: bool = True,
-                 on_token=None, should_stop=None) -> str:
+                 on_token=None, should_stop=None, json_schema: dict | None = None) -> str:
         errors = []
-        for k in range(len(self._backends)):
-            i = (self._i + k) % len(self._backends)
+        n = len(self._backends)
+        for k in range(n):
+            i = (self._i + k) % n
             b = self._backends[i]
             # The caller sized max_tokens for the PRIMARY provider; re-clamp for
             # the one actually being tried, or Groq rejects the request with 413.
@@ -503,10 +521,19 @@ class _FallbackChain:
             tpm = config.PROVIDER_TPM.get(str(getattr(b, "name", "")).split(":")[0])
             if tpm:
                 mt = max(1200, min(mt, tpm - len(prompt) // 3 - 400))
+                # A big request (the final protocol asks for >=8000 tokens) that
+                # this provider can only answer with <4000 would come back
+                # TRUNCATED — broken JSON, lost detail. Prefer a provider that
+                # fits; fall back to the tight one only when it's all we have.
+                if max_tokens >= 8000 and mt < 4000 and k < n - 1:
+                    errors.append(f"{getattr(b, 'name', '?')}: бюджет ответа "
+                                  f"~{mt} ток. слишком мал для полного протокола")
+                    continue
             try:
                 if isinstance(b, OllamaProvider):
                     out = b.complete(prompt, max_tokens=mt, force_json=force_json,
-                                     on_token=on_token, should_stop=should_stop)
+                                     on_token=on_token, should_stop=should_stop,
+                                     json_schema=json_schema)
                 else:
                     out = b.complete(prompt, mt, force_json)
                 self._i = i

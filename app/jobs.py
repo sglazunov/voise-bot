@@ -658,10 +658,12 @@ class JobStore:
                 except Exception as e:
                     screen_err = str(e)
 
-            # Text fed to the protocol analysis = continuous speech (no timestamps)
-            # + on-screen text + the participants read off the call grid + the
-            # user's standing AI context (who's who / project essence).
-            analysis_input = plain_content + (("\n\n" + screen_block) if screen_block else "")
+            # Text fed to the protocol analysis = the TIMECODED transcript (with
+            # speaker labels when known) + on-screen text + the participants read
+            # off the call grid + the user's standing AI context. Timecodes let
+            # the map-reduce keep the meeting's chronology and dedup overlap-zone
+            # tasks; the prompts instruct the model not to leak them into output.
+            analysis_input = txt_content + (("\n\n" + screen_block) if screen_block else "")
             analysis_input += _participants_block(job)
             analysis_input += _context_block(job)
 
