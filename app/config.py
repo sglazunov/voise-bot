@@ -42,6 +42,14 @@ VAD_FILTER = os.getenv("VTX_VAD", "1") == "1"
 # off every window is decoded strictly from its own audio.
 CONDITION_PREV_TEXT = os.getenv("VTX_CONDITION_PREV", "0") == "1"
 
+# Whisper anti-hallucination filters (Д4). A segment that Whisper itself thinks
+# is probably silence (no_speech_prob) AND decodes with low confidence
+# (avg_logprob) is a classic "dreamed up" phrase — drop it. Runs of identical
+# consecutive segments (the looping-on-silence failure mode) are collapsed.
+NS_PROB_MAX = float(os.getenv("VTX_NS_PROB_MAX", "0.6"))
+LOGPROB_MIN = float(os.getenv("VTX_LOGPROB_MIN", "-1.0"))
+REPEAT_COLLAPSE_AT = int(os.getenv("VTX_REPEAT_COLLAPSE_AT", "3"))
+
 # Max upload size in MB. 2 GB by default so 1 GB videos go through comfortably.
 MAX_UPLOAD_MB = int(os.getenv("VTX_MAX_UPLOAD_MB", "2048"))
 

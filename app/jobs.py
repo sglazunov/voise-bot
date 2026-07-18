@@ -536,6 +536,87 @@ class JobStore:
                 continue
             self._process(job)
 
+    # Whisper's initial_prompt biases decoding toward the spellings it has just
+    # "read" — the cheapest fix for mangled имена/термины. ~224 tokens is the
+    # window Whisper actually keeps of it, so pack by PRIORITY: the user's own
+    # prompt, then people's names (standing context + tile captions from the
+    # team's PAST videos), then project names, then the glossary's correct
+    # spellings. The live tile scan of THIS video appends on top later.
+    _PROMPT_TOKENS = 224
+
+    # Tile-caption scans of past videos catch UI noise besides real names (chat
+    # snippets, «Стоп запись», dates, URLs). Whisper's prompt budget is tiny —
+    # only feed it strings that actually look like a person's name.
+    _NAME_STOP = {
+        "вчера", "сегодня", "завтра", "демонстрация", "стоп", "запись", "чат",
+        "участники", "войду", "удалено", "сообщение", "сообщения", "пауза",
+        "выход", "микрофон", "камера", "экран", "поделиться", "english",
+        "гость", "организатор", "запись встречи",
+    }
+
+    @classmethod
+    def _looks_like_name(cls, s: str) -> bool:
+        s = (s or "").strip()
+        if not (2 <= len(s) <= 40) or any(ch.isdigit() for ch in s):
+            return False
+        if re.search(r"[^\w\s.\-ёЁ]", s):        # punctuation → chat/UI, not a name
+            return False
+        words = s.split()
+        if not 1 <= len(words) <= 3:
+            return False
+        if s.lower() in cls._NAME_STOP:
+            return False
+        return all(w[0].isupper() for w in words)
+
+    def _auto_initial_prompt(self, job: Job) -> str:
+        budget = self._PROMPT_TOKENS * 3          # ~3 chars per token
+        parts: list[str] = []
+        if (job.initial_prompt or "").strip():
+            parts.append(job.initial_prompt.strip())
+            budget -= len(parts[0])
+        try:
+            from . import ai_context
+            team = _team(job.owner)
+            names = ai_context.known_names(team)
+            # Tile captions from the team's recent recordings: real people,
+            # spelled exactly as Telemost shows them.
+            # Multi-word captions are almost surely people («Мельников Алексей»);
+            # single Cyrillic words might be («Елизавета») — queue them LAST;
+            # single Latin words are Figma/UI leftovers of screen-share OCR — drop.
+            seen = {n.lower() for n in names}
+            multi, single = [], []
+            for j in self.list(owner=team)[:20]:
+                for n in (getattr(j, "video_participants", None) or []):
+                    if not self._looks_like_name(n) or n.lower() in seen:
+                        continue
+                    seen.add(n.lower())
+                    if " " in n.strip():
+                        multi.append(n)
+                    elif re.search(r"[а-яёА-ЯЁ]", n):
+                        single.append(n)
+            names += multi + single
+            projects = ai_context.project_names(team)
+        except Exception:  # prompt building must never break transcription
+            names, projects = [], []
+        rights = [right for _, right in glossary.parse(job.glossary)]
+
+        def take(items: list[str], label: str) -> None:
+            nonlocal budget
+            picked: list[str] = []
+            for it in items:
+                cost = len(it) + 2
+                if budget - cost < 0:
+                    break
+                picked.append(it)
+                budget -= cost
+            if picked:
+                parts.append(f"{label}: {', '.join(picked)}.")
+
+        take(names, "Участники")
+        take(projects, "Проекты")
+        take(list(dict.fromkeys(rights)), "Термины")
+        return " ".join(parts).strip()
+
     def _process(self, job: Job) -> None:
         self._set(job, status=STATUS_RUNNING, started_at=time.time(), progress=0.0)
         self._partial[job.id] = []
@@ -572,7 +653,7 @@ class JobStore:
             # names are then written as shown on screen, not guessed by sound.
             # The full grid scan is also the AUTHORITATIVE participants list for
             # the protocol (everyone connected to the call, no LLM guessing).
-            initial_prompt = job.initial_prompt
+            initial_prompt = self._auto_initial_prompt(job)
             if job.identify_speakers:
                 try:
                     from . import speaker_id

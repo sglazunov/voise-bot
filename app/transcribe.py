@@ -42,9 +42,51 @@ class Segment:
     end: float
     text: str
     speaker: Optional[str] = None  # filled in later if diarization runs
+    # Whisper's own confidence for this segment — kept for the hallucination
+    # filter here and for the low-confidence highlighting in the UI (Д12).
+    avg_logprob: Optional[float] = None
+    no_speech_prob: Optional[float] = None
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+def _is_hallucination(seg: "Segment") -> bool:
+    """Whisper «дорисовывает» фразы на тишине: сам помечает окно как вероятную
+    тишину (no_speech_prob высок) и при этом декодирует с низкой уверенностью.
+    Оба условия сразу — почти наверняка выдуманный текст."""
+    ns = seg.no_speech_prob
+    lp = seg.avg_logprob
+    return (ns is not None and lp is not None
+            and ns > config.NS_PROB_MAX and lp < config.LOGPROB_MIN)
+
+
+def collapse_repeats(segments: List["Segment"],
+                     threshold: Optional[int] = None) -> List["Segment"]:
+    """Collapse runs of >= threshold IDENTICAL consecutive segments to one.
+
+    The looping failure mode: on silence/music Whisper repeats the same phrase
+    dozens of times. Short doubles (a real «да. да.») stay untouched."""
+    thr = threshold or config.REPEAT_COLLAPSE_AT
+    out: List[Segment] = []
+    run: List[Segment] = []
+
+    def flush() -> None:
+        if len(run) >= thr:
+            out.append(run[0])   # the run was a loop — keep a single copy
+        else:
+            out.extend(run)
+        run.clear()
+
+    for seg in segments:
+        key = seg.text.strip().lower()
+        if run and key == run[-1].text.strip().lower() and key:
+            run.append(seg)
+            continue
+        flush()
+        run.append(seg)
+    flush()
+    return out
 
 
 def transcribe_file(
@@ -89,10 +131,18 @@ def transcribe_file(
         on_start()
     out: List[Segment] = []
     for seg in segments_iter:
-        s = Segment(start=seg.start, end=seg.end, text=seg.text.strip())
+        s = Segment(start=seg.start, end=seg.end, text=seg.text.strip(),
+                    avg_logprob=getattr(seg, "avg_logprob", None),
+                    no_speech_prob=getattr(seg, "no_speech_prob", None))
+        if _is_hallucination(s):
+            continue    # dropped BEFORE the live stream — the UI never sees it
         out.append(s)
         if on_segment:
             on_segment(s, total)
+
+    # Collapse hallucination loops (the same phrase repeated on silence). The
+    # live stream may have briefly shown the run; the saved transcript is clean.
+    out = collapse_repeats(out)
 
     meta = {
         "language": getattr(info, "language", language),
