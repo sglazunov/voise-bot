@@ -313,7 +313,9 @@ export default function Recognition() {
         } else {
           setLive(null);
         }
-        if (j.status === "done" || j.status === "cancelled") {
+        // The transcript is FINISHED as soon as the protocol stage starts —
+        // show it during "analyzing" too, not only when the whole job is done.
+        if (j.status === "done" || j.status === "cancelled" || j.status === "analyzing") {
           api.get(`/api/jobs/${sel}/result?format=json`)
             .then((d) => { if (alive && d?.segments?.length) setSegments(d.segments); })
             .catch(() => {});

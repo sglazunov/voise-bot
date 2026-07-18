@@ -508,6 +508,21 @@ class _FallbackChain:
     def supports_stream(self) -> bool:
         return any(isinstance(b, OllamaProvider) for b in self._backends)
 
+    def prefer_cloud(self) -> bool:
+        """Move the cursor to the first CLOUD backend (Ollama stays as
+        fallback). A long meeting on a CPU-only local engine takes HOURS —
+        prompt evaluation alone runs at tens of tokens/sec; a cloud engine does
+        the same call in seconds. No-op (False) when only Ollama is configured."""
+        for i, b in enumerate(self._backends):
+            if not isinstance(b, OllamaProvider):
+                self._i = i
+                return True
+        return False
+
+    @property
+    def cloud_available(self) -> bool:
+        return any(not isinstance(b, OllamaProvider) for b in self._backends)
+
     def complete(self, prompt: str, max_tokens: int = 2000, force_json: bool = True,
                  on_token=None, should_stop=None, json_schema: dict | None = None) -> str:
         errors = []
@@ -552,9 +567,12 @@ def get_provider_chain(name: str | None, keys: dict | None = None):
     primary = get_provider(name, keys)
     pname = str(getattr(primary, "name", "")).split(":")[0]
     backends = [primary]
-    for p in config.available_providers(keys):
-        if p == pname:
-            continue
+    # Fallback order: other CLOUD engines first, Ollama LAST — a rate-limited
+    # Groq should degrade to Gemini (seconds), not to a CPU-bound local model
+    # (tens of minutes per call on a long prompt).
+    rest = [p for p in config.available_providers(keys) if p != pname]
+    rest.sort(key=lambda p: p == "ollama")
+    for p in rest:
         try:
             backends.append(get_provider(p, keys))
         except Exception:  # noqa: BLE001 — an unconfigurable fallback just drops out

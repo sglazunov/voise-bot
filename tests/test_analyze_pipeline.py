@@ -204,3 +204,66 @@ class TestPipeline:
         assert len(backend.prompts) == 1              # no needless retry on null
         assert res["tasks"][0]["task"] == "Настроить теги"
         assert res["tasks"][0]["owner"] == ""         # null -> unassigned, not a guess
+
+
+class TestCloudPreference:
+    """Долгая встреча не должна молоть часами на CPU-Ollama, когда есть облако."""
+
+    def test_chain_fallback_order_puts_ollama_last(self, monkeypatch):
+        from app import config, llm
+        monkeypatch.setattr(config, "available_providers",
+                            lambda keys=None: ["ollama", "groq", "gemini"])
+        made = []
+        real_get = llm.get_provider
+        def fake_get(name, keys=None):
+            made.append(name)
+            class B: pass
+            b = B(); b.name = name or "?"; b.complete = lambda *a, **k: ""
+            return b
+        monkeypatch.setattr(llm, "get_provider", fake_get)
+        chain = llm.get_provider_chain("groq", None)
+        # порядок: primary groq -> облако gemini -> ollama ПОСЛЕДНИМ
+        assert made == ["groq", "gemini", "ollama"]
+
+    def test_prefer_cloud_moves_cursor_past_ollama(self):
+        from app import llm
+        class Cloud: name = "groq"
+        oll = llm.OllamaProvider(model="x")
+        chain = llm._FallbackChain([oll, Cloud()])
+        assert chain.name.startswith("ollama")
+        assert chain.prefer_cloud() is True
+        assert chain.name == "groq"
+
+    def test_prefer_cloud_noop_when_only_ollama(self):
+        from app import llm
+        chain = llm._FallbackChain([llm.OllamaProvider(model="x"),
+                                    llm.OllamaProvider(model="y")])
+        assert chain.prefer_cloud() is False
+
+    def test_long_auto_meeting_prefers_cloud(self, monkeypatch):
+        calls = {"prefer": 0}
+        class FakeChain:
+            name = "fake"
+            def prefer_cloud(self):
+                calls["prefer"] += 1
+                return True
+            def complete(self, prompt, max_tokens=2000, force_json=True, **kw):
+                return _protocol_answer()
+        monkeypatch.setattr(analyze, "_MAX_CHARS", 50)
+        monkeypatch.setattr(analyze, "_CHUNK_CHARS", 10_000)  # 1 chunk
+        monkeypatch.setattr(analyze.llm, "get_provider_chain", lambda *a, **k: FakeChain())
+        analyze.analyze_transcript("[00:01] " + "долгая встреча " * 20)
+        assert calls["prefer"] >= 1
+
+    def test_short_meeting_stays_local(self, monkeypatch):
+        calls = {"prefer": 0}
+        class FakeChain:
+            name = "fake"
+            def prefer_cloud(self):
+                calls["prefer"] += 1
+                return True
+            def complete(self, prompt, max_tokens=2000, force_json=True, **kw):
+                return _protocol_answer()
+        monkeypatch.setattr(analyze.llm, "get_provider_chain", lambda *a, **k: FakeChain())
+        analyze.analyze_transcript("[00:01] короткая встреча")
+        assert calls["prefer"] == 0
