@@ -548,15 +548,20 @@ class JobStore:
             if prov not in job.docx_providers:
                 job.docx_providers.append(prov)
             self._deliver_protocol(job, self.docx_path(job.id, prov))
+            # finished_at MUST be restored: reanalyze() nulls it, and retention
+            # ages a job by finished_at — leaving it None made the job count as
+            # old as its CREATION and get purged early.
             self._set(job, status=STATUS_DONE, analysis=result,
-                      analysis_error=None, docx_providers=job.docx_providers)
+                      analysis_error=None, docx_providers=job.docx_providers,
+                      finished_at=time.time())
         except AnalysisCancelled:
             # Transcript stays intact; just drop back to a finished state.
             self._control.pop(job.id, None)
-            self._set(job, status=STATUS_DONE,
+            self._set(job, status=STATUS_DONE, finished_at=time.time(),
                       analysis_error="Сборка протокола отменена.")
         except Exception as e:
-            self._set(job, status=STATUS_DONE, analysis_error=_friendly_error(e))
+            self._set(job, status=STATUS_DONE, finished_at=time.time(),
+                      analysis_error=_friendly_error(e))
         finally:
             self._reanalyze_lock.release()
 
