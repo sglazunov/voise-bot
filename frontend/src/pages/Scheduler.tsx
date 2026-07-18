@@ -31,6 +31,8 @@ export default function Scheduler() {
   const { s, set, save } = useSettings();
   const [st, setSt] = useState<Status | null>(null);
   const [engines, setEngines] = useState<{ value: string; label: string }[]>([]);
+  const [presets, setPresets] = useState<{ value: string; label: string }[]>([]);
+  useEffect(() => { api.get("/api/presets").then((d) => setPresets(d.presets || [])).catch(() => {}); }, []);
   const toast = useToast();
   const load = () => api.get("/api/automation/scheduler/status").then(setSt).catch(() => {});
   useEffect(() => { load(); const t = setInterval(load, 6000); return () => clearInterval(t); }, []);
@@ -69,7 +71,12 @@ export default function Scheduler() {
         weeek_set_protocol_field: !!s.weeek_set_protocol_field,
         strict_verify: s.strict_verify !== false,
         live_transcribe: s.live_transcribe !== false,
+        analyze_preset: s.analyze_preset || "auto",
         analyze_provider: s.analyze_provider || "auto",
+        telegram_chat_id: s.telegram_chat_id || "",
+        // токен шлём только если ввели новый (true = «уже сохранён», не трогаем)
+        ...(typeof s.telegram_bot_token === "string" && s.telegram_bot_token
+          ? { telegram_bot_token: s.telegram_bot_token } : {}),
       });
       toast("Планировщик сохранён");
     } catch (e: any) { toast(e.message, true); }
@@ -164,12 +171,43 @@ export default function Scheduler() {
           <Toggle title="Поле «Протокол» в Weeek" on={s.weeek_set_protocol_field} onChange={() => set("weeek_set_protocol_field", !s.weeek_set_protocol_field)} />
         </div>
         <div className="mt-3">
+          <label className="lbl">Тип встречи (пресет протокола)</label>
+          <Select value={s.analyze_preset || "auto"} onChange={(v) => set("analyze_preset", v)}
+            options={[{ value: "auto", label: "Авто — по названию встречи" }, ...presets]} />
+          <div className="text-[11.5px] mt-1 mb-3" style={{ color: "var(--muted)" }}>
+            «Авто»: планёрка/стендап → задачи и статусы, демо → показанное и вопросы,
+            1:1 → договорённости, иначе — универсальный.</div>
           <label className="lbl">Движок протокола (нейросеть · модель)</label>
           <Select value={s.analyze_provider || "auto"} onChange={(v) => set("analyze_provider", v)}
             options={[{ value: "auto", label: "Авто (бесплатные/локальные — в первую очередь)" },
                       ...engines.map((e) => ({ value: e.value, label: e.label }))]} />
           <div className="text-[11.5px] mt-1" style={{ color: "var(--muted)" }}>
             Ключи и список моделей — на вкладке «Нейросети».</div>
+        </div>
+      </Card>
+
+      <Card className="mt-3.5">
+        <div className="flex items-center gap-2 mb-2"><Send size={16} color="var(--accent)" />
+          <div className="font-bold text-[15px]">Уведомления в Telegram</div></div>
+        <div className="text-[11.5px] mb-3" style={{ color: "var(--muted)" }}>
+          «Протокол готов» и «⚠ нет звука» прилетят в чат. Создайте бота у @BotFather,
+          добавьте его в чат и укажите токен + chat_id (узнать: перешлите сообщение боту @userinfobot).
+        </div>
+        <div className="grid md:grid-cols-2 gap-3">
+          <div><label className="lbl">Токен бота</label>
+            <input className="field" type="password"
+              placeholder={s.telegram_bot_token === true ? "сохранён — ввести новый" : "123456:ABC-DEF…"}
+              value={typeof s.telegram_bot_token === "string" ? s.telegram_bot_token : ""}
+              onChange={(e) => set("telegram_bot_token", e.target.value)} /></div>
+          <div><label className="lbl">Chat ID</label>
+            <input className="field" placeholder="-1001234567890"
+              value={s.telegram_chat_id || ""} onChange={(e) => set("telegram_chat_id", e.target.value)} /></div>
+        </div>
+        <div className="mt-2.5">
+          <button className="btn btn-ghost" onClick={async () => {
+            try { await onSave(); const r = await api.post("/api/automation/notify/test"); toast(r.detail); }
+            catch (e: any) { toast(e.message, true); }
+          }}>Проверить отправку</button>
         </div>
       </Card>
 

@@ -342,6 +342,9 @@ class Scheduler:
             st.out_path = out
             if res.get("audio_warning"):
                 log("⚠ Во время встречи были периоды без звука — проверьте запись.")
+                from . import notify
+                notify.send(cfg, f"⚠ «{st.title}»: во время записи были периоды "
+                                 "без звука — проверьте запись.")
 
             # Upload to the chosen cloud. Recordings must NOT live on this
             # server — the local file is only a staging copy, so a failed upload
@@ -382,6 +385,10 @@ class Scheduler:
                          else "Распознаю речь…")
                 self._set(st, "transcribing", stage)
                 deliver = bool(do_protocol and cfg.get("upload_protocol", True))
+                from ..analyze import preset_for_title
+                preset_cfg = str(cfg.get("analyze_preset") or "auto")
+                preset = (preset_for_title(st.title) if preset_cfg == "auto"
+                          else preset_cfg)
                 job = store.create(
                     filename=Path(out).name, audio_path=out,
                     language=config.DEFAULT_LANGUAGE, diarize=False,
@@ -399,6 +406,7 @@ class Scheduler:
                     # Meeting title → matches the user's per-project AI context.
                     context_hint=str(st.title or ""),
                     user_notes=st.live_notes,
+                    preset=preset,
                     delete_audio_when_done=delivered_elsewhere,
                     owner=user)
                 st.job_id = job.id
@@ -603,6 +611,9 @@ class Scheduler:
             report(f"⚠ Протокол не собрался, поэтому не прикреплён. Причина: "
                    f"{reason}. Откройте задачу распознавания и нажмите "
                    f"«Пересобрать» — готовый протокол прикрепится сам.")
+            from . import notify
+            notify.send(cfg, f"⚠ Протокол «{st.title or task_id}» не собрался: "
+                             f"{reason}. Нажмите «Пересобрать» в приложении.")
             self._set(st, "error",
                       f"Протокол не собрался — job {job_id}. «Пересобрать» "
                       f"допоставит его в Weeek. Запись {where}.")
@@ -614,6 +625,11 @@ class Scheduler:
                       f"Протокол готов, но не прикреплён: {err} — job {job_id}.")
             return
         log("Протокол прикреплён к задаче Weeek ✓")
+        from . import notify
+        proto_url = getattr(job, "protocol_cloud_url", None)
+        notify.send(cfg, f"📄 Протокол готов: «{st.title or task_id}» — "
+                         "прикреплён к задаче Weeek."
+                         + (f"\n{proto_url}" if proto_url else ""))
         self._set(st, "done",
                   f"Готово. Запись {where}, протокол прикреплён — job {job_id}.")
 
@@ -775,6 +791,9 @@ class Scheduler:
         do_protocol = bool(cfg.get("do_protocol", True))
         do_transcribe = bool(cfg.get("do_transcribe", True))
         deliver = bool(do_protocol and cfg.get("upload_protocol", True))
+        from ..analyze import preset_for_title
+        preset_cfg = str(cfg.get("analyze_preset") or "auto")
+        preset = preset_for_title(st.title) if preset_cfg == "auto" else preset_cfg
 
         def log(msg: str) -> None:
             st.logs.append(str(msg))
@@ -809,6 +828,7 @@ class Scheduler:
             identify_speakers=True,  # Д7: спикеры с видео — безусловно для записей бота
             context_hint=str(st.title or ""),
             user_notes=st.live_notes,
+            preset=preset,
             owner=st.owner)
         st.job_id = job.id
         self._set(st, "transcribing",

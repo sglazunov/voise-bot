@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 from pathlib import Path
 
@@ -439,6 +440,10 @@ def _start_scheduler() -> None:
         scheduler.start()
     except Exception:
         pass
+    # Д14: index pre-existing finished jobs for full-text search (idempotent).
+    import threading as _th
+    _th.Thread(target=store.backfill_search, daemon=True,
+               name="vtx-search-backfill").start()
     # First-run auto-setup: install whatever this machine is missing (OCR engine,
     # ffmpeg, Chromium for the bot) and pre-download all speech models — in the
     # background, no clicks. Disable with VTX_AUTO_SETUP=0.
@@ -488,6 +493,7 @@ async def create_job(
     deliver_weeek_task: str = Form(""),
     context_hint: str = Form(""),
     user_notes: str = Form(""),
+    preset: str = Form(""),
     user: str = Depends(current_user),
 ):
     ext = Path(file.filename or "").suffix.lower()
@@ -522,7 +528,7 @@ async def create_job(
                        deliver_protocol_cloud=deliver_protocol_cloud,
                        deliver_weeek_task=deliver_weeek_task,
                        context_hint=context_hint, model=model_sel,
-                       user_notes=user_notes, owner=user)
+                       user_notes=user_notes, preset=preset, owner=user)
     return JSONResponse({"job_id": job.id, **job.to_public()}, status_code=201)
 
 
@@ -723,6 +729,109 @@ class NotesBody(BaseModel):
     notes: str = ""
 
 
+@app.get("/api/search")
+def search_meetings(q: str = "", user: str = Depends(current_user)):
+    """Д14: full-text search over the team's transcripts and protocols."""
+    q = (q or "").strip()
+    if len(q) < 2:
+        return {"results": []}
+    team = security.team_of(user)
+    if db.enabled():
+        rows = db.search_query(team, q)
+        return {"results": [
+            {"job_id": r["job_id"], "title": r["title"],
+             "created_at": r["created_at"],
+             "snippet": (r.get("snippet") or "").replace("<<", "⟦").replace(">>", "⟧")}
+            for r in rows]}
+    # File backend: linear scan of the team's transcripts (fine for small sets).
+    out = []
+    low = q.lower()
+    for job in store.list(owner=user):
+        p = store.result_path(job.id, "txt")
+        if not p.exists():
+            continue
+        text = p.read_text(encoding="utf-8")
+        i = text.lower().find(low)
+        if i < 0:
+            continue
+        out.append({"job_id": job.id, "title": Path(job.filename).stem,
+                    "created_at": job.created_at,
+                    "snippet": "…" + text[max(0, i - 60):i + 90].replace("\n", " ") + "…"})
+        if len(out) >= 20:
+            break
+    return {"results": out}
+
+
+@app.post("/api/automation/notify/test")
+def notify_test(user: str = Depends(current_user)):
+    """Send a test Telegram message with the team's saved token/chat (Д15)."""
+    from .automation import notify, settings as auto_settings
+    res = notify.test(auto_settings.load(security.team_of(user)))
+    if not res.get("ok"):
+        raise HTTPException(400, res.get("error"))
+    return {"ok": True, "detail": "Тестовое сообщение отправлено в Telegram."}
+
+
+@app.get("/api/system/recommend")
+def system_recommend(user: str = Depends(current_user)):
+    """Д15: recommend a Whisper model from the machine's RAM/CPU, so the user
+    doesn't pick blind."""
+    ram_gb = cpu = None
+    try:
+        with open("/proc/meminfo", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    ram_gb = round(int(line.split()[1]) / 1024 / 1024, 1)
+                    break
+        cpu = os.cpu_count()
+    except OSError:
+        pass
+    if ram_gb is None:
+        return {"model": "", "detail": ""}
+    if ram_gb >= 12:
+        model, why = "large-v3-turbo", "точная и быстрая, ей хватает вашей памяти"
+    elif ram_gb >= 6:
+        model, why = "medium", "разумный баланс для этой памяти"
+    else:
+        model, why = "small", "мало памяти — компактная модель надёжнее"
+    return {"model": model, "ram_gb": ram_gb, "cpu": cpu,
+            "detail": f"Для этой машины ({ram_gb} ГБ RAM, {cpu} CPU) рекомендуем "
+                      f"«{model}» — {why}."}
+
+
+@app.get("/api/presets")
+def list_presets(user: str = Depends(current_user)):
+    """Д11: protocol presets — builtins + the team's custom ones."""
+    from .automation import settings as auto_settings
+    team = security.team_of(user)
+    custom = auto_settings.load(team).get("custom_presets") or {}
+    out = [{"value": k, "label": v["label"]} for k, v in analyze.PROTOCOL_PRESETS.items()]
+    out += [{"value": k, "label": f"{k} (свой)"} for k in sorted(custom)]
+    return {"presets": out}
+
+
+class PresetBody(BaseModel):
+    name: str
+    rules: str = ""
+
+
+@app.post("/api/presets")
+def save_preset(body: PresetBody, user: str = Depends(current_user)):
+    """Save/update the team's custom preset (empty rules = delete)."""
+    from .automation import settings as auto_settings
+    team = security.team_of(user)
+    name = re.sub(r"[^\w\- ]", "", body.name).strip()[:40]
+    if not name:
+        raise HTTPException(400, "Укажите имя пресета.")
+    custom = dict(auto_settings.load(team).get("custom_presets") or {})
+    if body.rules.strip():
+        custom[name] = body.rules.strip()[:4000]
+    else:
+        custom.pop(name, None)
+    auto_settings.save(team, {"custom_presets": custom})
+    return {"ok": True, "presets": sorted(custom)}
+
+
 @app.post("/api/jobs/{job_id}/notes")
 def set_job_notes(job_id: str, body: NotesBody, user: str = Depends(current_user)):
     """Attach the participant's live meeting notes to a job (Д6). They join the
@@ -730,6 +839,54 @@ def set_job_notes(job_id: str, body: NotesBody, user: str = Depends(current_user
     _require_owned(job_id, user)
     job = store.set_notes(job_id, body.notes)
     return {"ok": True, "has_notes": bool(job.user_notes)}
+
+
+class AnalysisPatch(BaseModel):
+    analysis: dict
+
+
+@app.patch("/api/jobs/{job_id}/analysis")
+def patch_analysis(job_id: str, body: AnalysisPatch, user: str = Depends(current_user)):
+    """Д13: save the user's manual protocol edits (docx re-renders)."""
+    _require_owned(job_id, user)
+    try:
+        job = store.update_analysis(job_id, body.analysis or {})
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+    return {"ok": True, "analysis": job.analysis}
+
+
+class RegenTopicBody(BaseModel):
+    index: int
+    provider: str | None = None
+
+
+@app.post("/api/jobs/{job_id}/regen-topic")
+def regen_topic(job_id: str, body: RegenTopicBody, user: str = Depends(current_user)):
+    """Д13: re-generate ONE topic of the protocol via the LLM."""
+    _require_owned(job_id, user)
+    try:
+        job = store.regen_topic(job_id, body.index, provider=body.provider)
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+    return {"ok": True, "analysis": job.analysis}
+
+
+class AskBody(BaseModel):
+    question: str
+
+
+@app.post("/api/jobs/{job_id}/ask")
+def ask_meeting_api(job_id: str, body: AskBody, user: str = Depends(current_user)):
+    """Д13: chat over the meeting — answer with timecodes from the transcript."""
+    _require_owned(job_id, user)
+    q = (body.question or "").strip()
+    if len(q) < 3:
+        raise HTTPException(400, "Сформулируйте вопрос.")
+    try:
+        return {"ok": True, "answer": store.ask(job_id, q)}
+    except ValueError as e:
+        raise HTTPException(409, str(e))
 
 
 @app.post("/api/jobs/{job_id}/redeliver")

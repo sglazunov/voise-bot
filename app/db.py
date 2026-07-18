@@ -70,6 +70,7 @@ JOB_SCALAR_COLS = [
     "initial_prompt", "glossary", "analyze", "provider", "analysis_instructions",
     "analysis_prompt", "capture_screen", "identify_speakers",
     "deliver_protocol_cloud", "deliver_weeek_task", "context_hint", "user_notes",
+    "preset",
     "delete_audio_when_done", "status", "progress", "created_at", "started_at",
     "finished_at", "error", "duration", "speakers", "diarization_error",
     "speaker_error", "screen_error", "protocol_cloud_url", "delivery_error",
@@ -132,6 +133,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     deliver_weeek_task     TEXT,
     context_hint           TEXT,
     user_notes             TEXT,
+    preset                 TEXT,
     delete_audio_when_done BOOLEAN,
     status                 TEXT,
     progress               DOUBLE PRECISION,
@@ -156,8 +158,19 @@ CREATE TABLE IF NOT EXISTS jobs (
 CREATE INDEX IF NOT EXISTS idx_jobs_owner ON jobs(owner);
 CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at);
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS user_notes TEXT;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS preset TEXT;
 ALTER TABLE meetings ADD COLUMN IF NOT EXISTS out_path TEXT;
 ALTER TABLE meetings ADD COLUMN IF NOT EXISTS live_notes TEXT;
+CREATE TABLE IF NOT EXISTS search_docs (
+    job_id     TEXT PRIMARY KEY,
+    username   TEXT,
+    title      TEXT,
+    body       TEXT,
+    created_at DOUBLE PRECISION
+);
+CREATE INDEX IF NOT EXISTS idx_search_user ON search_docs(username);
+CREATE INDEX IF NOT EXISTS idx_search_tsv ON search_docs
+    USING GIN (to_tsvector('russian', coalesce(title,'') || ' ' || coalesce(body,'')));
 CREATE TABLE IF NOT EXISTS user_settings (
     username    TEXT PRIMARY KEY,
     data        JSONB NOT NULL
@@ -482,9 +495,53 @@ def aicontext_save(user: str, data: dict) -> None:
 def delete_user_data(user: str) -> None:
     with _conn() as conn, _cur(conn) as cur:
         for table in ("user_settings", "user_creds", "meetings",
-                      "ai_context_projects", "ai_context"):
+                      "ai_context_projects", "ai_context", "search_docs"):
             cur.execute(f"DELETE FROM {table} WHERE username=%s", (user,))
         cur.execute("DELETE FROM meeting_stats WHERE team=%s", (user,))
+
+
+# --------------------------------------------------------------------------- #
+# search_docs — full-text index over the team's transcripts + protocols (Д14)
+# --------------------------------------------------------------------------- #
+def search_save(job_id: str, team: str, title: str, body: str,
+                created_at: float) -> None:
+    with _conn() as conn, _cur(conn) as cur:
+        cur.execute(
+            """INSERT INTO search_docs (job_id, username, title, body, created_at)
+               VALUES (%s,%s,%s,%s,%s)
+               ON CONFLICT (job_id) DO UPDATE SET
+                 title=EXCLUDED.title, body=EXCLUDED.body""",
+            (job_id, team, title, body, created_at))
+
+
+def search_delete(job_id: str) -> None:
+    with _conn() as conn, _cur(conn) as cur:
+        cur.execute("DELETE FROM search_docs WHERE job_id=%s", (job_id,))
+
+
+def search_ids(team: str) -> set[str]:
+    with _conn() as conn, _cur(conn) as cur:
+        cur.execute("SELECT job_id FROM search_docs WHERE username=%s", (team,))
+        return {r["job_id"] for r in cur.fetchall()}
+
+
+def search_query(team: str, q: str, limit: int = 20) -> list[dict]:
+    """websearch syntax («теги -старое», фразы в кавычках), russian stemming,
+    highlighted snippet via ts_headline."""
+    with _conn() as conn, _cur(conn) as cur:
+        cur.execute(
+            """SELECT job_id, title, created_at,
+                      ts_headline('russian', body,
+                                  websearch_to_tsquery('russian', %s),
+                                  'MaxWords=20, MinWords=8, MaxFragments=1,
+                                   StartSel=<<, StopSel=>>') AS snippet
+               FROM search_docs
+               WHERE username=%s
+                 AND to_tsvector('russian', coalesce(title,'') || ' ' || coalesce(body,''))
+                     @@ websearch_to_tsquery('russian', %s)
+               ORDER BY created_at DESC LIMIT %s""",
+            (q, team, q, limit))
+        return [dict(r) for r in cur.fetchall()]
 
 
 # --------------------------------------------------------------------------- #

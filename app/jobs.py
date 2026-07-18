@@ -104,6 +104,7 @@ class Job:
     deliver_weeek_task: str = ""     # Weeek task id/URL to attach the protocol link to
     context_hint: str = ""           # matches saved AI-context projects (meeting/project name)
     user_notes: str = ""             # participant's own live notes — the protocol's skeleton (Д6)
+    preset: str = ""                 # protocol preset (Д11): planerka|design|demo|one_on_one|custom
     delete_audio_when_done: bool = False  # delete the source media after processing
                                           # (recordings already sent to the UI's cloud)
     owner: str = ""                  # the login that owns this job (isolation)
@@ -196,7 +197,7 @@ class JobStore:
                deliver_protocol_cloud: bool = False, deliver_weeek_task: str = "",
                context_hint: str = "", model: str = "",
                delete_audio_when_done: bool = False, owner: str = "",
-               user_notes: str = "") -> Job:
+               user_notes: str = "", preset: str = "") -> Job:
         job = Job(
             id=uuid.uuid4().hex[:12],
             filename=filename,
@@ -216,6 +217,7 @@ class JobStore:
             deliver_weeek_task=(deliver_weeek_task or "").strip(),
             context_hint=(context_hint or "").strip(),
             user_notes=(user_notes or "").strip(),
+            preset=(preset or "").strip(),
             delete_audio_when_done=delete_audio_when_done,
             owner=_team(owner),   # jobs belong to the TEAM, not the individual
         )
@@ -349,6 +351,144 @@ class JobStore:
         self._save()
         return job
 
+    def _rebuild_docx(self, job: Job) -> None:
+        """Re-render the Word document from the current job.analysis."""
+        from .docx_export import generate_report
+        prov = (job.docx_providers[-1] if job.docx_providers
+                else (job.analysis or {}).get("_provider") or job.provider)
+        segs = []
+        jp = self.result_path(job.id, "json")
+        if jp.exists():
+            try:
+                segs = json.loads(jp.read_text(encoding="utf-8")).get("segments", [])
+            except Exception:  # noqa: BLE001
+                segs = []
+        generate_report(out_path=self.docx_path(job.id, prov),
+                        filename=job.filename, segments=segs,
+                        analysis=job.analysis, duration=job.duration)
+        if prov not in job.docx_providers:
+            job.docx_providers.append(prov)
+
+    def update_analysis(self, job_id: str, patch: dict) -> Job:
+        """Д13: apply the user's manual edits to the protocol and re-render the
+        Word doc. Human edits are TRUSTED — the grounding flags are dropped
+        (their indexes no longer line up, and the human just reviewed it)."""
+        job = self._require(job_id)
+        if not job.analysis:
+            raise ValueError("У задачи ещё нет протокола.")
+        from .analyze import (_normalise_detailed, _normalise_participants,
+                              _normalise_tasks)
+        a = dict(job.analysis)
+        if "summary" in patch:
+            a["summary"] = str(patch["summary"] or "").strip()[:8000]
+        if "participants" in patch:
+            a["participants"] = _normalise_participants(patch["participants"])[:60]
+        if "detailed" in patch:
+            a["detailed"] = _normalise_detailed(patch["detailed"])[:50]
+        for key in ("key_thoughts", "conclusions", "decisions"):
+            if key in patch:
+                a[key] = [str(x).strip()[:600] for x in (patch[key] or [])
+                          if str(x).strip()][:60]
+        for key in ("tasks", "minor_tasks", "done_tasks"):
+            if key in patch:
+                a[key] = _normalise_tasks(patch[key])[:120]
+        a.pop("verification", None)
+        a.pop("_warning", None)
+        a["_edited"] = True
+        job.analysis = a
+        self._rebuild_docx(job)
+        self._save()
+        self.index_search(job)
+        return job
+
+    def regen_topic(self, job_id: str, index: int,
+                    provider: str | None = None) -> Job:
+        """Д13: re-generate ONE topic's details via the LLM, leave the rest."""
+        job = self._require(job_id)
+        a = dict(job.analysis or {})
+        detailed = list(a.get("detailed") or [])
+        if not (0 <= index < len(detailed)):
+            raise ValueError("Нет темы с таким номером.")
+        txt_path = self.result_path(job_id, "txt")
+        if not txt_path.exists():
+            raise ValueError("Нет расшифровки для перегенерации.")
+        from .analyze import regen_topic_details
+        detailed[index] = regen_topic_details(
+            txt_path.read_text(encoding="utf-8"), detailed[index],
+            provider=provider or job.provider, keys=_owner_keys(job.owner),
+            user_notes=job.user_notes)
+        a["detailed"] = detailed
+        a.pop("verification", None)   # indexes may shift meaning — cleared
+        a["_edited"] = True
+        job.analysis = a
+        self._rebuild_docx(job)
+        self._save()
+        self.index_search(job)
+        return job
+
+    def ask(self, job_id: str, question: str) -> str:
+        """Д13: Q&A over this meeting's transcript (answer carries timecodes)."""
+        job = self._require(job_id)
+        txt_path = self.result_path(job_id, "txt")
+        if not txt_path.exists():
+            raise ValueError("Нет расшифровки — не по чему искать ответ.")
+        from .analyze import ask_meeting
+        return ask_meeting(txt_path.read_text(encoding="utf-8"), question,
+                           provider=job.provider, keys=_owner_keys(job.owner),
+                           user_notes=job.user_notes)
+
+    def index_search(self, job: Job) -> None:
+        """Д14: (re)index this job's transcript + protocol for full-text search.
+        Postgres-only (file backend searches by scanning); best-effort."""
+        if not db.enabled():
+            return
+        try:
+            parts = []
+            p = self.result_path(job.id, "txt")
+            if p.exists():
+                parts.append(p.read_text(encoding="utf-8"))
+            a = job.analysis or {}
+            parts.append(str(a.get("summary") or ""))
+            parts += [f"{d.get('topic', '')}. {d.get('details', '')}"
+                      for d in (a.get("detailed") or []) if isinstance(d, dict)]
+            for key in ("tasks", "minor_tasks", "done_tasks"):
+                parts += [str(x.get("task") or "") for x in (a.get(key) or [])
+                          if isinstance(x, dict)]
+            parts += [str(x) for x in (a.get("decisions") or [])]
+            body = "\n".join(x for x in parts if x)[:500_000]
+            if body:
+                db.search_save(job.id, job.owner, Path(job.filename).stem,
+                               body, job.created_at or time.time())
+        except Exception:  # noqa: BLE001 — search must never break the pipeline
+            pass
+
+    def backfill_search(self) -> None:
+        """Index the done jobs that existed before the search feature."""
+        if not db.enabled():
+            return
+        try:
+            teams = {j.owner for j in self._jobs.values()}
+            for team in teams:
+                indexed = db.search_ids(team)
+                for job in self._jobs.values():
+                    if (job.owner == team and job.status == STATUS_DONE
+                            and job.id not in indexed):
+                        self.index_search(job)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _preset_extra(self, job: Job) -> str:
+        """Д11: the preset's emphasis rules + the user's own instructions."""
+        try:
+            from .analyze import preset_rules
+            from .automation import settings as auto_settings
+            custom = auto_settings.load(job.owner).get("custom_presets") or {}
+            rules = preset_rules(job.preset, custom)
+        except Exception:  # noqa: BLE001
+            rules = ""
+        parts = [p for p in (rules, job.analysis_instructions) if (p or "").strip()]
+        return "\n\n".join(parts)
+
     def _maybe_verify(self, job: Job, result: dict, transcript: str) -> dict:
         """Д5: grounding pass over the fresh protocol (strict mode, on by
         default; per-team switch «strict_verify» in automation settings). Never
@@ -385,7 +525,7 @@ class JobStore:
 
             result = analyze_transcript(
                 txt, provider=job.provider,
-                extra_instructions=job.analysis_instructions,
+                extra_instructions=self._preset_extra(job),
                 custom_prompt=job.analysis_prompt,
                 on_progress=self._on_analysis(job.id),
                 cancel_check=lambda: self._control.get(job.id, {}).get("cancel"),
@@ -516,6 +656,11 @@ class JobStore:
             ref = job.finished_at or job.created_at or now
             if now - ref > max_age:
                 self._delete_job_files(job)
+                if db.enabled():
+                    try:
+                        db.search_delete(job.id)
+                    except Exception:  # noqa: BLE001
+                        pass
                 self._jobs.pop(job.id, None)
                 self._partial.pop(job.id, None)
                 self._control.pop(job.id, None)
@@ -563,6 +708,8 @@ class JobStore:
         if kw.get("status") in (STATUS_DONE, STATUS_ERROR):
             from . import stats
             stats.record(job)
+            if kw.get("status") == STATUS_DONE:
+                self.index_search(job)   # Д14: transcript+protocol become searchable
 
     def _worker_loop(self) -> None:
         while True:
@@ -796,7 +943,7 @@ class JobStore:
 
                     analysis_result = analyze_transcript(
                         analysis_input, provider=job.provider,
-                        extra_instructions=job.analysis_instructions,
+                        extra_instructions=self._preset_extra(job),
                         custom_prompt=job.analysis_prompt,
                         on_progress=self._on_analysis(job.id),
                         cancel_check=lambda: self._control.get(job.id, {}).get("cancel"),
