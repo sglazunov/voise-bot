@@ -1160,6 +1160,36 @@ def automation_meeting_links(inp: MeetingLinksIn, user: str = Depends(current_us
     return {"ok": not failed, "detail": detail}
 
 
+@app.get("/api/automation/meetings/{task_id}/live")
+def meeting_live(task_id: str, user: str = Depends(current_user)):
+    """Д10: live transcript while the bot records; the final transcript after."""
+    from .automation.scheduler import scheduler
+    res = scheduler.live_view(user, task_id)
+    if not res.get("ok"):
+        raise HTTPException(404, res.get("error"))
+    return res
+
+
+@app.get("/api/automation/meetings/{task_id}/notes")
+def meeting_notes_get(task_id: str, user: str = Depends(current_user)):
+    from .automation.scheduler import scheduler
+    res = scheduler.get_meeting_notes(user, task_id)
+    if not res.get("ok"):
+        raise HTTPException(404, res.get("error"))
+    return res
+
+
+@app.post("/api/automation/meetings/{task_id}/notes")
+def meeting_notes_set(task_id: str, body: NotesBody, user: str = Depends(current_user)):
+    """Participant's notes typed during/after the meeting (Д6+Д10): stored on
+    the meeting, forwarded to its recognition job as soon as it exists."""
+    from .automation.scheduler import scheduler
+    res = scheduler.set_meeting_notes(user, task_id, body.notes)
+    if not res.get("ok"):
+        raise HTTPException(404, res.get("error"))
+    return res
+
+
 @app.post("/api/automation/scheduler/stop-recording")
 def automation_scheduler_stop_recording(task_id: str | None = None,
                                         user: str = Depends(current_user)):

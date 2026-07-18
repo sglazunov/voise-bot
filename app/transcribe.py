@@ -12,6 +12,9 @@ from . import config
 _model: Optional[WhisperModel] = None
 _model_name: Optional[str] = None
 _model_lock = threading.Lock()
+# One transcription at a time: the model instance is shared, and the job worker
+# and the live-transcribe threads (Д10) must not run inference concurrently.
+_transcribe_lock = threading.Lock()
 
 
 def get_model(name: Optional[str] = None) -> WhisperModel:
@@ -96,7 +99,8 @@ def transcribe_file(
     on_start: Optional[Callable[[], None]] = None,
     initial_prompt: Optional[str] = None,
     model_name: Optional[str] = None,
-) -> tuple[List[Segment], dict]:
+    nonblocking: bool = False,
+) -> Optional[tuple[List[Segment], dict]]:
     """Transcribe an audio or video file.
 
     Video files (mp4/mkv/…) work directly — faster-whisper decodes the audio
@@ -108,7 +112,22 @@ def transcribe_file(
     on_segment(segment, total_seconds) is called for every segment as it is
     produced (faster-whisper yields them lazily), so the UI can stream the
     growing transcript and show real progress.
+
+    `nonblocking=True` (the live-transcribe path) returns None instead of
+    waiting when another transcription holds the model — a live tick simply
+    skips rather than queueing up behind an hour-long job.
     """
+    if not _transcribe_lock.acquire(blocking=not nonblocking):
+        return None
+    try:
+        return _transcribe_locked(audio_path, language, on_segment, on_start,
+                                  initial_prompt, model_name)
+    finally:
+        _transcribe_lock.release()
+
+
+def _transcribe_locked(audio_path, language, on_segment, on_start,
+                       initial_prompt, model_name) -> tuple[List[Segment], dict]:
     model = get_model(model_name)
     segments_iter, info = model.transcribe(
         audio_path,
