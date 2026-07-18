@@ -341,6 +341,76 @@ _REDUCE_TEMPLATE = (
 )
 
 
+# Д11: protocol presets — the same JSON schema, but the emphasis matches the
+# meeting type. Picked per job, or auto-detected from the meeting title.
+PROTOCOL_PRESETS: dict[str, dict] = {
+    "universal": {"label": "Универсальный", "rules": ""},
+    "planerka": {
+        "label": "Планёрка / статус",
+        "keywords": ("планёрк", "планерк", "стендап", "стэндап", "standup",
+                     "статус", "еженедельн", "синк", "sync"),
+        "rules": (
+            "ТИП ВСТРЕЧИ: ПЛАНЁРКА (статус-встреча). Приоритет протокола — "
+            "ЗАДАЧИ И СТАТУСЫ: по каждому участнику, который отчитывался, — что "
+            "СДЕЛАНО (done_tasks), что В РАБОТЕ и что он ВОЗЬМЁТ дальше (tasks), "
+            "и какие у него БЛОКЕРЫ (вынеси блокеры отдельными пунктами в "
+            "key_thoughts с пометкой «Блокер:»). Сроки фиксируй дословно. "
+            "Длинные обсуждения сворачивай — здесь важнее полный список задач, "
+            "чем детальный пересказ дискуссий."),
+    },
+    "design": {
+        "label": "Обсуждение / дизайн",
+        "keywords": ("дизайн", "обсужден", "проектирован", "архитектур",
+                     "брейншторм", "мастерская", "review", "ревью"),
+        "rules": (
+            "ТИП ВСТРЕЧИ: ОБСУЖДЕНИЕ/ДИЗАЙН. Приоритет — РЕШЕНИЯ И АРГУМЕНТЫ: "
+            "в detailed по каждой теме разверни рассмотренные ВАРИАНТЫ, кто "
+            "какие аргументы «за/против» приводил, и почему выбрали то, что "
+            "выбрали. ОТКРЫТЫЕ ВОПРОСЫ (не решили, отложили, надо исследовать) "
+            "вынеси отдельными пунктами в conclusions с пометкой «Открыто:». "
+            "decisions — только зафиксированные выборы."),
+    },
+    "demo": {
+        "label": "Демо / показ",
+        "keywords": ("демо", "demo", "показ", "презентац"),
+        "rules": (
+            "ТИП ВСТРЕЧИ: ДЕМО. Приоритет: ЧТО ПОКАЗЫВАЛИ (по шагам, в "
+            "detailed), какие ВОПРОСЫ И РЕАКЦИИ были у смотревших (key_thoughts, "
+            "с именами, где однозначно), и какие ДОГОВОРЁННОСТИ и доработки из "
+            "этого родились (decisions/tasks). Замечания «поправить/изменить» — "
+            "каждое отдельной задачей."),
+    },
+    "one_on_one": {
+        "label": "1:1",
+        "keywords": ("1:1", "1-1", "один на один", "one-on-one", "тет-а-тет"),
+        "rules": (
+            "ТИП ВСТРЕЧИ: 1:1 (разговор двоих). Приоритет — ДОГОВОРЁННОСТИ: "
+            "что решили и кто что делает к следующей встрече. Темы разговора "
+            "перечисли кратко (detailed по 3-5 предложений, без развёрнутых "
+            "пересказов — разговор личный). Оценочные и чувствительные "
+            "формулировки смягчай до фактов."),
+    },
+}
+
+
+def preset_rules(name: str | None, custom: dict | None = None) -> str:
+    """The extra prompt rules of a preset; '' for universal/unknown.
+    `custom` is the team's own presets {name: rules} — they win over builtins."""
+    name = (name or "").strip()
+    if custom and name in custom:
+        return str(custom[name] or "")
+    return str((PROTOCOL_PRESETS.get(name) or {}).get("rules") or "")
+
+
+def preset_for_title(title: str | None) -> str:
+    """Auto-pick a preset from the meeting title (scheduler's «авто» mode)."""
+    low = (title or "").lower()
+    for name, p in PROTOCOL_PRESETS.items():
+        if any(k in low for k in p.get("keywords") or ()):
+            return name
+    return "universal"
+
+
 # Д6: the participant's own live notes are the most trustworthy input — a human
 # wrote them DURING the meeting. They become the protocol's skeleton; the
 # transcript fills in the details.
@@ -977,3 +1047,85 @@ def verify_protocol(result: dict, transcript_text: str, user_notes: str = "",
                 item["owner"] = ""
     result["verification"] = ver
     return result
+
+
+# --------------------------------------------------------------------------- #
+# Д13: targeted re-generation and meeting Q&A
+# --------------------------------------------------------------------------- #
+def regen_topic_details(transcript_text: str, topic: dict,
+                        provider: str | None = None, keys: dict | None = None,
+                        user_notes: str = "") -> dict:
+    """Re-write ONE topic of the protocol (deeper/cleaner) without touching the
+    rest. Returns {"topic", "details"}."""
+    backend = llm.get_provider_chain(provider, keys)
+    budget_chars = max(int(0.7 * _ctx_budget(backend)) * 3, 8000)
+    text = (transcript_text or "")[:budget_chars]
+    prompt = (
+        "Ниже — расшифровка рабочей встречи (реплики с таймкодами [мм:сс]) и "
+        "ОДНА тема её протокола. Перепиши раздел этой темы ЗАНОВО, подробнее и "
+        "точнее: найди в расшифровке все места, где её обсуждали, и собери "
+        "полное, самодостаточное описание на 10-14 предложений (контекст → что "
+        "обсуждали, кто что предложил/возразил (по именам, только когда "
+        "однозначно) → конкретика: числа, названия, сроки → чем закончилось). "
+        "НЕ выдумывай ничего, чего нет в расшифровке. Таймкоды в текст не "
+        "переноси. Верни ТОЛЬКО JSON {\"topic\": \"название\", \"details\": "
+        "\"описание\"}.\n\n"
+        f"Тема: {topic.get('topic', '')}\n"
+        f"Текущее описание: {topic.get('details', '')}\n\n"
+        + _with_notes("Расшифровка:\n" + text, user_notes))
+    try:
+        out = _complete_validated(backend, prompt, ProtoTopic, 3000,
+                                  None, "Перегенерирую раздел…")
+    except _SchemaMiss as e:
+        out = {"topic": topic.get("topic", ""), "details": e.raw[:4000]}
+    return {"topic": (out.get("topic") or topic.get("topic") or "").strip(),
+            "details": (out.get("details") or "").strip()}
+
+
+def ask_meeting(transcript_text: str, question: str,
+                provider: str | None = None, keys: dict | None = None,
+                user_notes: str = "") -> str:
+    """Q&A over one meeting: pick the transcript windows relevant to the
+    question, ask the LLM to answer WITH timecodes, admit when absent."""
+    backend = llm.get_provider_chain(provider, keys)
+    budget_chars = max(int(0.6 * _ctx_budget(backend)) * 3, 8000)
+    text = (transcript_text or "").strip()
+
+    # Cheap retrieval: score ~40-line windows by stem overlap with the question.
+    lines = text.splitlines()
+    win = 40
+    q_stems = {w[:5] for w in _norm_for_match(question).split() if len(w) >= 4}
+    windows: list[tuple[float, str]] = []
+    for i in range(0, max(len(lines), 1), win // 2):
+        chunk = "\n".join(lines[i:i + win])
+        if not chunk.strip():
+            continue
+        cs = {w[:5] for w in _norm_for_match(chunk).split() if len(w) >= 4}
+        score = len(q_stems & cs) / (len(q_stems) or 1)
+        windows.append((score, chunk))
+    windows.sort(key=lambda x: -x[0])
+    picked, used = [], 0
+    for score, chunk in windows:
+        if used + len(chunk) > budget_chars:
+            continue
+        if score <= 0 and picked:
+            break
+        picked.append(chunk)
+        used += len(chunk)
+        if used >= budget_chars * 0.9:
+            break
+    fragments = "\n\n---\n\n".join(picked) or text[:budget_chars]
+
+    prompt = (
+        "Ниже — фрагменты расшифровки ОДНОЙ рабочей встречи (реплики с "
+        "таймкодами [мм:сс], иногда с именем говорящего) и вопрос по этой "
+        "встрече. Ответь по-русски КОНКРЕТНО и коротко (3-8 предложений), "
+        "опираясь ТОЛЬКО на расшифровку"
+        + (" и заметки участника" if (user_notes or "").strip() else "") + ". "
+        "ОБЯЗАТЕЛЬНО укажи таймкод(ы) [мм:сс] мест, на которых основан ответ. "
+        "Если в расшифровке ответа нет — прямо скажи «на встрече это не "
+        "обсуждалось» и ничего не выдумывай.\n\n"
+        + _with_notes("", user_notes)
+        + f"Фрагменты расшифровки:\n{fragments}\n\nВопрос: {question}")
+    return _stream_complete(backend, prompt, 1500, None, "Ищу ответ…",
+                            force_json=False).strip()

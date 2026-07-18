@@ -23,7 +23,8 @@ _LOCK = threading.Lock()
 # Secret fields are stored ENCRYPTED on disk (per-user key) and decrypted only in
 # memory. Dotted paths reach into the nested cloud sub-dicts.
 _SECRET_PATHS = ("weeek_token", "yandex_disk.token", "yandex_disk.read_token",
-                 "gdrive.client_secret", "gdrive.refresh_token")
+                 "gdrive.client_secret", "gdrive.refresh_token",
+                 "telegram_bot_token")
 
 
 def _path(user: str) -> Path:
@@ -103,6 +104,11 @@ _DEFAULTS: dict[str, Any] = {
                                       # verbatim quote; unverified ones get flagged (Д5)
     "live_transcribe": True,          # Д10: transcribe the growing recording every N min
     "live_interval_min": 5,           # ...this often (the page shows text mid-meeting)
+    "analyze_preset": "auto",         # Д11: протокол под тип встречи; auto = по названию
+    "custom_presets": {},             # {имя: доп. правила} — свои пресеты команды
+    # --- Д15: уведомления в Telegram («протокол готов», «нет звука») ---
+    "telegram_bot_token": "",         # токен бота из @BotFather (шифруется)
+    "telegram_chat_id": "",           # id чата/группы, куда слать
     # --- Weeek checkbox that decides whether to record this meeting ---
     "weeek_use_record_field": True,   # let a Weeek toggle decide record / skip
     "weeek_record_field": "Запись встречи",  # name of that checkbox custom field
@@ -219,4 +225,5 @@ def redacted(user: str) -> dict[str, Any]:
     # client_id isn't very secret but no need to ship it back; show presence.
     gd["client_id"] = bool(gd.get("client_id"))
     out["gdrive"] = gd
+    out["telegram_bot_token"] = bool(data.get("telegram_bot_token"))
     return out

@@ -63,6 +63,159 @@ function List({ title, items, verify }: { title: string; items?: any[]; verify?:
   );
 }
 
+// Д12: render the transcript from JSON segments, greying-out and underlining
+// the spots Whisper itself decoded with low confidence — that's exactly where
+// names and numbers need a human glance.
+const LOWCONF = -0.7;
+function fmtTs(sec: number): string {
+  const s = Math.floor(sec || 0), h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+  return h ? `${h}:${String(m).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`
+           : `${String(m).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
+}
+function SegmentView({ segments }: { segments: any[] }) {
+  const anyConf = segments.some((s) => typeof s.avg_logprob === "number");
+  let lastSpeaker: string | null | undefined = undefined;
+  return (
+    <div className="text-[12.5px] leading-relaxed">
+      {anyConf && (
+        <div className="text-[11px] mb-2" style={{ color: "var(--muted)" }}>
+          <span style={{ borderBottom: "1px dotted var(--warn)" }}>Подчёркнутое</span> — низкая
+          уверенность распознавания: проверьте имена и цифры.
+        </div>
+      )}
+      {segments.map((s, i) => {
+        const low = typeof s.avg_logprob === "number" && s.avg_logprob < LOWCONF;
+        const speakerChanged = s.speaker !== lastSpeaker;
+        lastSpeaker = s.speaker;
+        return (
+          <div key={i} className={speakerChanged && s.speaker ? "mt-2" : ""}>
+            {speakerChanged && s.speaker && (
+              <div className="font-semibold text-[12px]" style={{ color: "var(--accent)" }}>
+                [{fmtTs(s.start)}] {s.speaker}:</div>
+            )}
+            <span
+              title={low ? `Whisper не уверен в этом фрагменте (logprob ${s.avg_logprob?.toFixed(2)})` : undefined}
+              style={low ? { color: "var(--muted)", borderBottom: "1px dotted var(--warn)" } : undefined}>
+              {!s.speaker && <span style={{ color: "var(--muted)" }}>[{fmtTs(s.start)}] </span>}
+              {s.text}{" "}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// Д13: инлайн-редактор протокола. Списки редактируются построчно; задачи —
+// «текст — ответственный». Правки человека доверенные: verification снимается.
+const taskLine = (t: any) => `${t.task}${t.owner ? ` — ${t.owner}` : ""}`;
+const parseTasks = (s: string) => s.split("\n").map((l) => l.trim()).filter(Boolean)
+  .map((l) => { const i = l.lastIndexOf(" — "); return i > 0
+    ? { task: l.slice(0, i).trim(), owner: l.slice(i + 3).trim() }
+    : { task: l, owner: "" }; });
+const parseLines = (s: string) => s.split("\n").map((l) => l.trim()).filter(Boolean);
+
+function ProtocolEditor({ a, jobId, onSaved, onCancel, toast }:
+  { a: any; jobId: string; onSaved: (a: any) => void; onCancel: () => void; toast: any }) {
+  const [d, setD] = useState<any>(() => ({
+    summary: a.summary || "",
+    detailed: (a.detailed || []).map((t: any) => ({ topic: t.topic || "", details: t.details || "" })),
+    decisions: (a.decisions || []).join("\n"),
+    tasks: (a.tasks || []).map(taskLine).join("\n"),
+    minor_tasks: (a.minor_tasks || []).map(taskLine).join("\n"),
+    done_tasks: (a.done_tasks || []).map(taskLine).join("\n"),
+  }));
+  const [busy, setBusy] = useState(false);
+  const [regen, setRegen] = useState<number | null>(null);
+  async function save() {
+    setBusy(true);
+    try {
+      const r = await api.patch(`/api/jobs/${jobId}/analysis`, { analysis: {
+        summary: d.summary, detailed: d.detailed,
+        decisions: parseLines(d.decisions),
+        tasks: parseTasks(d.tasks), minor_tasks: parseTasks(d.minor_tasks),
+        done_tasks: parseTasks(d.done_tasks) } });
+      toast("Правки сохранены, Word-протокол пересобран");
+      onSaved(r.analysis);
+    } catch (e: any) { toast(e.message, true); }
+    finally { setBusy(false); }
+  }
+  async function regenTopic(i: number) {
+    setRegen(i);
+    try {
+      const r = await api.post(`/api/jobs/${jobId}/regen-topic`, { index: i });
+      setD({ ...d, detailed: (r.analysis.detailed || []).map((t: any) => ({ topic: t.topic || "", details: t.details || "" })) });
+      toast("Раздел перегенерирован");
+    } catch (e: any) { toast(e.message, true); }
+    finally { setRegen(null); }
+  }
+  const lbl = (s: string) => <label className="lbl mt-3">{s}</label>;
+  return (
+    <div>
+      {lbl("Кратко")}
+      <textarea className="field" rows={3} value={d.summary} onChange={(e) => setD({ ...d, summary: e.target.value })} />
+      {lbl("Темы")}
+      {d.detailed.map((t: any, i: number) => (
+        <div key={i} className="glass2 rounded-xl p-2.5 mb-2">
+          <div className="flex gap-2 items-center mb-1.5">
+            <input className="field" value={t.topic}
+              onChange={(e) => { const dd = [...d.detailed]; dd[i] = { ...t, topic: e.target.value }; setD({ ...d, detailed: dd }); }} />
+            <button className="btn btn-ghost flex-none" disabled={regen !== null}
+              title="Перегенерировать этот раздел нейросетью (остальное не трогается)"
+              onClick={() => regenTopic(i)}>
+              {regen === i ? <Loader2 size={14} className="animate-spin" /> : <RotateCcw size={14} />}</button>
+          </div>
+          <textarea className="field" rows={4} value={t.details}
+            onChange={(e) => { const dd = [...d.detailed]; dd[i] = { ...t, details: e.target.value }; setD({ ...d, detailed: dd }); }} />
+        </div>
+      ))}
+      {lbl("Решения (по строке)")}
+      <textarea className="field" rows={3} value={d.decisions} onChange={(e) => setD({ ...d, decisions: e.target.value })} />
+      {lbl("Задачи (строка: «задача — ответственный»)")}
+      <textarea className="field" rows={4} value={d.tasks} onChange={(e) => setD({ ...d, tasks: e.target.value })} />
+      {lbl("Мелкие задачи")}
+      <textarea className="field" rows={3} value={d.minor_tasks} onChange={(e) => setD({ ...d, minor_tasks: e.target.value })} />
+      {lbl("Уже сделано")}
+      <textarea className="field" rows={2} value={d.done_tasks} onChange={(e) => setD({ ...d, done_tasks: e.target.value })} />
+      <div className="flex gap-2 justify-end mt-3">
+        <button className="btn btn-ghost" onClick={onCancel}>Отмена</button>
+        <button className="btn btn-primary" disabled={busy} onClick={save}>
+          {busy ? <Loader2 size={14} className="animate-spin" /> : <FileText size={14} />} Сохранить правки</button>
+      </div>
+    </div>
+  );
+}
+
+// Д13: чат по встрече — вопрос → ответ с таймкодами из расшифровки.
+function AskBlock({ jobId }: { jobId: string }) {
+  const [q, setQ] = useState("");
+  const [answer, setAnswer] = useState("");
+  const [busy, setBusy] = useState(false);
+  const toast = useToast();
+  async function ask() {
+    if (q.trim().length < 3 || busy) return;
+    setBusy(true); setAnswer("");
+    try { const r = await api.post(`/api/jobs/${jobId}/ask`, { question: q.trim() }); setAnswer(r.answer || ""); }
+    catch (e: any) { toast(e.message, true); }
+    finally { setBusy(false); }
+  }
+  return (
+    <div className="glass2 rounded-2xl p-3 mt-4">
+      <div className="text-[12.5px] font-semibold mb-2">💬 Спросить по встрече</div>
+      <div className="flex gap-2">
+        <input className="field" placeholder="например: что решили по тегам?"
+          value={q} onChange={(e) => setQ(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") ask(); }} />
+        <button className="btn btn-primary flex-none" disabled={busy} onClick={ask}>
+          {busy ? <Loader2 size={14} className="animate-spin" /> : "Спросить"}</button>
+      </div>
+      {answer && (
+        <div className="text-[12.5px] leading-relaxed mt-2.5 whitespace-pre-wrap">{answer}</div>
+      )}
+    </div>
+  );
+}
+
 function Protocol({ a }: { a: any }) {
   if (!a) return null;
   return (
@@ -110,12 +263,33 @@ export default function Recognition() {
   const [detail, setDetail] = useState<any>(null);
   const [live, setLive] = useState<any>(null);   // live stage from /partial
   const [transcript, setTranscript] = useState<string>("");
+  // Д12: segments with per-segment Whisper confidence (from format=json) —
+  // low-confidence spots get highlighted so the editor knows where to check.
+  const [segments, setSegments] = useState<any[] | null>(null);
   const [tab, setTab] = useState<"protocol" | "transcript">("protocol");
+  const [editing, setEditing] = useState(false);          // Д13: protocol editor
+  useEffect(() => { setEditing(false); }, [sel]);
   const [fmt, setFmt] = useState("txt");   // transcript download format
   const [busy, setBusy] = useState(false);
   const [prog, setProg] = useState(0);
   const [engines, setEngines] = useState<{ value: string; label: string }[]>([]);
-  const [opts, setOpts] = useState<any>({ language: "ru", model: "", analyze: true, diarize: false, capture_screen: false, identify_speakers: false, provider: "auto", context_hint: "" });
+  const [opts, setOpts] = useState<any>({ language: "ru", model: "", analyze: true, diarize: false, capture_screen: false, identify_speakers: false, provider: "auto", context_hint: "", preset: "universal" });
+  const [presets, setPresets] = useState<{ value: string; label: string }[]>([]);
+  useEffect(() => { api.get("/api/presets").then((d) => setPresets(d.presets || [])).catch(() => {}); }, []);
+  const [recommend, setRecommend] = useState("");
+  useEffect(() => { api.get("/api/system/recommend").then((d) => setRecommend(d.detail || "")).catch(() => {}); }, []);
+  // Д14: поиск по всем встречам (debounce 350 мс)
+  const [searchQ, setSearchQ] = useState("");
+  const [searchRes, setSearchRes] = useState<any[]>([]);
+  useEffect(() => {
+    const q = searchQ.trim();
+    if (q.length < 2) { setSearchRes([]); return; }
+    const t = setTimeout(() => {
+      api.get(`/api/search?q=${encodeURIComponent(q)}`)
+        .then((d) => setSearchRes(d.results || [])).catch(() => setSearchRes([]));
+    }, 350);
+    return () => clearTimeout(t);
+  }, [searchQ]);
   const fileRef = useRef<HTMLInputElement>(null);
   const toast = useToast();
 
@@ -127,7 +301,7 @@ export default function Recognition() {
   // While it's working we also pull /partial — the LIVE stage of recognition and
   // protocol building (stage + streamed characters), so the user sees progress.
   useEffect(() => {
-    if (!sel) { setDetail(null); setTranscript(""); setLive(null); return; }
+    if (!sel) { setDetail(null); setTranscript(""); setSegments(null); setLive(null); return; }
     let alive = true;
     const tick = async () => {
       try {
@@ -140,6 +314,9 @@ export default function Recognition() {
           setLive(null);
         }
         if (j.status === "done" || j.status === "cancelled") {
+          api.get(`/api/jobs/${sel}/result?format=json`)
+            .then((d) => { if (alive && d?.segments?.length) setSegments(d.segments); })
+            .catch(() => {});
           api.text(`/api/jobs/${sel}/result?format=txt`).then((t) => alive && setTranscript(t)).catch(() => {});
         }
       } catch { /* gone */ }
@@ -162,6 +339,7 @@ export default function Recognition() {
     fd.append("identify_speakers", String(opts.identify_speakers));
     fd.append("provider", opts.provider);
     fd.append("context_hint", opts.context_hint || f.name);
+    fd.append("preset", opts.preset || "");
     if (opts.user_notes?.trim()) fd.append("user_notes", opts.user_notes.trim());
     try {
       const j = await api.upload("/api/jobs", fd, (p) => setProg(p));
@@ -228,9 +406,13 @@ export default function Recognition() {
                 <Select value={opts.model} onChange={(v) => setOpts({ ...opts, model: v })}
                   options={MODELS.map((m) => ({ value: m.v, label: m.l }))} /></div>
             </div>
+            {recommend && <div className="text-[11px] mt-1" style={{ color: "var(--muted)" }}>💡 {recommend}</div>}
             <label className="lbl mt-3">Движок протокола</label>
             <Select value={opts.provider} onChange={(v) => setOpts({ ...opts, provider: v })}
               options={[{ value: "auto", label: "Авто" }, ...engines.map((e) => ({ value: e.value, label: e.label }))]} />
+            <label className="lbl mt-3">Тип встречи (пресет протокола)</label>
+            <Select value={opts.preset} onChange={(v) => setOpts({ ...opts, preset: v })}
+              options={presets.length ? presets : [{ value: "universal", label: "Универсальный" }]} />
             <label className="lbl mt-3">Контекст (проект/тема)</label>
             <input className="field" value={opts.context_hint} onChange={(e) => setOpts({ ...opts, context_hint: e.target.value })}
               placeholder="подставит сохранённый контекст проекта" />
@@ -258,7 +440,26 @@ export default function Recognition() {
 
           <Card>
             <div className="font-bold text-[14px] mb-2.5">История</div>
-            {jobs.length ? jobs.map((j) => (
+            {/* Д14: поиск по расшифровкам и протоколам всех встреч команды */}
+            <div className="relative mb-2.5">
+              <input className="field" placeholder="Поиск по всем встречам…"
+                value={searchQ} onChange={(e) => setSearchQ(e.target.value)} />
+            </div>
+            {searchQ.trim().length >= 2 ? (
+              searchRes.length ? searchRes.map((r) => (
+                <button key={r.job_id} onClick={() => { setSel(r.job_id); setTab("transcript"); }}
+                  className="w-full glass2 rounded-2xl px-3.5 py-3 mb-2 text-left transition"
+                  style={sel === r.job_id ? { borderColor: "var(--accent)" } : {}}>
+                  <div className="font-semibold text-[13px] truncate">{r.title}</div>
+                  <div className="text-[11.5px] mt-0.5" style={{ color: "var(--muted)" }}
+                    dangerouslySetInnerHTML={{
+                      __html: r.snippet
+                        .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+                        .replace(/⟦([^⟧]{1,80})⟧/g, '<mark style="background:rgba(45,212,191,.25);color:inherit;border-radius:3px">$1</mark>'),
+                    }} />
+                </button>
+              )) : <div className="text-[12.5px] py-2" style={{ color: "var(--muted)" }}>Ничего не найдено.</div>
+            ) : jobs.length ? jobs.map((j) => (
               <button key={j.id} onClick={() => { setSel(j.id); setTab("protocol"); }}
                 className="w-full glass2 rounded-2xl px-3.5 py-3 mb-2 flex items-center gap-3 text-left transition"
                 style={sel === j.id ? { borderColor: "var(--accent)" } : {}}>
@@ -379,14 +580,31 @@ export default function Recognition() {
                     </>
                   )}
                   {detail.status === "error" && <button className="btn btn-ghost" onClick={() => retry(detail.id)}><RotateCcw size={14} /> Повторить</button>}
+                  {detail.status === "done" && detail.analysis && tab === "protocol" && (
+                    <button className="btn btn-ghost" onClick={() => setEditing((e) => !e)}>
+                      <FileText size={14} /> {editing ? "Отменить правки" : "Редактировать"}</button>
+                  )}
                   {detail.status === "done" && <button className="btn btn-ghost" onClick={() => reanalyze(detail.id)}><Sparkles size={14} /> Пересобрать</button>}
                 </div>
               </div>
 
               {tab === "protocol" ? (
-                detail.analysis ? <Protocol a={detail.analysis} /> :
+                detail.analysis ? (
+                  editing ? (
+                    <ProtocolEditor a={detail.analysis} jobId={detail.id} toast={toast}
+                      onCancel={() => setEditing(false)}
+                      onSaved={(a) => { setDetail({ ...detail, analysis: a }); setEditing(false); }} />
+                  ) : (
+                    <>
+                      <Protocol a={detail.analysis} />
+                      {detail.status === "done" && <AskBlock jobId={detail.id} />}
+                    </>
+                  )
+                ) :
                   <div className="text-[13px] py-6 text-center" style={{ color: "var(--muted)" }}>
                     {isBusy(detail.status) ? "Протокол формируется…" : "Протокол не создавался для этой записи."}</div>
+              ) : segments ? (
+                <SegmentView segments={segments} />
               ) : (
                 transcript ? <pre className="text-[12.5px] leading-relaxed whitespace-pre-wrap font-sans">{transcript}</pre> :
                   <div className="text-[13px] py-6 text-center" style={{ color: "var(--muted)" }}>
