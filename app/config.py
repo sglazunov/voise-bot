@@ -117,7 +117,14 @@ PROVIDER_LABELS = {
     "anthropic": "Claude (платно по токенам, точнее)",
 }
 # Order = preference for "auto" (free/local first, paid last).
-PROVIDER_ORDER = ["ollama", "groq", "gemini", "yandex", "gigachat", "anthropic"]
+# «Авто» берёт ПЕРВЫЙ настроенный движок из этого списка. Groq впереди: на
+# CPU-сервере облачный протокол готов за минуты, локальный — за десятки минут
+# (Ollama остаётся последним резервом цепочки на случай недоступности облаков).
+# Переопределяется через VTX_PROVIDER_ORDER="ollama,groq,…".
+_default_order = "groq,gemini,yandex,gigachat,anthropic,ollama"
+PROVIDER_ORDER = [p.strip() for p in
+                  os.getenv("VTX_PROVIDER_ORDER", _default_order).split(",")
+                  if p.strip()]
 
 # Selectable model tiers per cloud provider — "how powerful the API model is".
 # Chosen from the UI as "<provider>:<model>"; the first entry is the default.
