@@ -179,7 +179,7 @@ export default function Scheduler() {
             1:1 → договорённости, иначе — универсальный.</div>
           <label className="lbl">Движок протокола (нейросеть · модель)</label>
           <Select value={s.analyze_provider || "auto"} onChange={(v) => set("analyze_provider", v)}
-            options={[{ value: "auto", label: "Авто (бесплатные/локальные — в первую очередь)" },
+            options={[{ value: "auto", label: "Авто (Groq — в первую очередь, локальный — резерв)" },
                       ...engines.map((e) => ({ value: e.value, label: e.label }))]} />
           <div className="text-[11.5px] mt-1" style={{ color: "var(--muted)" }}>
             Ключи и список моделей — на вкладке «Нейросети».</div>
