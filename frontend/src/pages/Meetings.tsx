@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Video, RefreshCw, Square, Clock, Loader2, Link2 } from "lucide-react";
+import { Video, RefreshCw, Square, Clock, Loader2, Link2, NotebookPen } from "lucide-react";
 import { Page } from "../components/Layout";
 import { Switch, StatusBadge, Modal, useToast } from "../components/ui";
 import { api } from "../lib/api";
@@ -39,6 +39,30 @@ export default function Meetings() {
   async function stopOne(m: Meeting) {
     try { const r = await api.post(`/api/automation/scheduler/stop-recording?task_id=${encodeURIComponent(String(m.task_id))}`); toast(r.detail || "Останавливаю…"); load(); }
     catch (e: any) { toast(e.message, true); }
+  }
+
+  // Д6: participant's live notes attach to the meeting's recognition job and
+  // become the protocol's most trusted source.
+  const [notesFor, setNotesFor] = useState<Meeting | null>(null);
+  const [notesText, setNotesText] = useState("");
+  const [notesSaving, setNotesSaving] = useState(false);
+  async function openNotes(m: Meeting) {
+    setNotesFor(m); setNotesText("");
+    try {
+      const j = await api.get(`/api/jobs/${m.job_id}`);
+      setNotesText(j.user_notes || "");
+    } catch { /* job may still be spinning up */ }
+  }
+  async function saveNotes(regen: boolean) {
+    if (!notesFor?.job_id || notesSaving) return;
+    setNotesSaving(true);
+    try {
+      await api.post(`/api/jobs/${notesFor.job_id}/notes`, { notes: notesText });
+      if (regen) { await api.post(`/api/jobs/${notesFor.job_id}/reanalyze`, {}); toast("Заметки сохранены, протокол пересобирается"); }
+      else toast("Заметки сохранены — учтутся при сборке протокола");
+      setNotesFor(null);
+    } catch (e: any) { toast(e.message, true); }
+    finally { setNotesSaving(false); }
   }
 
   // Manual attach: when automation couldn't deliver (LLM was down, cloud
@@ -105,6 +129,12 @@ export default function Meetings() {
               </div>
               <div className="flex-none flex items-center gap-2">
                 <StatusBadge state={m.state} />
+                {m.job_id && (
+                  <button className="btn-ghost grid place-items-center flex-none"
+                    style={{ width: 30, height: 30, borderRadius: 9 }}
+                    title="Заметки со встречи — станут скелетом протокола"
+                    onClick={() => openNotes(m)}><NotebookPen size={14} /></button>
+                )}
                 {!rec && (
                   <button className="btn-ghost grid place-items-center flex-none"
                     style={{ width: 30, height: 30, borderRadius: 9 }}
@@ -136,6 +166,24 @@ export default function Meetings() {
           </div>
         );
       }) : <div className="glass p-8 text-center text-[13px]" style={{ color: "var(--muted)" }}>Встреч нет.</div>}
+
+      <Modal open={!!notesFor} onClose={() => setNotesFor(null)}
+        title={<span className="flex items-center gap-2"><NotebookPen size={16} color="var(--accent)" /> Заметки со встречи</span>}>
+        <div className="text-[12.5px] mb-3" style={{ color: "var(--muted)" }}>
+          {notesFor?.title || "Встреча"} · заметки участника — самый достоверный
+          источник: протокол строится на них как на скелете
+        </div>
+        <textarea className="field" rows={6} value={notesText}
+          onChange={(e) => setNotesText(e.target.value)}
+          placeholder="что решили, кто что взял, ключевые цифры…" />
+        <div className="flex gap-2 justify-end mt-3 flex-wrap">
+          <button className="btn btn-ghost" onClick={() => setNotesFor(null)}>Отмена</button>
+          <button className="btn btn-ghost" disabled={notesSaving} onClick={() => saveNotes(false)}>Сохранить</button>
+          <button className="btn btn-primary" disabled={notesSaving} onClick={() => saveNotes(true)}>
+            {notesSaving ? <Loader2 size={14} className="animate-spin" /> : <NotebookPen size={14} />}
+            Сохранить и пересобрать</button>
+        </div>
+      </Modal>
 
       <Modal open={!!linksFor} onClose={() => setLinksFor(null)}
         title={<span className="flex items-center gap-2"><Link2 size={16} color="var(--accent)" /> Ссылки для задачи Weeek</span>}>

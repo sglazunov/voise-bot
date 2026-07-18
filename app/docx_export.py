@@ -13,6 +13,37 @@ def _task_parts(item) -> tuple[str, str]:
     return (str(item).strip(), "")
 
 
+def _vinfo(analysis: dict, key: str, idx: int) -> Optional[dict]:
+    """Verification record for a list item (Д5); None on old protocols."""
+    try:
+        return (analysis.get("verification") or {})[key][idx]
+    except (KeyError, IndexError, TypeError):
+        return None
+
+
+_GRAY = (0x8A, 0x8A, 0x8A)
+_UNVERIFIED_MARK = "  ⚠ проверьте — не нашлось дословного подтверждения"
+
+
+def _apply_verification(par, v, RGBColor) -> None:
+    """Gray-out an unverified bullet and add the grounding quote of a verified
+    one as a small footnote line under the item."""
+    if v is None:
+        return
+    if not v.get("ok"):
+        for r in par.runs:
+            r.font.color.rgb = RGBColor(*_GRAY)
+        warn = par.add_run(_UNVERIFIED_MARK)
+        warn.italic = True
+        warn.font.color.rgb = RGBColor(*_GRAY)
+    elif v.get("quote"):
+        t = f" [{v['t']}]" if v.get("t") else ""
+        src = " (из заметок участника)" if v.get("source") == "notes" else ""
+        note = par.add_run(f"\nОснование{t}{src}: «{v['quote']}»")
+        note.italic = True
+        note.font.color.rgb = RGBColor(*_GRAY)
+
+
 def _fmt_time(seconds: float) -> str:
     s = int(seconds)
     h, rem = divmod(s, 3600)
@@ -132,15 +163,16 @@ def generate_report(
     decisions = analysis.get("decisions", [])
     if decisions:
         doc.add_heading("Решения и договорённости", level=1)
-        for d in decisions:
+        for di, d in enumerate(decisions):
             bp = doc.add_paragraph(style="List Bullet")
             bp.add_run(d)
+            _apply_verification(bp, _vinfo(analysis, "decisions", di), RGBColor)
 
     # ---- Сделано (выполненные задачи) --------------------------------------
     done_tasks = analysis.get("done_tasks", [])
     if done_tasks:
         doc.add_heading("Сделано (выполненные задачи)", level=1)
-        for item in done_tasks:
+        for ti, item in enumerate(done_tasks):
             text, owner = _task_parts(item)
             bp = doc.add_paragraph(style="List Bullet")
             bp.add_run(f"☑ {text}")
@@ -148,6 +180,7 @@ def generate_report(
                 r = bp.add_run(f"  — {owner}")
                 r.italic = True
                 r.font.color.rgb = RGBColor(0x60, 0x60, 0x60)
+            _apply_verification(bp, _vinfo(analysis, "done_tasks", ti), RGBColor)
 
     # ---- Задачи (нужно сделать): таблица с ответственными ------------------
     tasks = analysis.get("tasks", [])
@@ -161,7 +194,9 @@ def generate_report(
             text, owner = _task_parts(item)
             row = table.add_row().cells
             row[0].paragraphs[0].add_run(str(i))
-            row[1].paragraphs[0].add_run(text)
+            tp = row[1].paragraphs[0]
+            tp.add_run(text)
+            _apply_verification(tp, _vinfo(analysis, "tasks", i - 1), RGBColor)
             row[2].paragraphs[0].add_run(owner or "—")
         doc.add_paragraph().paragraph_format.space_after = Pt(6)
     else:
@@ -171,10 +206,11 @@ def generate_report(
     minor = analysis.get("minor_tasks", [])
     if minor:
         doc.add_heading("Мелкие задачи и доработки", level=1)
-        for item in minor:
+        for mi, item in enumerate(minor):
             text, owner = _task_parts(item)
             bp = doc.add_paragraph(style="List Bullet")
             bp.add_run(f"☐ {text}")
+            _apply_verification(bp, _vinfo(analysis, "minor_tasks", mi), RGBColor)
             if owner:
                 r = bp.add_run(f"  — {owner}")
                 r.italic = True

@@ -332,6 +332,28 @@ _REDUCE_TEMPLATE = (
 )
 
 
+# Д6: the participant's own live notes are the most trustworthy input — a human
+# wrote them DURING the meeting. They become the protocol's skeleton; the
+# transcript fills in the details.
+_NOTES_BLOCK = (
+    "=== ЗАМЕТКИ УЧАСТНИКА ВСТРЕЧИ ===\n"
+    "Написаны человеком ВО ВРЕМЯ встречи — это САМЫЙ ДОСТОВЕРНЫЙ источник. "
+    "При противоречии с расшифровкой приоритет у заметок (расшифровка — "
+    "автоматическая и может ошибаться). Используй заметки как СКЕЛЕТ протокола: "
+    "каждая тема, решение и задача из заметок ОБЯЗАНА попасть в протокол; "
+    "расшифровка служит для деталей, подробностей и формулировок.\n"
+    "{notes}\n"
+    "=== КОНЕЦ ЗАМЕТОК ===\n\n"
+)
+
+
+def _with_notes(prompt: str, user_notes: str) -> str:
+    notes = (user_notes or "").strip()
+    if not notes:
+        return prompt
+    return _NOTES_BLOCK.format(notes=notes[:8000]) + prompt
+
+
 # The full instruction the model normally receives (everything except the
 # transcript itself). Shown in "expert mode" so the user can edit it. Single
 # braces here (no .format applied), unlike the templates above.
@@ -569,7 +591,8 @@ class _SchemaMiss(ValueError):
 
 def analyze_transcript(transcript_text: str, provider: str | None = None,
                        extra_instructions: str = "", custom_prompt: str = "",
-                       on_progress=None, cancel_check=None, keys: dict | None = None) -> dict:
+                       on_progress=None, cancel_check=None, keys: dict | None = None,
+                       user_notes: str = "") -> dict:
     """Send the transcript to the chosen LLM provider and return structured analysis.
 
     `provider` is one of "ollama" | "groq" | "gemini" | "yandex" | "gigachat" |
@@ -598,14 +621,15 @@ def analyze_transcript(transcript_text: str, provider: str | None = None,
     result = None
     if len(text) <= _MAX_CHARS:
         if custom:
-            prompt = custom + "\n\nТранскрипция:\n" + text
+            prompt = _with_notes(custom + "\n\nТранскрипция:\n" + text, user_notes)
             raw = _stream_complete(backend, _with_extra(prompt, extra_instructions),
                                    10000, on_progress, "Генерация протокола…",
                                    cancel_check=cancel_check)
             result = _extract_json(raw)
         else:
-            prompt = _with_extra(_PROMPT_TEMPLATE.format(transcript=text),
-                                 extra_instructions)
+            prompt = _with_extra(
+                _with_notes(_PROMPT_TEMPLATE.format(transcript=text), user_notes),
+                extra_instructions)
             try:
                 result = _complete_validated(backend, prompt, Protocol, 10000,
                                              on_progress, "Генерация протокола…",
@@ -673,16 +697,18 @@ def analyze_transcript(transcript_text: str, provider: str | None = None,
         notes = _notes_blob(maps)
         _ck()  # cancel before the final merge
         if custom:
-            prompt = (custom + "\n\nНиже — структурированные заметки (JSON) по "
-                      "последовательным частям встречи, в хронологическом порядке; "
-                      "объедини их в итог по требованиям выше:\n" + notes)
+            prompt = _with_notes(
+                custom + "\n\nНиже — структурированные заметки (JSON) по "
+                "последовательным частям встречи, в хронологическом порядке; "
+                "объедини их в итог по требованиям выше:\n" + notes, user_notes)
             raw = _stream_complete(backend, _with_extra(prompt, extra_instructions),
                                    10000, on_progress, "Свожу протокол…",
                                    cancel_check=cancel_check)
             result = _extract_json(raw)
         else:
-            prompt = _with_extra(_REDUCE_TEMPLATE.format(notes=notes),
-                                 extra_instructions)
+            prompt = _with_extra(
+                _with_notes(_REDUCE_TEMPLATE.format(notes=notes), user_notes),
+                extra_instructions)
             if _fit_max_tokens(backend, prompt, 10000) < 4000:
                 warning = ("Протокол мог потерять детали: у движка "
                            f"«{backend.name}» осталось мало лимита на ответ. "
@@ -774,3 +800,171 @@ def _normalise_detailed(detailed) -> list[dict]:
         elif isinstance(item, str) and item.strip():
             out.append({"topic": "", "details": item.strip()})
     return out
+
+
+# --------------------------------------------------------------------------- #
+# Д5: grounding — every task/decision must be backed by a VERBATIM quote from
+# the transcript (or the participant's notes). A protocol point the meeting
+# never said is the #1 trust-killer; unverified points get flagged, and an
+# owner the quotes don't support is stripped back to «—».
+# --------------------------------------------------------------------------- #
+class EvidenceItem(BaseModel):
+    model_config = ConfigDict(extra="ignore", coerce_numbers_to_str=True)
+    i: int
+    quote: str = ""
+    t: str | None = None
+    owner_ok: bool = False
+
+
+class EvidenceList(BaseModel):
+    model_config = ConfigDict(extra="ignore", coerce_numbers_to_str=True)
+    items: list[EvidenceItem] = Field(default_factory=list)
+
+
+_VERIFY_TEMPLATE = (
+    "Ниже — пункты протокола рабочей встречи и фрагмент её расшифровки "
+    "(реплики размечены [мм:сс], иногда с именем говорящего). Для КАЖДОГО "
+    "пункта, который подтверждается ЭТИМ фрагментом, верни ДОСЛОВНУЮ цитату — "
+    "скопируй фразу из фрагмента символ в символ, НИЧЕГО не перефразируя — и "
+    "таймкод ближайшей метки [мм:сс].\n"
+    "owner_ok ставь true ТОЛЬКО если из цитаты или из метки говорящего видно, "
+    "что задачу взял/поручили именно указанному ответственному («я возьму» от "
+    "него самого, «Кирилл, сделай…»). Просто упоминание темы этим человеком — "
+    "НЕ подтверждение ответственного.\n"
+    "Пункты, которых в этом фрагменте нет, НЕ включай в ответ. Не выдумывай "
+    "цитат. Верни ТОЛЬКО JSON вида {{\"items\": [{{\"i\": номер, \"quote\": "
+    "\"дословная фраза\", \"t\": \"мм:сс\", \"owner_ok\": true|false}}]}}.\n\n"
+    "Пункты протокола:\n{points}\n\nФрагмент расшифровки:\n{fragment}"
+)
+
+_VERIFIED_LISTS = ("tasks", "minor_tasks", "done_tasks", "decisions")
+_MIN_QUOTE_CHARS = 10
+_STEM_LEN = 5   # crude RU stemming: compare word prefixes, so «фильтры»≈«фильтров»
+
+
+def _stems(text: str) -> set[str]:
+    return {w[:_STEM_LEN] for w in _norm_for_match(text).split() if len(w) >= 4}
+
+
+def _quote_relevant(point_text: str, quote: str, fragment: str) -> bool:
+    """A verbatim quote must also be ABOUT the point: a weak model happily
+    attaches a real quote to an invented task, and verbatimness alone passes it.
+    Demand a shared significant word (by stem) between the point and the quote
+    or its line in the fragment (the line catches anaphoric «я возьму это»)."""
+    pw = _stems(point_text)
+    if not pw:
+        return True
+    ctx = _stems(quote)
+    qn = _norm_for_match(quote)
+    for line in fragment.splitlines():
+        if qn in _norm_for_match(line):
+            ctx |= _stems(line)
+            break
+    return bool(pw & ctx)
+
+
+def _norm_for_match(s: str) -> str:
+    """Дословность проверяем механически: цитата обязана быть подстрокой
+    источника после нормализации (регистр/пробелы/пунктуация/ё)."""
+    s = re.sub(r"[^\w\s]", " ", (s or "").lower().replace("ё", "е"))
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _collect_points(result: dict) -> list[tuple[str, int, str, str]]:
+    """[(list_key, index, text, owner)] — all statements needing evidence."""
+    points = []
+    for key in _VERIFIED_LISTS:
+        for idx, item in enumerate(result.get(key) or []):
+            if isinstance(item, dict):
+                text = str(item.get("task") or "").strip()
+                owner = str(item.get("owner") or "").strip()
+            else:
+                text, owner = str(item).strip(), ""
+            if text:
+                points.append((key, idx, text, owner))
+    return points
+
+
+def verify_protocol(result: dict, transcript_text: str, user_notes: str = "",
+                    provider: str | None = None, keys: dict | None = None,
+                    on_progress=None, cancel_check=None) -> dict:
+    """Ground the protocol in the transcript. Adds result["verification"]:
+
+        {"mode": "strict",
+         "tasks":       [{ok, quote, t, source, owner_ok} по индексу],
+         "minor_tasks": [...], "done_tasks": [...], "decisions": [...]}
+
+    and strips the owner of any task whose evidence does not support it.
+    Old protocols without this key keep working — every consumer treats it as
+    optional. Never raises: on engine failure the protocol ships unverified
+    with verification.error explaining why."""
+    points = _collect_points(result)
+    ver: dict = {"mode": "strict"}
+    for key in _VERIFIED_LISTS:
+        ver[key] = [{"ok": False, "quote": "", "t": None, "source": None,
+                     "owner_ok": False} for _ in (result.get(key) or [])]
+    if not points:
+        result["verification"] = ver
+        return result
+
+    backend = llm.get_provider_chain(provider, keys)
+    budget_chars = max(int(0.6 * _ctx_budget(backend)) * 3, 6000)
+
+    # Sources in trust order: the participant's notes first (Д6), then the
+    # transcript in chunks sized to the engine's window.
+    sources: list[tuple[str, str]] = []
+    if (user_notes or "").strip():
+        sources.append(("notes", user_notes.strip()[:budget_chars]))
+    text = (transcript_text or "").strip()
+    for i in range(0, len(text), budget_chars):
+        sources.append(("transcript", text[i:i + budget_chars]))
+
+    pending = {i: p for i, p in enumerate(points, 1)}
+    for si, (src_name, fragment) in enumerate(sources, 1):
+        if not pending:
+            break
+        if cancel_check and cancel_check():
+            raise AnalysisCancelled()
+        listing = "\n".join(
+            f"{n}) [{key}] {text}" + (f" (ответственный: {owner})" if owner else "")
+            for n, (key, idx, text, owner) in sorted(pending.items()))
+        prompt = _VERIFY_TEMPLATE.format(points=listing, fragment=fragment)
+        stage = f"Проверяю протокол по расшифровке ({si}/{len(sources)})…"
+        try:
+            out = _complete_validated(backend, prompt, EvidenceList, 3000,
+                                      on_progress, stage, cancel_check)
+        except AnalysisCancelled:
+            raise
+        except Exception as e:  # noqa: BLE001 — verification must not kill the job
+            ver["error"] = f"Проверка не завершена: {e}"
+            break
+        frag_norm = _norm_for_match(fragment)
+        for item in out.get("items") or []:
+            n = item.get("i")
+            if n not in pending:
+                continue
+            quote = str(item.get("quote") or "").strip()
+            # The quote must ACTUALLY be verbatim — an LLM paraphrase is not
+            # evidence. This mechanical check is what makes the pass honest.
+            if (len(quote) < _MIN_QUOTE_CHARS
+                    or _norm_for_match(quote) not in frag_norm):
+                continue
+            # ...and it must be about THIS point, not just any real phrase.
+            if not _quote_relevant(pending[n][2], quote, fragment):
+                continue
+            key, idx, _text, _owner = pending.pop(n)
+            ver[key][idx] = {"ok": True, "quote": quote[:300],
+                             "t": item.get("t"), "source": src_name,
+                             "owner_ok": bool(item.get("owner_ok"))}
+
+    # Acceptance rule: no owner without verbatim grounds. Unverified point →
+    # flagged; verified point whose quote doesn't support the owner → owner «—».
+    for key in ("tasks", "minor_tasks", "done_tasks"):
+        for idx, item in enumerate(result.get(key) or []):
+            if not isinstance(item, dict) or not item.get("owner"):
+                continue
+            v = ver[key][idx]
+            if not (v["ok"] and v["owner_ok"]):
+                item["owner"] = ""
+    result["verification"] = ver
+    return result
