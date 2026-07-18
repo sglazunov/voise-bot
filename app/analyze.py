@@ -691,6 +691,16 @@ def analyze_transcript(transcript_text: str, provider: str | None = None,
     text = (transcript_text or "").strip()
     custom = (custom_prompt or "").strip()
 
+    # A LONG meeting must not run on a CPU-only local engine: map-reduce over an
+    # hour of speech takes HOURS there (prompt eval ~tens of tok/s). When the
+    # engine wasn't pinned explicitly and a cloud engine is configured, start
+    # from the cloud; Ollama remains the fallback for outages.
+    if (len(text) > _MAX_CHARS and (provider or "auto").split(":")[0] in ("auto", "ollama")
+            and getattr(backend, "prefer_cloud", None)):
+        if backend.prefer_cloud() and on_progress:
+            on_progress("Длинная встреча — использую облачный движок "
+                        f"({backend.name}); локальный остаётся запасным.", "")
+
     def _ck():
         if cancel_check and cancel_check():
             raise AnalysisCancelled()
@@ -987,6 +997,12 @@ def verify_protocol(result: dict, transcript_text: str, user_notes: str = "",
         return result
 
     backend = llm.get_provider_chain(provider, keys)
+    # Long transcript → the verify chunks are big; a CPU-local engine would
+    # chew each one for ~half an hour. Same rule as the analysis itself.
+    if (len((transcript_text or "")) > 16000
+            and (provider or "auto").split(":")[0] in ("auto", "ollama")
+            and getattr(backend, "prefer_cloud", None)):
+        backend.prefer_cloud()
     budget_chars = max(int(0.6 * _ctx_budget(backend)) * 3, 6000)
 
     # Sources in trust order: the participant's notes first (Д6), then the

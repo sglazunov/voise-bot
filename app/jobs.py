@@ -179,14 +179,20 @@ class JobStore:
         except Exception:
             pass
 
+    _save_lock = threading.Lock()
+
     def _save(self) -> None:
         data = [asdict(j) for j in self._jobs.values()]
         if db.enabled():
             db.jobs_save(data)
             return
-        tmp = config.JOBS_FILE.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp.replace(config.JOBS_FILE)
+        # The worker thread and API threads may save concurrently; the shared
+        # .tmp path must not be replaced out from under another writer.
+        with self._save_lock:
+            tmp = config.JOBS_FILE.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2),
+                           encoding="utf-8")
+            tmp.replace(config.JOBS_FILE)
 
     # ---- public API --------------------------------------------------------
     def create(self, filename: str, audio_path: str, language: str, diarize: bool,
