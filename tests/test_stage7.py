@@ -87,3 +87,40 @@ class TestAskRetrieval:
         ans = analyze.ask_meeting(transcript, "что решили по фильтрам карточки?")
         assert "[02:50]" in ans
         assert "фильтр" in captured["prompt"]   # релевантное окно попало в промпт
+
+
+class TestParticipantsFromTiles:
+    def _job(self, tiles):
+        job = store.create(filename="m.mp4", audio_path="/tmp/m.mp4",
+                           language="ru", diarize=False, owner="alice")
+        job.video_participants = tiles
+        return job
+
+    def test_mentioned_people_cannot_join_participants(self):
+        job = self._job(["Сергей Глазунов", "Мария Н"])
+        result = {"participants": [
+            {"name": "Сергей Глазунов", "role": "тимлид"},
+            {"name": "Мария Н", "role": ""},
+            {"name": "Вася Пупкин", "role": "подрядчик"},   # о нём лишь ГОВОРИЛИ
+        ]}
+        out = store._enforce_participants(job, result)
+        names = [p["name"] for p in out["participants"]]
+        assert names == ["Сергей Глазунов", "Мария Н"]
+        assert out["participants"][0]["role"] == "тимлид"   # роль сохранена
+
+    def test_role_matched_by_partial_name(self):
+        job = self._job(["Сергей Глазунов"])
+        out = store._enforce_participants(job, {"participants": [
+            {"name": "Сергей", "role": "ведущий встречи"}]})
+        assert out["participants"] == [{"name": "Сергей Глазунов",
+                                        "role": "ведущий встречи"}]
+
+    def test_no_tiles_keeps_model_list(self):
+        job = self._job([])
+        result = {"participants": [{"name": "Спикер 1", "role": ""}]}
+        assert store._enforce_participants(job, result) is result
+
+    def test_tile_garbage_not_promoted(self):
+        job = self._job(["Мария Н", "Стоп запись", "кирилл 6"])
+        out = store._enforce_participants(job, {"participants": []})
+        assert [p["name"] for p in out["participants"]] == ["Мария Н"]
