@@ -7,13 +7,15 @@ so conftest.py is the right place — pytest imports it first.
 import os
 import tempfile
 
-os.environ.setdefault("VTX_DATA_DIR", tempfile.mkdtemp(prefix="vtx-test-"))
-os.environ.setdefault("VTX_RECORDER_ENABLED", "0")
-os.environ.setdefault("VTX_OLLAMA", "0")
+# FORCE (not setdefault!) the isolation env: inside the app container these
+# variables are already set to PRODUCTION values (VTX_DATA_DIR=/data,
+# DATABASE_URL=postgres://…), and setdefault would silently keep them — the
+# suite would then read AND WIPE live data.
+os.environ["VTX_DATA_DIR"] = tempfile.mkdtemp(prefix="vtx-test-")
+os.environ["VTX_RECORDER_ENABLED"] = "0"
+os.environ["VTX_OLLAMA"] = "0"
 # Deterministic master key for the secret-encryption tests.
-os.environ.setdefault("VTX_SECRET_KEY", "test-master-key-do-not-use-in-prod")
-# NEVER let tests touch a real Postgres: inside the app container DATABASE_URL
-# points at the PRODUCTION db, and _wipe_state would corrupt live users.
+os.environ["VTX_SECRET_KEY"] = "test-master-key-do-not-use-in-prod"
 os.environ.pop("DATABASE_URL", None)
 
 import shutil  # noqa: E402

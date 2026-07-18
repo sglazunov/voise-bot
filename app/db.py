@@ -157,6 +157,7 @@ CREATE INDEX IF NOT EXISTS idx_jobs_owner ON jobs(owner);
 CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at);
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS user_notes TEXT;
 ALTER TABLE meetings ADD COLUMN IF NOT EXISTS out_path TEXT;
+ALTER TABLE meetings ADD COLUMN IF NOT EXISTS live_notes TEXT;
 CREATE TABLE IF NOT EXISTS user_settings (
     username    TEXT PRIMARY KEY,
     data        JSONB NOT NULL
@@ -409,11 +410,13 @@ def creds_save(user: str, raw: dict) -> None:
 def meetings_load(user: str) -> dict:
     with _conn() as conn, _cur(conn) as cur:
         cur.execute("SELECT meeting_key, state, detail, job_id, cloud_url, "
-                    "out_path, do_protocol, saved_at FROM meetings WHERE username=%s",
+                    "out_path, live_notes, do_protocol, saved_at "
+                    "FROM meetings WHERE username=%s",
                     (user,))
         return {r["meeting_key"]: {"state": r.get("state"), "detail": r.get("detail"),
                                    "job_id": r.get("job_id"), "cloud_url": r.get("cloud_url"),
                                    "out_path": r.get("out_path"),
+                                   "live_notes": r.get("live_notes"),
                                    "do_protocol": bool(r.get("do_protocol")),
                                    "saved_at": r.get("saved_at")}
                 for r in cur.fetchall()}
@@ -430,16 +433,17 @@ def meetings_save(user: str, snaps: dict) -> None:
             cur.execute(
                 """INSERT INTO meetings
                      (username, meeting_key, state, detail, job_id, cloud_url,
-                      out_path, do_protocol, saved_at)
-                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                      out_path, live_notes, do_protocol, saved_at)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                    ON CONFLICT (username, meeting_key) DO UPDATE SET
                      state=EXCLUDED.state, detail=EXCLUDED.detail,
                      job_id=EXCLUDED.job_id, cloud_url=EXCLUDED.cloud_url,
                      out_path=EXCLUDED.out_path,
+                     live_notes=EXCLUDED.live_notes,
                      do_protocol=EXCLUDED.do_protocol, saved_at=EXCLUDED.saved_at""",
                 (user, key, s.get("state"), s.get("detail"), s.get("job_id"),
-                 s.get("cloud_url"), s.get("out_path"), bool(s.get("do_protocol")),
-                 s.get("saved_at")))
+                 s.get("cloud_url"), s.get("out_path"), s.get("live_notes"),
+                 bool(s.get("do_protocol")), s.get("saved_at")))
 
 
 # --------------------------------------------------------------------------- #

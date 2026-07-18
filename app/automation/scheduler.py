@@ -47,6 +47,11 @@ class MeetingState:
     record_flag: bool | None = None   # Weeek checkbox «Запись встречи»: True/False/unset
     stop_flag: bool = False           # manual "stop this recording"
     logs: list = field(default_factory=list)
+    # Д10: live transcript grown during the recording + the participant's notes
+    # taken alongside it (notes attach to the job once it exists).
+    live_text: str = ""
+    live_updated_at: float = 0.0
+    live_notes: str = ""
 
     def public(self) -> dict:
         return {"task_id": self.task_id, "title": self.title, "url": self.url,
@@ -54,6 +59,7 @@ class MeetingState:
                 "state": self.state, "detail": self.detail,
                 "job_id": self.job_id, "cloud_url": self.cloud_url,
                 "upload_error": self.upload_error,
+                "has_live": bool(self.live_text), "has_notes": bool(self.live_notes),
                 "do_protocol": self.do_protocol, "record_flag": self.record_flag}
 
 
@@ -317,6 +323,13 @@ class Scheduler:
             st.out_path = out
             self._save_state(st)
 
+            # Д10: pseudo-live transcript — the fMP4 is readable while being
+            # written, so a side thread transcribes the growing tail every N min.
+            if cfg.get("live_transcribe", True) and cfg.get("do_transcribe", True):
+                threading.Thread(target=self._live_transcribe_loop,
+                                 args=(st, cfg, out), daemon=True,
+                                 name="vtx-live-transcribe").start()
+
             res = recorder.record_meeting(
                 st.url, out, cfg, on_log=log, slot=slot,
                 should_stop=lambda: (self._stop.is_set()
@@ -385,6 +398,7 @@ class Scheduler:
                     identify_speakers=True,  # Д7: спикеры с видео — безусловно для записей бота
                     # Meeting title → matches the user's per-project AI context.
                     context_hint=str(st.title or ""),
+                    user_notes=st.live_notes,
                     delete_audio_when_done=delivered_elsewhere,
                     owner=user)
                 st.job_id = job.id
@@ -661,6 +675,7 @@ class Scheduler:
             snaps[st.key] = {"state": st.state, "detail": st.detail,
                              "job_id": st.job_id, "cloud_url": st.cloud_url,
                              "out_path": st.out_path,
+                             "live_notes": st.live_notes,
                              "do_protocol": st.do_protocol,
                              "saved_at": time.time()}
             if len(snaps) > 200:  # keep the newest 200
@@ -719,6 +734,7 @@ class Scheduler:
                         url="", start=start, owner=team, state="transcribing",
                         detail="", out_path=out_path,
                         cloud_url=snap.get("cloud_url"),
+                        live_notes=str(snap.get("live_notes") or ""),
                         do_protocol=bool(cfg.get("do_protocol", True)))
                     with self._lock:
                         st = self._states.setdefault(key, st)
@@ -737,6 +753,7 @@ class Scheduler:
                     detail=snap.get("detail") or "", job_id=jid,
                     cloud_url=snap.get("cloud_url"),
                     out_path=snap.get("out_path"),
+                    live_notes=str(snap.get("live_notes") or ""),
                     do_protocol=bool(snap.get("do_protocol")))
                 with self._lock:
                     st = self._states.setdefault(key, st)
@@ -791,6 +808,7 @@ class Scheduler:
             capture_screen=bool(cfg.get("ocr_screen", True)),
             identify_speakers=True,  # Д7: спикеры с видео — безусловно для записей бота
             context_hint=str(st.title or ""),
+            user_notes=st.live_notes,
             owner=st.owner)
         st.job_id = job.id
         self._set(st, "transcribing",
@@ -825,6 +843,117 @@ class Scheduler:
             st.state, st.detail = state, detail
         if state in self._PERSIST_STATES:
             self._save_state(st)
+
+    # -- Д10: live transcript during the recording ---------------------------
+    def _find_state(self, user: str, task_id) -> "MeetingState | None":
+        team = security.team_of(user)
+        with self._lock:
+            for st in self._states.values():
+                if st.owner == team and str(st.task_id) == str(task_id):
+                    return st
+        return None
+
+    def live_view(self, user: str, task_id) -> dict:
+        """What the «живая расшифровка» modal shows: the growing live text while
+        recording, then the job's final transcript once it exists."""
+        st = self._find_state(user, task_id)
+        if st is None:
+            return {"ok": False, "error": "Встреча не найдена."}
+        from ..jobs import store
+        if st.job_id:
+            job = store.get(st.job_id)
+            if job is not None:
+                txt = store.result_path(job.id, "txt")
+                if txt.exists():
+                    return {"ok": True, "final": True, "recording": False,
+                            "text": txt.read_text(encoding="utf-8")}
+                partial = store.partial(job.id)
+                if partial:
+                    return {"ok": True, "final": False, "recording": False,
+                            "text": "\n".join(p.get("text", "") for p in partial)}
+        return {"ok": True, "final": False,
+                "recording": st.state == "recording",
+                "updated_at": st.live_updated_at, "text": st.live_text}
+
+    def set_meeting_notes(self, user: str, task_id, notes: str) -> dict:
+        """Notes typed during/after the meeting. Before the job exists they live
+        on the meeting state (and its snapshot); once the job is there, they go
+        onto it (protocol skeleton, Д6)."""
+        st = self._find_state(user, task_id)
+        if st is None:
+            return {"ok": False, "error": "Встреча не найдена."}
+        st.live_notes = (notes or "").strip()[:20000]
+        if st.job_id:
+            from ..jobs import store
+            try:
+                store.set_notes(st.job_id, st.live_notes)
+            except KeyError:
+                pass
+        self._save_state(st)
+        return {"ok": True, "has_notes": bool(st.live_notes)}
+
+    def get_meeting_notes(self, user: str, task_id) -> dict:
+        st = self._find_state(user, task_id)
+        if st is None:
+            return {"ok": False, "error": "Встреча не найдена."}
+        return {"ok": True, "notes": st.live_notes}
+
+    def _live_transcribe_loop(self, st: MeetingState, cfg: dict, out: str) -> None:
+        """Every N minutes transcribe the NEW tail of the growing fMP4, so the
+        meeting page shows text while people are still talking. The final
+        full-file transcription (better context, speakers) replaces this."""
+        interval = max(60, int(cfg.get("live_interval_min", 5)) * 60)
+        lang = config.DEFAULT_LANGUAGE
+        processed = 0.0
+        ffmpeg = cfg.get("ffmpeg_path") or "ffmpeg"
+
+        def fmt(sec: float) -> str:
+            m, s = divmod(int(sec), 60)
+            h, m = divmod(m, 60)
+            return f"{h:d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+
+        while not self._stop.is_set() and st.state == "recording":
+            if self._stop.wait(interval):
+                return
+            if st.state != "recording" or not Path(out).exists():
+                return
+            try:
+                import subprocess
+                probe = subprocess.run(
+                    [ffmpeg.replace("ffmpeg", "ffprobe"), "-v", "error",
+                     "-show_entries", "format=duration", "-of", "csv=p=0", out],
+                    capture_output=True, text=True, timeout=30)
+                dur = float((probe.stdout or "0").strip() or 0)
+            except Exception:
+                continue
+            end = dur - 3.0     # don't read the fragment still being written
+            if end - processed < 30:
+                continue        # nothing meaningful accrued yet
+            wav = f"{out}.live.wav"
+            try:
+                cut = subprocess.run(
+                    [ffmpeg, "-y", "-v", "error", "-ss", str(processed),
+                     "-to", str(end), "-i", out, "-vn", "-ac", "1",
+                     "-ar", "16000", wav], capture_output=True, timeout=120)
+                if cut.returncode != 0 or not Path(wav).exists():
+                    continue
+                from ..transcribe import transcribe_file
+                got = transcribe_file(wav, language=lang, nonblocking=True)
+                if got is None:
+                    continue    # model busy with a real job — skip this tick
+                segs, _meta = got
+                lines = [f"[{fmt(processed + s.start)}] {s.text}" for s in segs]
+                if lines:
+                    st.live_text = (st.live_text + "\n" + "\n".join(lines)).strip()
+                    st.live_updated_at = time.time()
+                processed = end
+            except Exception:   # live text is best-effort, never break recording
+                continue
+            finally:
+                try:
+                    Path(wav).unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     def stop_recording(self, user: str | None = None, task_id=None) -> dict:
         """Stop recording(s) in progress. With `task_id` — just that meeting;

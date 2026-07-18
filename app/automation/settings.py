@@ -101,6 +101,8 @@ _DEFAULTS: dict[str, Any] = {
     "analyze_provider": "auto",       # which LLM builds the protocol
     "strict_verify": True,            # grounding pass: every task/decision needs a
                                       # verbatim quote; unverified ones get flagged (Д5)
+    "live_transcribe": True,          # Д10: transcribe the growing recording every N min
+    "live_interval_min": 5,           # ...this often (the page shows text mid-meeting)
     # --- Weeek checkbox that decides whether to record this meeting ---
     "weeek_use_record_field": True,   # let a Weeek toggle decide record / skip
     "weeek_record_field": "Запись встречи",  # name of that checkbox custom field

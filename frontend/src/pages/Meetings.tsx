@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Video, RefreshCw, Square, Clock, Loader2, Link2, NotebookPen } from "lucide-react";
+import { Video, RefreshCw, Square, Clock, Loader2, Link2, NotebookPen, Radio } from "lucide-react";
 import { Page } from "../components/Layout";
 import { Switch, StatusBadge, Modal, useToast } from "../components/ui";
 import { api } from "../lib/api";
@@ -41,25 +41,42 @@ export default function Meetings() {
     catch (e: any) { toast(e.message, true); }
   }
 
-  // Д6: participant's live notes attach to the meeting's recognition job and
-  // become the protocol's most trusted source.
+  // Д6+Д10: one modal per meeting — the LIVE transcript growing during the
+  // recording on top, the participant's notes underneath. Notes live on the
+  // meeting itself, so they work before the recognition job even exists.
   const [notesFor, setNotesFor] = useState<Meeting | null>(null);
   const [notesText, setNotesText] = useState("");
   const [notesSaving, setNotesSaving] = useState(false);
+  const [liveText, setLiveText] = useState("");
+  const [liveFinal, setLiveFinal] = useState(false);
   async function openNotes(m: Meeting) {
-    setNotesFor(m); setNotesText("");
-    try {
-      const j = await api.get(`/api/jobs/${m.job_id}`);
-      setNotesText(j.user_notes || "");
-    } catch { /* job may still be spinning up */ }
+    setNotesFor(m); setNotesText(""); setLiveText(""); setLiveFinal(false);
+    api.get(`/api/automation/meetings/${encodeURIComponent(String(m.task_id))}/notes`)
+      .then((r) => setNotesText(r.notes || "")).catch(() => {});
   }
+  // Poll the live transcript while the modal is open (every 6 s during recording).
+  useEffect(() => {
+    if (!notesFor) return;
+    let stop = false;
+    const tick = async () => {
+      try {
+        const r = await api.get(`/api/automation/meetings/${encodeURIComponent(String(notesFor.task_id))}/live`);
+        if (!stop) { setLiveText(r.text || ""); setLiveFinal(!!r.final); }
+      } catch { /* meeting may have no live text yet */ }
+    };
+    tick();
+    const t = setInterval(tick, 6000);
+    return () => { stop = true; clearInterval(t); };
+  }, [notesFor?.task_id]);
   async function saveNotes(regen: boolean) {
-    if (!notesFor?.job_id || notesSaving) return;
+    if (!notesFor || notesSaving) return;
     setNotesSaving(true);
     try {
-      await api.post(`/api/jobs/${notesFor.job_id}/notes`, { notes: notesText });
-      if (regen) { await api.post(`/api/jobs/${notesFor.job_id}/reanalyze`, {}); toast("Заметки сохранены, протокол пересобирается"); }
-      else toast("Заметки сохранены — учтутся при сборке протокола");
+      await api.post(`/api/automation/meetings/${encodeURIComponent(String(notesFor.task_id))}/notes`, { notes: notesText });
+      if (regen && notesFor.job_id) {
+        await api.post(`/api/jobs/${notesFor.job_id}/reanalyze`, {});
+        toast("Заметки сохранены, протокол пересобирается");
+      } else toast("Заметки сохранены — учтутся при сборке протокола");
       setNotesFor(null);
     } catch (e: any) { toast(e.message, true); }
     finally { setNotesSaving(false); }
@@ -129,12 +146,17 @@ export default function Meetings() {
               </div>
               <div className="flex-none flex items-center gap-2">
                 <StatusBadge state={m.state} />
-                {m.job_id && (
-                  <button className="btn-ghost grid place-items-center flex-none"
-                    style={{ width: 30, height: 30, borderRadius: 9 }}
-                    title="Заметки со встречи — станут скелетом протокола"
-                    onClick={() => openNotes(m)}><NotebookPen size={14} /></button>
+                {rec && (
+                  <button className="btn btn-ghost !px-2.5 !py-1 text-[11.5px] flex-none"
+                    style={{ color: "var(--accent)" }}
+                    title="Живая расшифровка + заметки"
+                    onClick={() => openNotes(m)}>
+                    <Radio size={13} /> Live</button>
                 )}
+                <button className="btn-ghost grid place-items-center flex-none"
+                  style={{ width: 30, height: 30, borderRadius: 9 }}
+                  title="Live-расшифровка и заметки со встречи"
+                  onClick={() => openNotes(m)}><NotebookPen size={14} /></button>
                 {!rec && (
                   <button className="btn-ghost grid place-items-center flex-none"
                     style={{ width: 30, height: 30, borderRadius: 9 }}
@@ -168,20 +190,37 @@ export default function Meetings() {
       }) : <div className="glass p-8 text-center text-[13px]" style={{ color: "var(--muted)" }}>Встреч нет.</div>}
 
       <Modal open={!!notesFor} onClose={() => setNotesFor(null)}
-        title={<span className="flex items-center gap-2"><NotebookPen size={16} color="var(--accent)" /> Заметки со встречи</span>}>
-        <div className="text-[12.5px] mb-3" style={{ color: "var(--muted)" }}>
-          {notesFor?.title || "Встреча"} · заметки участника — самый достоверный
-          источник: протокол строится на них как на скелете
+        title={<span className="flex items-center gap-2"><NotebookPen size={16} color="var(--accent)" /> {notesFor?.state === "recording" ? "Live-расшифровка и заметки" : "Заметки со встречи"}</span>}>
+        <div className="text-[12.5px] mb-2" style={{ color: "var(--muted)" }}>
+          {notesFor?.title || "Встреча"}
         </div>
-        <textarea className="field" rows={6} value={notesText}
+        {liveText ? (
+          <div className="glass2 rounded-xl p-2.5 mb-3">
+            <div className="text-[10.5px] font-bold uppercase tracking-wide mb-1"
+              style={{ color: liveFinal ? "var(--muted)" : "var(--accent)" }}>
+              {liveFinal ? "Финальная расшифровка" :
+                notesFor?.state === "recording" ? "🔴 Идёт встреча — текст пополняется" : "Live-текст записи"}
+            </div>
+            <pre className="text-[11.5px] whitespace-pre-wrap font-sans max-h-44 overflow-y-auto m-0"
+              style={{ color: "var(--txt)" }}>{liveText}</pre>
+          </div>
+        ) : notesFor?.state === "recording" ? (
+          <div className="glass2 rounded-xl p-2.5 mb-3 text-[11.5px]" style={{ color: "var(--muted)" }}>
+            Расшифровка появится через несколько минут после начала записи…
+          </div>
+        ) : null}
+        <label className="lbl">Ваши заметки (скелет протокола)</label>
+        <textarea className="field" rows={5} value={notesText}
           onChange={(e) => setNotesText(e.target.value)}
           placeholder="что решили, кто что взял, ключевые цифры…" />
         <div className="flex gap-2 justify-end mt-3 flex-wrap">
-          <button className="btn btn-ghost" onClick={() => setNotesFor(null)}>Отмена</button>
+          <button className="btn btn-ghost" onClick={() => setNotesFor(null)}>Закрыть</button>
           <button className="btn btn-ghost" disabled={notesSaving} onClick={() => saveNotes(false)}>Сохранить</button>
-          <button className="btn btn-primary" disabled={notesSaving} onClick={() => saveNotes(true)}>
-            {notesSaving ? <Loader2 size={14} className="animate-spin" /> : <NotebookPen size={14} />}
-            Сохранить и пересобрать</button>
+          {notesFor?.job_id && notesFor?.state === "done" && (
+            <button className="btn btn-primary" disabled={notesSaving} onClick={() => saveNotes(true)}>
+              {notesSaving ? <Loader2 size={14} className="animate-spin" /> : <NotebookPen size={14} />}
+              Сохранить и пересобрать</button>
+          )}
         </div>
       </Modal>
 
