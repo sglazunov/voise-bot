@@ -8,7 +8,12 @@
 
 services:
   app:
-    build: .
+    build:
+      context: .
+      args:
+        # DIARIZATION=1 bakes pyannote+torch into the image (diarization of
+        # uploaded audio; needs RAM >= 8 GB). Set it in .env and rebuild.
+        DIARIZATION: "${DIARIZATION:-0}"
     image: linux-voise:latest
     container_name: linux-voise
     restart: unless-stopped
@@ -29,6 +34,7 @@ services:
       # Structured state (users, sessions, jobs, settings, …) lives in Postgres.
       # Media files still go to ./data. Override credentials via .env if needed.
       DATABASE_URL: "${DATABASE_URL:-postgresql://voise:voise@db:5432/voise}"
+      VTX_DIARIZATION: "${DIARIZATION:-0}"
     # Lets host.docker.internal reach a service on the Docker host (Linux too).
     extra_hosts:
       - "host.docker.internal:host-gateway"

@@ -48,6 +48,16 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --upgrade pip wheel && pip install -r requirements.txt
 
+# Д7: optional diarization layer (pyannote + CPU torch, ~2.5 GB) — for speaker
+# separation of UPLOADED audio files (bot videos use the tile-based speaker_id
+# instead). Build with:  DIARIZATION=1 docker compose up -d --build app
+# Needs RAM >= 8 GB at runtime; leave 0 on small hosts.
+ARG DIARIZATION=0
+RUN if [ "$DIARIZATION" = "1" ]; then \
+      pip install --no-cache-dir torch torchaudio --index-url https://download.pytorch.org/whl/cpu \
+      && pip install --no-cache-dir pyannote.audio; \
+    fi
+
 # Chromium for the bot, installed to a world-readable path so the non-root app
 # user can use it. playwright (the pip pkg) is already in requirements.txt;
 # --with-deps pulls the browser's own OS libraries.
