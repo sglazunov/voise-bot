@@ -105,7 +105,15 @@ def build_ffmpeg_cmd(out_path: str, cfg: dict, window_title: str | None = None,
     cmd += ["-f", "pulse", "-i", src]
     if capture_video:
         cmd += ["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p"]
-    cmd += ["-c:a", "aac", "-b:a", "128k", out_path]
+    cmd += ["-c:a", "aac", "-b:a", "128k"]
+    if out_path.lower().endswith(".mp4"):
+        # Fragmented MP4: a crash (kill -9, OOM, power loss) mid-recording
+        # leaves a READABLE file up to the last fragment, instead of a corrupt
+        # mp4 whose moov atom was never written. Players and faster-whisper
+        # handle fMP4 natively, so the .mp4 name and the whole downstream
+        # pipeline stay unchanged.
+        cmd += ["-movflags", "+frag_keyframe+empty_moov+default_base_moof"]
+    cmd += [out_path]
     return cmd
 
 

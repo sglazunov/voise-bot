@@ -41,6 +41,7 @@ class MeetingState:
     detail: str = ""
     job_id: str | None = None
     cloud_url: str | None = None
+    out_path: str | None = None       # local recording file — lets a restart pick it up
     upload_error: str | None = None   # why the video didn't reach the cloud (retrying)
     do_protocol: bool = False         # whether this meeting also builds a protocol
     record_flag: bool | None = None   # Weeek checkbox «Запись встречи»: True/False/unset
@@ -310,6 +311,11 @@ class Scheduler:
             rec_dir = security.user_dir(user) / "recordings"  # private per-user
             rec_dir.mkdir(parents=True, exist_ok=True)
             out = str(rec_dir / fname)
+            # Persist the file path BEFORE recording starts: if the process dies
+            # mid-meeting, the restart scan (_resume_pending) finds the fMP4 by
+            # this path and queues it for processing instead of losing it.
+            st.out_path = out
+            self._save_state(st)
 
             res = recorder.record_meeting(
                 st.url, out, cfg, on_log=log, slot=slot,
@@ -320,6 +326,9 @@ class Scheduler:
                 self._set(st, "error", res.get("error") or "Запись не удалась.")
                 return
             out = res.get("path") or out  # telemost mode may save .webm, not .mp4
+            st.out_path = out
+            if res.get("audio_warning"):
+                log("⚠ Во время встречи были периоды без звука — проверьте запись.")
 
             # Upload to the chosen cloud. Recordings must NOT live on this
             # server — the local file is only a staging copy, so a failed upload
@@ -373,7 +382,7 @@ class Scheduler:
                     capture_screen=bool(cfg.get("ocr_screen", True)),
                     # Telemost recordings always show the active speaker (green
                     # tile) + names, so read WHO spoke straight from the video.
-                    identify_speakers=bool(cfg.get("identify_speakers", True)),
+                    identify_speakers=True,  # Д7: спикеры с видео — безусловно для записей бота
                     # Meeting title → matches the user's per-project AI context.
                     context_hint=str(st.title or ""),
                     delete_audio_when_done=delivered_elsewhere,
@@ -651,6 +660,7 @@ class Scheduler:
             snaps = self._load_snaps(st.owner)
             snaps[st.key] = {"state": st.state, "detail": st.detail,
                              "job_id": st.job_id, "cloud_url": st.cloud_url,
+                             "out_path": st.out_path,
                              "do_protocol": st.do_protocol,
                              "saved_at": time.time()}
             if len(snaps) > 200:  # keep the newest 200
@@ -685,12 +695,9 @@ class Scheduler:
                 continue
             for key, snap in snaps.items():
                 jid = snap.get("job_id")
-                if (not jid or snap.get("state") not in pending
+                if (snap.get("state") not in pending
                         or (snap.get("saved_at") or 0) < cutoff):
                     continue
-                job = store.get(jid)
-                if job is None:
-                    continue    # job already purged by retention — nothing left
                 parts = key.split(":", 2)
                 task_id = parts[1] if len(parts) > 1 else None
                 if not task_id:
@@ -700,12 +707,36 @@ class Scheduler:
                              if len(parts) > 2 else None)
                 except ValueError:
                     start = None
+
+                # Д8: the process died DURING the recording — no job yet, but
+                # the fMP4 on disk is readable up to the crash. Queue it for the
+                # normal transcribe→protocol→deliver pipeline.
+                out_path = snap.get("out_path")
+                if not jid and out_path and Path(out_path).exists() \
+                        and Path(out_path).stat().st_size > 0:
+                    st = MeetingState(
+                        key=key, task_id=task_id, title=Path(out_path).stem,
+                        url="", start=start, owner=team, state="transcribing",
+                        detail="", out_path=out_path,
+                        cloud_url=snap.get("cloud_url"),
+                        do_protocol=bool(cfg.get("do_protocol", True)))
+                    with self._lock:
+                        st = self._states.setdefault(key, st)
+                    self._finalize_orphan(st, cfg, out_path)
+                    continue
+
+                if not jid:
+                    continue
+                job = store.get(jid)
+                if job is None:
+                    continue    # job already purged by retention — nothing left
                 st = MeetingState(
                     key=key, task_id=task_id, title=Path(job.filename).stem,
                     url="", start=start, owner=team,
                     state=snap.get("state") or "transcribing",
                     detail=snap.get("detail") or "", job_id=jid,
                     cloud_url=snap.get("cloud_url"),
+                    out_path=snap.get("out_path"),
                     do_protocol=bool(snap.get("do_protocol")))
                 with self._lock:
                     st = self._states.setdefault(key, st)
@@ -719,6 +750,56 @@ class Scheduler:
                     target=self._await_and_upload_protocol,
                     args=(st, jid, cfg, Path(job.filename).stem),
                     daemon=True).start()
+
+    def _finalize_orphan(self, st: MeetingState, cfg: dict, out: str) -> None:
+        """A recording the crash orphaned: run the same post-recording pipeline
+        the normal path would have — upload the video, queue transcription with
+        delivery flags, start the waiter and the Weeek link write."""
+        do_protocol = bool(cfg.get("do_protocol", True))
+        do_transcribe = bool(cfg.get("do_transcribe", True))
+        deliver = bool(do_protocol and cfg.get("upload_protocol", True))
+
+        def log(msg: str) -> None:
+            st.logs.append(str(msg))
+
+        log("Запись прервана перезапуском сервиса — файл цел, дообрабатываю.")
+        if not st.cloud_url:
+            up = self._upload_with_retry(out, cfg, log, attempts=1)
+            if up.get("ok"):
+                st.cloud_url = up.get("url")
+                field = (cfg.get("weeek_video_field") or "").strip()
+                if cfg.get("weeek_set_video_field", True) and st.cloud_url and field:
+                    self._write_weeek_field(cfg.get("weeek_token"), st.task_id,
+                                            field, st.cloud_url, log)
+            else:
+                st.upload_error = up.get("error") or "облако недоступно"
+                threading.Thread(target=self._late_upload,
+                                 args=(st.owner, st, cfg, out),
+                                 daemon=True, name="vtx-late-upload").start()
+        if not do_transcribe:
+            self._set(st, "done", "Готово после перезапуска: запись "
+                      + ("в облаке" if st.cloud_url else "локально")
+                      + " (распознавание отключено).")
+            return
+        job = store.create(
+            filename=Path(out).name, audio_path=out,
+            language=config.DEFAULT_LANGUAGE, diarize=False,
+            analyze=do_protocol,
+            deliver_protocol_cloud=deliver,
+            deliver_weeek_task=str(st.task_id) if deliver else "",
+            provider=cfg.get("analyze_provider") or "auto",
+            capture_screen=bool(cfg.get("ocr_screen", True)),
+            identify_speakers=True,  # Д7: спикеры с видео — безусловно для записей бота
+            context_hint=str(st.title or ""),
+            owner=st.owner)
+        st.job_id = job.id
+        self._set(st, "transcribing",
+                  f"Восстановлено после перезапуска. Распознаю видео… — job {job.id}")
+        if deliver:
+            threading.Thread(
+                target=self._await_and_upload_protocol,
+                args=(st, job.id, cfg, Path(out).stem),
+                daemon=True).start()
 
     def _restore_snapshot(self, st: MeetingState) -> None:
         """Fill a freshly discovered MeetingState from its saved outcome."""

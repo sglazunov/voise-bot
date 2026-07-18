@@ -110,6 +110,7 @@ def record_meeting(url: str, out_path: str, cfg: dict,
     # sound are captured in isolation (never mixed with another parallel meeting).
     bot = browser.TelemostBot(cfg, on_log=log, display=slot.display, sink=slot.sink)
     rec = None
+    wd_stop = threading.Event()   # stops the audio watchdog on any exit path
     try:
         if not bot.join(url, should_stop=should_stop):
             shot = str(Path(out_path).with_suffix(".join-failed.png"))
@@ -134,6 +135,39 @@ def record_meeting(url: str, out_path: str, cfg: dict,
                     "error": "ffmpeg не смог записывать. " + (rec.error_tail() or
                              "Проверьте ffmpeg/дисплей/аудио слота.")}
         log("🔴 Идёт запись встречи — бот в звонке.")
+
+        # Д9: audio watchdog. A dead PulseAudio sink means the bot silently
+        # records mute video for an hour — discovered only after the meeting.
+        # Sample the slot's monitor every 30 s (Pulse monitors allow a second
+        # reader); after 2 min of continuous silence, shout into the card log.
+        audio_state = {"silent_since": None, "warned": False, "had_silence": False}
+
+        def _audio_watchdog() -> None:
+            ffmpeg = cfg.get("ffmpeg_path") or "ffmpeg"
+            while not wd_stop.wait(30):
+                if not rec.running:
+                    break
+                lvl = capture.test_audio_level(ffmpeg, slot.source, seconds=2)
+                if not lvl.get("ok"):
+                    continue    # probe hiccup — not evidence of silence
+                if lvl.get("has_sound"):
+                    if audio_state["warned"]:
+                        log("Звук снова есть ✓")
+                    audio_state["silent_since"] = None
+                    audio_state["warned"] = False
+                    continue
+                now = time.time()
+                audio_state["silent_since"] = audio_state["silent_since"] or now
+                quiet = now - audio_state["silent_since"]
+                if quiet >= 120 and not audio_state["warned"]:
+                    audio_state["warned"] = True
+                    audio_state["had_silence"] = True
+                    log("⚠ НЕТ ЗВУКА уже 2 минуты — запись может оказаться немой. "
+                        "Проверьте, что встреча не на паузе и звук в комнате есть.")
+
+        threading.Thread(target=_audio_watchdog, daemon=True,
+                         name=f"vtx-audio-wd-{slot.index}").start()
+
         stop_word = str(cfg.get("chat_stop_word") or "").strip()
         if stop_word:
             log(f"Кодовое слово в чате: «{stop_word}» — напишите его отдельным "
@@ -144,12 +178,15 @@ def record_meeting(url: str, out_path: str, cfg: dict,
             log("🛑 В чате написали кодовое слово — останавливаю запись и выхожу.")
         else:
             log(f"Останавливаю запись (причина: {reason}).")
+        wd_stop.set()
         rec.stop()
         p = Path(out_path)
         if not p.exists() or p.stat().st_size == 0:
             return {"ok": False, "reason": reason,
                     "error": "Файл записи пуст — проверьте аудио-устройство и ffmpeg."}
-        return {"ok": True, "path": out_path, "reason": reason, "size": p.stat().st_size}
+        return {"ok": True, "path": out_path, "reason": reason,
+                "size": p.stat().st_size,
+                "audio_warning": audio_state["had_silence"]}
     except Exception as e:  # noqa: BLE001
         try:
             if rec:
@@ -158,4 +195,5 @@ def record_meeting(url: str, out_path: str, cfg: dict,
             pass
         return {"ok": False, "error": f"Ошибка записи: {e}"}
     finally:
+        wd_stop.set()
         bot.close()
