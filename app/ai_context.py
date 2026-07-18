@@ -20,6 +20,7 @@ editable/inspectable on disk.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from . import db, security
@@ -79,6 +80,34 @@ def save(user: str, data: dict) -> dict:
 
 def project_names(user: str) -> list[str]:
     return [p["name"] for p in load(user)["projects"]]
+
+
+# Name-like tokens for the Whisper initial_prompt (Д3): capitalised pairs are
+# almost always «Имя Фамилия»; a single capitalised word only counts when it
+# sits MID-sentence (preceded by a lowercase letter) — that excludes ordinary
+# sentence-start capitals without needing a stop-word list.
+_NAME_PAIR = re.compile(r"\b([А-ЯЁA-Z][а-яёa-z]{2,})\s+([А-ЯЁA-Z][а-яёa-z]{2,})\b")
+_NAME_MID = re.compile(r"[а-яёa-z][,;:—-]?\s+([А-ЯЁA-Z][а-яёa-z]{2,})\b")
+
+
+def known_names(user: str, limit: int = 30) -> list[str]:
+    """Participant names mined from the team's standing context text."""
+    data = load(user)
+    text = " ".join([data["global"]] + [p["text"] for p in data["projects"]])
+    names: list[str] = []
+    seen: set[str] = set()
+
+    def add(n: str) -> None:
+        k = n.lower()
+        if k not in seen:
+            seen.add(k)
+            names.append(n)
+
+    for m in _NAME_PAIR.finditer(text):
+        add(f"{m.group(1)} {m.group(2)}")
+    for m in _NAME_MID.finditer(text):
+        add(m.group(1))
+    return names[:limit]
 
 
 def block_for(user: str, hint: str = "") -> str:
