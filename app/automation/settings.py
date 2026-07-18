@@ -99,6 +99,8 @@ _DEFAULTS: dict[str, Any] = {
     "ocr_screen": True,               # recognise on-screen text (slides/code) too
     "identify_speakers": True,        # read WHO spoke from the video (active-tile name)
     "analyze_provider": "auto",       # which LLM builds the protocol
+    "strict_verify": True,            # grounding pass: every task/decision needs a
+                                      # verbatim quote; unverified ones get flagged (Д5)
     # --- Weeek checkbox that decides whether to record this meeting ---
     "weeek_use_record_field": True,   # let a Weeek toggle decide record / skip
     "weeek_record_field": "Запись встречи",  # name of that checkbox custom field

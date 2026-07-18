@@ -25,18 +25,39 @@ const RU_STATUS: Record<string, string> = {
 };
 const isBusy = (st: string) => ["queued", "running", "paused", "analyzing"].includes(st);
 
-function List({ title, items }: { title: string; items?: any[] }) {
+function List({ title, items, verify }: { title: string; items?: any[]; verify?: any[] }) {
   if (!items?.length) return null;
   return (
     <div className="mb-4">
       <div className="font-bold text-[13.5px] mb-1.5" style={{ color: "var(--accent)" }}>{title}</div>
       <ul className="space-y-1.5">
-        {items.map((it, i) => (
-          <li key={i} className="text-[13px] leading-relaxed flex gap-2">
-            <ChevronRight size={14} className="flex-none mt-0.5" color="var(--muted)" />
-            <span>{typeof it === "string" ? it : `${it.task}${it.owner && it.owner !== "—" ? ` — ${it.owner}` : ""}`}</span>
-          </li>
-        ))}
+        {items.map((it, i) => {
+          const v = verify?.[i];                       // Д5: grounding info (optional)
+          const unverified = v && !v.ok;
+          return (
+            <li key={i} className="text-[13px] leading-relaxed flex gap-2"
+              style={unverified ? { color: "var(--muted)", opacity: 0.85 } : undefined}>
+              <ChevronRight size={14} className="flex-none mt-0.5" color="var(--muted)" />
+              <span className="min-w-0">
+                {typeof it === "string" ? it : `${it.task}${it.owner && it.owner !== "—" ? ` — ${it.owner}` : ""}`}
+                {unverified && (
+                  <span className="ml-1.5 chip whitespace-nowrap text-[10.5px]"
+                    style={{ color: "var(--warn)", background: "rgba(251,191,36,.12)" }}
+                    title="В расшифровке не нашлось дословного подтверждения — проверьте пункт">
+                    ⚠ проверьте</span>
+                )}
+                {v?.ok && v.quote && (
+                  <details className="mt-0.5">
+                    <summary className="text-[11px] cursor-pointer" style={{ color: "var(--muted)" }}>
+                      основание{v.t ? ` · ${v.t}` : ""}{v.source === "notes" ? " · из заметок" : ""}</summary>
+                    <div className="text-[11.5px] italic mt-0.5 pl-2" style={{ color: "var(--muted)", borderLeft: "2px solid var(--line)" }}>
+                      «{v.quote}»</div>
+                  </details>
+                )}
+              </span>
+            </li>
+          );
+        })}
       </ul>
     </div>
   );
@@ -75,10 +96,10 @@ function Protocol({ a }: { a: any }) {
       ) : null}
       <List title="Ключевые мысли" items={a.key_thoughts} />
       <List title="Выводы" items={a.conclusions} />
-      <List title="Решения" items={a.decisions} />
-      <List title="Уже сделано" items={a.done_tasks} />
-      <List title="Задачи" items={a.tasks} />
-      <List title="Мелкие задачи" items={a.minor_tasks} />
+      <List title="Решения" items={a.decisions} verify={a.verification?.decisions} />
+      <List title="Уже сделано" items={a.done_tasks} verify={a.verification?.done_tasks} />
+      <List title="Задачи" items={a.tasks} verify={a.verification?.tasks} />
+      <List title="Мелкие задачи" items={a.minor_tasks} verify={a.verification?.minor_tasks} />
     </div>
   );
 }
@@ -141,6 +162,7 @@ export default function Recognition() {
     fd.append("identify_speakers", String(opts.identify_speakers));
     fd.append("provider", opts.provider);
     fd.append("context_hint", opts.context_hint || f.name);
+    if (opts.user_notes?.trim()) fd.append("user_notes", opts.user_notes.trim());
     try {
       const j = await api.upload("/api/jobs", fd, (p) => setProg(p));
       toast("Файл принят — идёт распознавание");
@@ -156,6 +178,20 @@ export default function Recognition() {
   async function reanalyze(id: string) {
     try { await api.post(`/api/jobs/${id}/reanalyze`, { provider: opts.provider }); toast("Пересобираю протокол…"); loadJobs(); }
     catch (e: any) { toast(e.message, true); }
+  }
+
+  // Д6: participant's live notes on an existing job → save, then «Пересобрать».
+  const [notesDraft, setNotesDraft] = useState("");
+  const [notesOpen, setNotesOpen] = useState(false);
+  useEffect(() => { setNotesDraft(detail?.user_notes || ""); setNotesOpen(false); }, [detail?.id]);
+  async function saveNotes() {
+    if (!detail) return;
+    try {
+      await api.post(`/api/jobs/${detail.id}/notes`, { notes: notesDraft });
+      toast(notesDraft.trim()
+        ? "Заметки сохранены — нажмите «Пересобрать», чтобы протокол их учёл"
+        : "Заметки удалены");
+    } catch (e: any) { toast(e.message, true); }
   }
 
   return (
@@ -198,6 +234,10 @@ export default function Recognition() {
             <label className="lbl mt-3">Контекст (проект/тема)</label>
             <input className="field" value={opts.context_hint} onChange={(e) => setOpts({ ...opts, context_hint: e.target.value })}
               placeholder="подставит сохранённый контекст проекта" />
+            <label className="lbl mt-3">Заметки со встречи</label>
+            <textarea className="field" rows={3} value={opts.user_notes || ""}
+              onChange={(e) => setOpts({ ...opts, user_notes: e.target.value })}
+              placeholder="ваши живые заметки — станут скелетом протокола (можно добавить и после)" />
 
             <div className="grid grid-cols-2 gap-2 mt-3">
               {[
@@ -291,6 +331,32 @@ export default function Recognition() {
                     <RotateCcw size={14} /> Прикрепить снова</button>
                 </div>
               )}
+
+              {/* Д6: notes editor — the human's live notes outrank the transcript */}
+              <div className="glass2 rounded-2xl p-3 mb-3">
+                <button type="button" onClick={() => setNotesOpen((o) => !o)}
+                  className="w-full flex items-center gap-2 text-left"
+                  style={{ cursor: "pointer", background: "none", border: 0, padding: 0 }}>
+                  <span className="text-[12.5px] font-semibold">📝 Заметки со встречи</span>
+                  <span className="text-[11.5px]" style={{ color: "var(--muted)" }}>
+                    {detail.user_notes ? "есть — приоритетный источник протокола" : "нет — добавьте, и протокол станет точнее"}
+                  </span>
+                </button>
+                {notesOpen && (
+                  <div className="mt-2">
+                    <textarea className="field" rows={5} value={notesDraft}
+                      onChange={(e) => setNotesDraft(e.target.value)}
+                      placeholder="что решили, кто что взял, ключевые цифры — как записали на встрече" />
+                    <div className="flex gap-2 mt-2 justify-end">
+                      <button className="btn btn-ghost" onClick={saveNotes}>Сохранить</button>
+                      {detail.status === "done" && (
+                        <button className="btn btn-primary" onClick={async () => { await saveNotes(); reanalyze(detail.id); }}>
+                          <Sparkles size={14} /> Сохранить и пересобрать</button>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
 
               <div className="flex items-center gap-2 mb-3 flex-wrap">
                 <div className="glass2 rounded-full p-1 flex gap-1">

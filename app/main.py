@@ -487,6 +487,7 @@ async def create_job(
     deliver_protocol_cloud: bool = Form(False),
     deliver_weeek_task: str = Form(""),
     context_hint: str = Form(""),
+    user_notes: str = Form(""),
     user: str = Depends(current_user),
 ):
     ext = Path(file.filename or "").suffix.lower()
@@ -521,7 +522,7 @@ async def create_job(
                        deliver_protocol_cloud=deliver_protocol_cloud,
                        deliver_weeek_task=deliver_weeek_task,
                        context_hint=context_hint, model=model_sel,
-                       owner=user)
+                       user_notes=user_notes, owner=user)
     return JSONResponse({"job_id": job.id, **job.to_public()}, status_code=201)
 
 
@@ -716,6 +717,19 @@ def reanalyze_job(job_id: str, body: ReanalyzeBody, user: str = Depends(current_
     except ValueError as e:
         raise HTTPException(409, str(e))
     return job.to_public()
+
+
+class NotesBody(BaseModel):
+    notes: str = ""
+
+
+@app.post("/api/jobs/{job_id}/notes")
+def set_job_notes(job_id: str, body: NotesBody, user: str = Depends(current_user)):
+    """Attach the participant's live meeting notes to a job (Д6). They join the
+    next protocol generation («Пересобрать» applies them to an existing one)."""
+    _require_owned(job_id, user)
+    job = store.set_notes(job_id, body.notes)
+    return {"ok": True, "has_notes": bool(job.user_notes)}
 
 
 @app.post("/api/jobs/{job_id}/redeliver")

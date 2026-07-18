@@ -67,6 +67,7 @@ export default function Scheduler() {
         identify_speakers: !!s.identify_speakers, post_back_to_weeek: !!s.post_back_to_weeek,
         weeek_set_video_field: !!s.weeek_set_video_field, upload_protocol: !!s.upload_protocol,
         weeek_set_protocol_field: !!s.weeek_set_protocol_field,
+        strict_verify: s.strict_verify !== false,
         analyze_provider: s.analyze_provider || "auto",
       });
       toast("Планировщик сохранён");
@@ -152,6 +153,8 @@ export default function Scheduler() {
           <Toggle title="Формировать протокол" sub="LLM → структурный протокол Word" on={s.do_protocol} onChange={() => set("do_protocol", !s.do_protocol)} />
           <Toggle title="OCR экрана" sub="распознавать текст со слайдов" on={s.ocr_screen} onChange={() => set("ocr_screen", !s.ocr_screen)} />
           <Toggle title="Определять спикеров" sub="кто что говорил" on={s.identify_speakers} onChange={() => set("identify_speakers", !s.identify_speakers)} />
+          <Toggle title="Строгая проверка" sub="пункт без дословной цитаты помечается «⚠ проверьте»"
+            on={s.strict_verify !== false} onChange={() => set("strict_verify", s.strict_verify === false)} />
           <Toggle title="Комментарий в Weeek" sub="постить ссылки/итоги в задачу" on={s.post_back_to_weeek} onChange={() => set("post_back_to_weeek", !s.post_back_to_weeek)} />
           <Toggle title="Поле «Видео» в Weeek" on={s.weeek_set_video_field} onChange={() => set("weeek_set_video_field", !s.weeek_set_video_field)} />
           <Toggle title="Выгружать протокол" sub="в облако" on={s.upload_protocol} onChange={() => set("upload_protocol", !s.upload_protocol)} />

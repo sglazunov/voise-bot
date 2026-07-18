@@ -69,7 +69,7 @@ JOB_SCALAR_COLS = [
     "id", "owner", "filename", "audio_path", "language", "diarize", "model",
     "initial_prompt", "glossary", "analyze", "provider", "analysis_instructions",
     "analysis_prompt", "capture_screen", "identify_speakers",
-    "deliver_protocol_cloud", "deliver_weeek_task", "context_hint",
+    "deliver_protocol_cloud", "deliver_weeek_task", "context_hint", "user_notes",
     "delete_audio_when_done", "status", "progress", "created_at", "started_at",
     "finished_at", "error", "duration", "speakers", "diarization_error",
     "speaker_error", "screen_error", "protocol_cloud_url", "delivery_error",
@@ -131,6 +131,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     deliver_protocol_cloud BOOLEAN,
     deliver_weeek_task     TEXT,
     context_hint           TEXT,
+    user_notes             TEXT,
     delete_audio_when_done BOOLEAN,
     status                 TEXT,
     progress               DOUBLE PRECISION,
@@ -154,6 +155,7 @@ CREATE TABLE IF NOT EXISTS jobs (
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_owner ON jobs(owner);
 CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at);
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS user_notes TEXT;
 CREATE TABLE IF NOT EXISTS user_settings (
     username    TEXT PRIMARY KEY,
     data        JSONB NOT NULL

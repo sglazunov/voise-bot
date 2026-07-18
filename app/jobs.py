@@ -103,6 +103,7 @@ class Job:
     deliver_protocol_cloud: bool = False  # upload the .docx protocol to the user's cloud
     deliver_weeek_task: str = ""     # Weeek task id/URL to attach the protocol link to
     context_hint: str = ""           # matches saved AI-context projects (meeting/project name)
+    user_notes: str = ""             # participant's own live notes — the protocol's skeleton (Д6)
     delete_audio_when_done: bool = False  # delete the source media after processing
                                           # (recordings already sent to the UI's cloud)
     owner: str = ""                  # the login that owns this job (isolation)
@@ -194,7 +195,8 @@ class JobStore:
                capture_screen: bool = False, identify_speakers: bool = False,
                deliver_protocol_cloud: bool = False, deliver_weeek_task: str = "",
                context_hint: str = "", model: str = "",
-               delete_audio_when_done: bool = False, owner: str = "") -> Job:
+               delete_audio_when_done: bool = False, owner: str = "",
+               user_notes: str = "") -> Job:
         job = Job(
             id=uuid.uuid4().hex[:12],
             filename=filename,
@@ -213,6 +215,7 @@ class JobStore:
             deliver_protocol_cloud=deliver_protocol_cloud,
             deliver_weeek_task=(deliver_weeek_task or "").strip(),
             context_hint=(context_hint or "").strip(),
+            user_notes=(user_notes or "").strip(),
             delete_audio_when_done=delete_audio_when_done,
             owner=_team(owner),   # jobs belong to the TEAM, not the individual
         )
@@ -316,9 +319,9 @@ class JobStore:
         txt_path = self.result_path(job_id, "txt")
         if not txt_path.exists():
             raise ValueError("Нет транскрипции для анализа.")
-        # Prefer the continuous, timestamp-free text (cleaner input for the LLM).
-        plain_path = self.result_path(job_id, "plain")
-        src_path = plain_path if plain_path.exists() else txt_path
+        # Prefer the TIMECODED transcript (Д1): the map-reduce needs the [мм:сс]
+        # marks for chronology, and grounding (Д5) quotes against it.
+        src_path = txt_path
         if not self._reanalyze_lock.acquire(blocking=False):
             raise ValueError("Анализ уже выполняется, подождите.")
         if provider:
@@ -338,6 +341,37 @@ class JobStore:
                          daemon=True).start()
         return job
 
+    def set_notes(self, job_id: str, notes: str) -> Job:
+        """Attach/replace the participant's live notes (Д6). They join the next
+        protocol generation — hit «Пересобрать» to apply them to an old job."""
+        job = self._require(job_id)
+        job.user_notes = (notes or "").strip()[:20000]
+        self._save()
+        return job
+
+    def _maybe_verify(self, job: Job, result: dict, transcript: str) -> dict:
+        """Д5: grounding pass over the fresh protocol (strict mode, on by
+        default; per-team switch «strict_verify» in automation settings). Never
+        breaks the job — on failure the protocol ships with verification.error."""
+        if not result or job.analysis_prompt:
+            return result   # expert-mode prompts may change the schema — skip
+        try:
+            from .automation import settings as auto_settings
+            if not auto_settings.load(job.owner).get("strict_verify", True):
+                return result
+            from .analyze import verify_protocol
+            return verify_protocol(
+                result, transcript, user_notes=job.user_notes,
+                provider=job.provider, keys=_owner_keys(job.owner),
+                on_progress=self._on_analysis(job.id),
+                cancel_check=lambda: self._control.get(job.id, {}).get("cancel"))
+        except Exception as e:  # noqa: BLE001
+            from .analyze import AnalysisCancelled
+            if isinstance(e, AnalysisCancelled):
+                raise
+            result.setdefault("verification", {})["error"] = str(e)
+            return result
+
     def _do_reanalyze(self, job: Job, txt: str) -> None:
         if "УЧАСТНИКИ ЗВОНКА" not in txt:
             txt += _participants_block(job)
@@ -355,7 +389,9 @@ class JobStore:
                 custom_prompt=job.analysis_prompt,
                 on_progress=self._on_analysis(job.id),
                 cancel_check=lambda: self._control.get(job.id, {}).get("cancel"),
-                keys=_owner_keys(job.owner))
+                keys=_owner_keys(job.owner),
+                user_notes=job.user_notes)
+            result = self._maybe_verify(job, result, txt)
             prov = result.get("_provider") or job.provider
             segs = []
             jp = self.result_path(job.id, "json")
@@ -764,7 +800,10 @@ class JobStore:
                         custom_prompt=job.analysis_prompt,
                         on_progress=self._on_analysis(job.id),
                         cancel_check=lambda: self._control.get(job.id, {}).get("cancel"),
-                        keys=_owner_keys(job.owner))
+                        keys=_owner_keys(job.owner),
+                        user_notes=job.user_notes)
+                    analysis_result = self._maybe_verify(
+                        job, analysis_result, analysis_input)
                     prov = analysis_result.get("_provider") or job.provider
                     segs_dicts = [
                         {"start": s.start, "end": s.end,
