@@ -477,6 +477,38 @@ class JobStore:
         except Exception:  # noqa: BLE001
             pass
 
+    def _enforce_participants(self, job: Job, result: dict) -> dict:
+        """Участники протокола = РОВНО те, кто был в окне Телемоста (подписи
+        плиток). На встрече часто говорят О других людях — промпт просит модель
+        не вписывать их в участники, но это лишь просьба; здесь список
+        заменяется механически, так что обсуждаемый человек попасть в
+        «Участники» не может. Роли, которые модель определила по разговору,
+        сохраняются у совпавших имён. Без распознанных плиток (аудио-файл,
+        сбой сканера) поведение прежнее — по тексту."""
+        tiles = _tile_names(job)
+        if not result or not tiles:
+            return result
+
+        def norm(s: str) -> str:
+            return (s or "").strip().lower().replace("ё", "е")
+
+        roles: dict[str, str] = {}
+        for p in (result.get("participants") or []):
+            if isinstance(p, dict) and (p.get("name") or "").strip():
+                roles[norm(p["name"])] = str(p.get("role") or "").strip()
+        out = []
+        for name in tiles:
+            n = norm(name)
+            role = roles.get(n, "")
+            if not role:  # «Сергей Глазунов» на плитке vs «Сергей» у модели
+                for k, v in roles.items():
+                    if v and (n in k or k in n):
+                        role = v
+                        break
+            out.append({"name": name, "role": role})
+        result["participants"] = out
+        return result
+
     def _preset_extra(self, job: Job) -> str:
         """Д11: the preset's emphasis rules + the user's own instructions."""
         try:
@@ -532,6 +564,7 @@ class JobStore:
                 keys=_owner_keys(job.owner),
                 user_notes=job.user_notes)
             result = self._maybe_verify(job, result, txt)
+            result = self._enforce_participants(job, result)
             prov = result.get("_provider") or job.provider
             segs = []
             jp = self.result_path(job.id, "json")
@@ -956,6 +989,7 @@ class JobStore:
                         user_notes=job.user_notes)
                     analysis_result = self._maybe_verify(
                         job, analysis_result, analysis_input)
+                    analysis_result = self._enforce_participants(job, analysis_result)
                     prov = analysis_result.get("_provider") or job.provider
                     segs_dicts = [
                         {"start": s.start, "end": s.end,
@@ -1053,10 +1087,21 @@ def _context_block(job: "Job") -> str:
         return ""
 
 
+def _tile_names(job: "Job") -> list[str]:
+    """Name-like tile captions of THIS call, deduped (scanner noise dropped)."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for n in (getattr(job, "video_participants", None) or []):
+        if JobStore._looks_like_name(n) and n.strip().lower() not in seen:
+            seen.add(n.strip().lower())
+            out.append(n.strip())
+    return out
+
+
 def _participants_block(job: "Job") -> str:
     """The «who is on the call» block for the LLM — names read off the video
     grid are authoritative, so the protocol lists exactly these people."""
-    names = getattr(job, "video_participants", None) or []
+    names = _tile_names(job)
     if not names:
         return ""
     return ("\n\n=== УЧАСТНИКИ ЗВОНКА (распознано с видео) ===\n"
