@@ -423,6 +423,12 @@ def _is_rate_limit(e: Exception) -> bool:
 
 
 _KEY_COOLDOWN_SEC = 60.0   # a rate-limited key rests this long (Groq's TPM window)
+# When EVERY key is cooling, wait for the earliest reset (the TPM window is
+# ~a minute) rather than abandoning the engine — the keys' budgets then SUM UP
+# over the whole meeting. Waits longer than KEY_WAIT_SEC per round, or
+# KEY_TOTAL_WAIT_SEC per request, mean a real outage → fall to the next engine.
+KEY_WAIT_SEC = float(os.getenv("VTX_KEY_WAIT_SEC", "90"))
+KEY_TOTAL_WAIT_SEC = float(os.getenv("VTX_KEY_TOTAL_WAIT_SEC", "300"))
 
 
 def _cooldown_from(e: Exception, default: float = _KEY_COOLDOWN_SEC) -> float:
@@ -464,29 +470,36 @@ class _RotatingProvider:
 
     def complete(self, prompt: str, max_tokens: int = 2000, force_json: bool = True) -> str:
         n = len(self._creds)
-        now = time.time()
-        order = [(self._i + k) % n for k in range(n)]
-        ready = [i for i in order if self._cooldown.get(i, 0.0) <= now]
-        if not ready:
-            wait = max(int(min(self._cooldown.values()) - now) + 1, 1)
-            raise RuntimeError(
-                f"Все {n} ключа(ей) «{self.name}» сейчас упёрлись в лимит. "
-                f"Повторите через ~{wait} с, добавьте ещё ключ или выберите другой движок.")
-        limited = []
-        for i in ready:
-            try:
-                out = self._inst(i).complete(prompt, max_tokens, force_json)
-                self._i = (i + 1) % n   # spread the NEXT request onto the next key
-                return out
-            except Exception as e:      # noqa: BLE001
-                if _is_rate_limit(e) and n > 1:
-                    self._cooldown[i] = time.time() + _cooldown_from(e)
-                    limited.append(i + 1)
-                    continue            # this key rests; try the next one
-                raise
-        raise RuntimeError(
-            f"Все {n} API-ключа(ей) исчерпали лимит (ключи {limited}). "
-            "Добавьте ещё ключ, подождите сброса лимита или выберите другой движок.")
+        deadline = time.time() + KEY_TOTAL_WAIT_SEC
+        while True:
+            now = time.time()
+            order = [(self._i + k) % n for k in range(n)]
+            ready = [i for i in order if self._cooldown.get(i, 0.0) <= now]
+            if ready:
+                for i in ready:
+                    try:
+                        out = self._inst(i).complete(prompt, max_tokens, force_json)
+                        self._i = (i + 1) % n   # spread the NEXT request onto the next key
+                        return out
+                    except Exception as e:      # noqa: BLE001
+                        if _is_rate_limit(e):
+                            # Park this key and move on. Even with ONE key we
+                            # park-and-wait: the window resets in seconds.
+                            self._cooldown[i] = time.time() + _cooldown_from(e)
+                            continue
+                        raise
+            # Every key is cooling. A rate-limit window is SECONDS — wait it out
+            # and keep the protocol on THESE keys (their budgets sum up across
+            # the meeting), instead of bailing to another engine. Only a wait
+            # that's too long (a real outage / brutal quota) falls through to
+            # the provider chain.
+            wait = max(min(self._cooldown.values()) - time.time(), 0.5)
+            if wait > KEY_WAIT_SEC or time.time() + wait > deadline:
+                raise RuntimeError(
+                    f"Все {n} ключа(ей) «{self.name}» упёрлись в лимит, сброс "
+                    f"через ~{int(wait)} с — это дольше обычного окна. "
+                    "Добавьте ещё ключ или выберите другой движок.")
+            time.sleep(wait + 0.3)
 
 
 class _FallbackChain:
