@@ -1,0 +1,72 @@
+"""Ротация ключей: минутные лимиты нескольких аккаунтов складываются, и при
+одновременном остывании ВСЕХ ключей ротатор ждёт сброса окна (секунды), а не
+бросает движок — весь протокол собирают одни и те же ключи Groq.
+"""
+import time
+
+import pytest
+
+from app import llm
+from app.llm import _RotatingProvider
+
+
+def _make_cls(behaviour: dict):
+    """behaviour: api_key -> list of ответов; 'RL' = 429, 'ERR' = обычная ошибка."""
+    class Fake:
+        name = "groq"
+
+        def __init__(self, model=None, api_key=None, extra=None):
+            self.api_key = api_key
+
+        def complete(self, prompt, max_tokens=2000, force_json=True):
+            step = behaviour[self.api_key].pop(0)
+            if step == "RL":
+                raise RuntimeError("HTTP 429: rate limit, try again in 0.2s")
+            if step == "ERR":
+                raise RuntimeError("HTTP 500: boom")
+            return step
+    return Fake
+
+
+def _rot(behaviour):
+    creds = [(k, "") for k in behaviour]
+    return _RotatingProvider(_make_cls(behaviour), None, creds)
+
+
+class TestKeySumming:
+    def test_second_key_picks_up_when_first_limited(self):
+        rot = _rot({"k1": ["RL"], "k2": ["ответ"]})
+        assert rot.complete("p") == "ответ"
+
+    def test_three_keys_share_a_burst(self):
+        # Три запроса подряд расходятся по трём ключам (round-robin).
+        rot = _rot({"k1": ["a"], "k2": ["b"], "k3": ["c"]})
+        assert [rot.complete("p") for _ in range(3)] == ["a", "b", "c"]
+
+    def test_all_keys_cooling_waits_and_resumes(self, monkeypatch):
+        # Оба ключа получают 429 с «try again in 0.2s» → ротатор ЖДЁТ сброс и
+        # доделывает запрос теми же ключами, НЕ отдавая его другому движку.
+        monkeypatch.setattr(llm, "KEY_WAIT_SEC", 5.0)
+        rot = _rot({"k1": ["RL", "ответ после сна"], "k2": ["RL"]})
+        t0 = time.time()
+        assert rot.complete("p") == "ответ после сна"
+        assert time.time() - t0 >= 0.2          # реально подождал окно
+
+    def test_single_key_also_waits_instead_of_bailing(self, monkeypatch):
+        monkeypatch.setattr(llm, "KEY_WAIT_SEC", 5.0)
+        rot = _rot({"k1": ["RL", "ok"]})
+        assert rot.complete("p") == "ok"
+
+    def test_long_cooldown_falls_through_to_chain(self, monkeypatch):
+        # Сброс «через 999 с» — это не окно лимита, а серьёзная квота/авария:
+        # ротатор сдаётся, и цепочка уходит к следующему движку.
+        monkeypatch.setattr(llm, "KEY_WAIT_SEC", 1.0)
+        monkeypatch.setattr(llm, "_cooldown_from", lambda e, default=60.0: 999.0)
+        rot = _rot({"k1": ["RL"], "k2": ["RL"]})
+        with pytest.raises(RuntimeError, match="упёрлись в лимит"):
+            rot.complete("p")
+
+    def test_real_error_raises_immediately(self):
+        rot = _rot({"k1": ["ERR"], "k2": ["не должно понадобиться"]})
+        with pytest.raises(RuntimeError, match="500"):
+            rot.complete("p")
