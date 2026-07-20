@@ -273,7 +273,19 @@ export default function Recognition() {
   const [busy, setBusy] = useState(false);
   const [prog, setProg] = useState(0);
   const [engines, setEngines] = useState<{ value: string; label: string }[]>([]);
-  const [opts, setOpts] = useState<any>({ language: "ru", model: "", analyze: true, diarize: false, capture_screen: false, identify_speakers: false, provider: "auto", context_hint: "", preset: "universal" });
+  // Настройки формы переживают обновление страницы (localStorage). Заметки и
+  // контекст не сохраняем — они у каждой встречи свои.
+  const OPTS_DEFAULTS = { language: "ru", model: "", analyze: true, diarize: false, capture_screen: false, identify_speakers: false, provider: "auto", context_hint: "", preset: "universal" };
+  const [opts, setOpts] = useState<any>(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem("vtx-recognition-opts") || "{}");
+      return { ...OPTS_DEFAULTS, ...saved, context_hint: "", user_notes: "" };
+    } catch { return { ...OPTS_DEFAULTS }; }
+  });
+  useEffect(() => {
+    const { context_hint, user_notes, ...persist } = opts;
+    try { localStorage.setItem("vtx-recognition-opts", JSON.stringify(persist)); } catch { /* quota */ }
+  }, [opts]);
   const [presets, setPresets] = useState<{ value: string; label: string }[]>([]);
   useEffect(() => { api.get("/api/presets").then((d) => setPresets(d.presets || [])).catch(() => {}); }, []);
   const [recommend, setRecommend] = useState("");
@@ -328,8 +340,23 @@ export default function Recognition() {
     return () => { alive = false; clearInterval(t); };
   }, [sel, detail?.status]);
 
+  const [uploadError, setUploadError] = useState("");
+
   async function onFile(f: File | undefined) {
     if (!f) return;
+    setUploadError("");
+    // Бесплатный туннель Cloudflare (*.trycloudflare.com) режет тело запроса
+    // на ~100 МБ: файл встречи просто не долетает до сервера, а в логах пусто.
+    const viaTunnel = /\.trycloudflare\.com$/i.test(location.hostname);
+    const sizeMb = Math.round(f.size / 1024 / 1024);
+    if (viaTunnel && f.size > 95 * 1024 * 1024) {
+      setUploadError(
+        `Файл ${sizeMb} МБ, а вы зашли через временную ссылку trycloudflare — ` +
+        "она обрезает загрузки примерно на 100 МБ, файл не дойдёт до сервера. " +
+        "Загрузите его с локального адреса (http://localhost:8000 или IP сервера) " +
+        "либо сожмите/разбейте запись.");
+      return;
+    }
     setBusy(true); setProg(0);
     const fd = new FormData();
     fd.append("file", f);
@@ -347,7 +374,16 @@ export default function Recognition() {
       const j = await api.upload("/api/jobs", fd, (p) => setProg(p));
       toast("Файл принят — идёт распознавание");
       await loadJobs(); setSel(j.job_id); setTab("protocol");
-    } catch (e: any) { toast(e.message, true); } finally { setBusy(false); setProg(0); }
+    } catch (e: any) {
+      // Ошибка загрузки НЕ должна сгорать тостом: раньше форма молча
+      // сбрасывалась («видео исчезло»), и причина оставалась загадкой.
+      const hint = /сеть|network/i.test(e.message) && viaTunnel
+        ? " Похоже, туннель trycloudflare оборвал загрузку (лимит ~100 МБ) — " +
+          "попробуйте с локального адреса."
+        : "";
+      setUploadError(`Загрузка не удалась: ${e.message}.${hint}`);
+      toast(e.message, true);
+    } finally { setBusy(false); setProg(0); }
   }
   async function retry(id: string) { try { await api.post(`/api/jobs/${id}/retry`); loadJobs(); } catch (e: any) { toast(e.message, true); } }
   // Delivery only (cloud upload + Weeek link) — no expensive LLM re-run.
@@ -389,7 +425,12 @@ export default function Recognition() {
               style={{ padding: "26px 16px", borderStyle: "dashed" }}>
               {busy ? (
                 <><Loader2 size={26} className="animate-spin" color="var(--accent)" />
-                  <div className="text-[13px] mt-2">Загрузка… {prog}%</div>
+                  <div className="text-[13px] mt-2">
+                    {prog >= 100 ? "Сервер принимает и сохраняет файл…" : `Загрузка… ${prog}%`}</div>
+                  {prog >= 100 && (
+                    <div className="text-[11px] mt-0.5" style={{ color: "var(--muted)" }}>
+                      для больших файлов это может занять минуту-другую</div>
+                  )}
                   <div className="mt-2 w-full" style={{ height: 6, borderRadius: 6, background: "rgba(120,140,150,.2)", overflow: "hidden" }}>
                     <div style={{ height: "100%", width: `${prog}%`, background: "linear-gradient(90deg,var(--accent),var(--accent2))" }} /></div></>
               ) : (
@@ -400,6 +441,15 @@ export default function Recognition() {
             </div>
             <input ref={fileRef} type="file" className="hidden" onChange={(e) => onFile(e.target.files?.[0] || undefined)}
               accept=".mp3,.wav,.m4a,.ogg,.oga,.opus,.flac,.aac,.mp4,.mov,.mkv,.webm,.m4v" />
+            {uploadError && (
+              <div className="glass2 rounded-2xl p-3 mt-3 flex items-start gap-2.5 text-[12.5px]"
+                style={{ color: "#fca5a5", border: "1px solid rgba(248,113,113,.35)" }}>
+                <span className="min-w-0 flex-1">⚠ {uploadError}</span>
+                <button className="btn-ghost grid place-items-center flex-none"
+                  style={{ width: 26, height: 26, borderRadius: 8 }}
+                  onClick={() => setUploadError("")}><X size={13} /></button>
+              </div>
+            )}
 
             <div className="grid grid-cols-2 gap-3 mt-3">
               <div><label className="lbl">Язык</label>

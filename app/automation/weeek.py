@@ -249,6 +249,13 @@ def parse_start(task: dict, local_tz: tzinfo = timezone.utc) -> datetime | None:
     stime = next((task.get(f) for f in
                   ("timeStart", "startTime", "time") if task.get(f)), None)
     if day:
+        if not stime and ":" not in str(day):
+            # A DATE without any time: parsing it would fabricate «полночь»,
+            # which is always in the past — the meeting would silently become
+            # «пропущена». Treat it as «без времени» instead: the card stays
+            # visible with a manual «Подключиться», and the bot never
+            # auto-joins at a made-up 00:00.
+            return None
         combined = f"{day}T{stime}" if stime else str(day)
         dt = _parse_dt(combined, local_tz)
         if dt:

@@ -68,3 +68,15 @@ class TestPagination:
         monkeypatch.setattr(weeek, "_request", fake_request)
         tasks = weeek.list_tasks("tok", max_tasks=250)
         assert len(tasks) == 300  # 3 pages of 100, then len >= max_tasks stops the loop
+
+
+class TestDateOnly:
+    def test_date_without_time_is_no_time_not_midnight(self):
+        # Задачу-встречу создали «на сегодня» без времени: полночь — фикция,
+        # из-за неё встреча молча становилась «пропущенной» и пряталась.
+        assert weeek.parse_start({"date": "20.07.2026"}, MSK) is None
+
+    def test_date_with_embedded_time_still_parses(self):
+        # Поле date иногда несёт полный datetime — он остаётся рабочим.
+        start = weeek.parse_start({"date": "2026-07-20T10:30"}, MSK)
+        assert start is not None

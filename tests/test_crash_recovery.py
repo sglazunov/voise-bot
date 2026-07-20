@@ -97,3 +97,40 @@ class TestOrphanResume:
         s._resume_pending()
         assert not [j for j in store.list(owner="alice")
                     if j.deliver_weeek_task == "99"]
+
+
+class TestMissedVisibility:
+    def _status(self, s, monkeypatch):
+        from app.automation import scheduler as sched_mod
+        monkeypatch.setattr(sched_mod.security, "team_of", lambda u: "alice")
+        monkeypatch.setattr(sched_mod.auto_settings, "load", lambda u: {})
+        monkeypatch.setattr(sched_mod.recorder, "active_recordings", lambda: 0)
+        return s.status("alice")
+
+    def test_all_fresh_missed_visible(self, monkeypatch):
+        from datetime import datetime, timedelta, timezone
+        s = Scheduler()
+        now = datetime.now(timezone.utc)
+        for i, delta_h in enumerate((1, 5, 30)):   # два свежих, один старый
+            st = MeetingState(key=f"alice:{i}:x", task_id=str(i), title=f"m{i}",
+                              url="", start=now - timedelta(hours=delta_h),
+                              owner="alice", state="missed")
+            with s._lock:
+                s._states[st.key] = st
+        meetings = self._status(s, monkeypatch)["meetings"]
+        missed_ids = {m["task_id"] for m in meetings if m["state"] == "missed"}
+        assert missed_ids == {"0", "1"}   # оба свежих видны, суточной давности - скрыт
+
+    def test_single_old_missed_still_shown(self, monkeypatch):
+        from datetime import datetime, timedelta, timezone
+        s = Scheduler()
+        now = datetime.now(timezone.utc)
+        for i, delta_h in enumerate((30, 50)):
+            st = MeetingState(key=f"alice:{i}:y", task_id=str(i), title=f"m{i}",
+                              url="", start=now - timedelta(hours=delta_h),
+                              owner="alice", state="missed")
+            with s._lock:
+                s._states[st.key] = st
+        meetings = self._status(s, monkeypatch)["meetings"]
+        missed = [m for m in meetings if m["state"] == "missed"]
+        assert len(missed) == 1 and missed[0]["task_id"] == "0"  # свежайший из старых
