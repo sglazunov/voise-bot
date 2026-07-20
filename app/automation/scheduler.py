@@ -768,6 +768,16 @@ class Scheduler:
                 job = store.get(jid)
                 if job is None:
                     continue    # job already purged by retention — nothing left
+                # Д8: the restart interrupted the RECOGNITION itself (worker died
+                # mid-transcription). The source file is still there — requeue it
+                # instead of leaving an «error» card that needs a manual retry.
+                if (job.status == "error"
+                        and "перезапущен" in (job.error or "")
+                        and job.audio_path and Path(job.audio_path).exists()):
+                    try:
+                        store.retry(jid)
+                    except Exception:  # noqa: BLE001
+                        pass
                 st = MeetingState(
                     key=key, task_id=task_id, title=Path(job.filename).stem,
                     url="", start=start, owner=team,

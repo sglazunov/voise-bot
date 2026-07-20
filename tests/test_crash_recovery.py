@@ -134,3 +134,53 @@ class TestMissedVisibility:
         meetings = self._status(s, monkeypatch)["meetings"]
         missed = [m for m in meetings if m["state"] == "missed"]
         assert len(missed) == 1 and missed[0]["task_id"] == "0"  # свежайший из старых
+
+
+class TestInterruptedRecognitionRetry:
+    def test_interrupted_job_is_requeued_on_resume(self, tmp_path, monkeypatch):
+        from app.automation import scheduler as sched_mod
+        rec = tmp_path / "int.mp4"
+        rec.write_bytes(b"x" * 1024)
+        job = store.create(filename="int.mp4", audio_path=str(rec),
+                           language="ru", diarize=False, analyze=True,
+                           owner="alice")
+        job.status = "error"
+        job.error = "Прервано (сервис был перезапущен)."
+
+        s = Scheduler()
+        st = MeetingState(key="alice:55:2026-07-20T10:00:00+00:00", task_id="55",
+                          title="x", url="", start=None, owner="alice",
+                          state="transcribing", job_id=job.id,
+                          out_path=str(rec), do_protocol=True)
+        s._save_state(st)
+        monkeypatch.setattr(sched_mod.security, "list_teams", lambda: ["alice"])
+        monkeypatch.setattr(sched_mod.auto_settings, "load", lambda u: {
+            "weeek_token": "tok", "do_transcribe": True, "do_protocol": True,
+            "upload_protocol": True})
+        monkeypatch.setattr(Scheduler, "_await_and_upload_protocol",
+                            lambda self, *a, **k: None)
+        retried = []
+        monkeypatch.setattr(store, "retry", lambda jid: retried.append(jid))
+        s._resume_pending()
+        assert retried == [job.id]
+
+    def test_interrupted_job_with_lost_file_not_retried(self, monkeypatch):
+        from app.automation import scheduler as sched_mod
+        job = store.create(filename="gone.mp4", audio_path="/nonexistent/gone.mp4",
+                           language="ru", diarize=False, owner="alice")
+        job.status = "error"
+        job.error = "Прервано (сервис был перезапущен)."
+        s = Scheduler()
+        st = MeetingState(key="alice:56:2026-07-20T11:00:00+00:00", task_id="56",
+                          title="x", url="", start=None, owner="alice",
+                          state="transcribing", job_id=job.id, do_protocol=True)
+        s._save_state(st)
+        monkeypatch.setattr(sched_mod.security, "list_teams", lambda: ["alice"])
+        monkeypatch.setattr(sched_mod.auto_settings, "load", lambda u: {
+            "weeek_token": "tok", "upload_protocol": True})
+        monkeypatch.setattr(Scheduler, "_await_and_upload_protocol",
+                            lambda self, *a, **k: None)
+        retried = []
+        monkeypatch.setattr(store, "retry", lambda jid: retried.append(jid))
+        s._resume_pending()
+        assert retried == []
