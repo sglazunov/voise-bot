@@ -329,7 +329,21 @@ class Scheduler:
         # Launch as many due meetings as there are FREE recording slots — up to
         # MAX_SLOTS run in parallel, each isolated on its own display + sink.
         candidates.sort(key=lambda x: x[0])  # earliest-starting first
+        # ОДНА ссылка Телемоста = ОДНА одновременная запись. Перенос времени
+        # (или две задачи с одной ссылкой) порождает два слота одной встречи —
+        # без этого на звонок заходили ДВА бота.
+        with self._lock:
+            busy_urls = {s.url for s in self._states.values()
+                         if s.owner == user and s.url
+                         and s.state == "recording"}
         for _, chosen in candidates:
+            if chosen.url and chosen.url in busy_urls:
+                with self._lock:
+                    if chosen.state == "scheduled":
+                        chosen.state, chosen.detail = (
+                            "skipped", "Эта ссылка уже записывается другим "
+                                       "слотом (перенос времени).")
+                continue
             slot = recorder.acquire_slot()
             if slot is None:
                 break  # all slots busy — the rest wait for the next tick
@@ -344,6 +358,7 @@ class Scheduler:
             if not claimed:
                 recorder.release_slot(slot)
                 continue
+            busy_urls.add(chosen.url)
             threading.Thread(target=self._run, args=(chosen, slot), daemon=True).start()
 
     # -- per-meeting pipeline ----------------------------------------------
@@ -1127,6 +1142,12 @@ class Scheduler:
             return {"ok": False, "error": "Встреча не найдена (сначала опрос Weeek)."}
         if st.state == "recording":
             return {"ok": False, "error": "Эта встреча уже записывается."}
+        with self._lock:
+            if st.url and any(s.url == st.url and s.state == "recording"
+                              and s.key != st.key
+                              for s in self._states.values() if s.owner == user):
+                return {"ok": False, "error": "Эта ссылка уже записывается "
+                        "другим слотом той же встречи."}
         slot = recorder.acquire_slot()
         if slot is None:
             return {"ok": False, "error": f"Все слоты записи заняты "

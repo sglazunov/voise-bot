@@ -274,3 +274,49 @@ class TestRescheduledSlots:
         assert states[rec_key].state == "done"           # записанный слот воскрес
         assert states[rec_key].cloud_url == "https://disk/x"
         assert states[rec_key].job_id == "j1"
+
+
+class TestOneUrlOneBot:
+    def test_second_slot_same_url_not_launched(self, monkeypatch):
+        # Перенос времени: два слота одной встречи с одной ссылкой — второй бот
+        # не должен заходить в звонок, пока первый пишет.
+        import os
+        from datetime import datetime, timedelta, timezone
+        from app.automation import scheduler as sched_mod
+        monkeypatch.setenv("VTX_RECORDER_ENABLED", "1")
+        s = Scheduler()
+        s._boot_time = 0
+        url = "https://telemost.yandex.ru/j/42"
+        now = datetime.now(timezone.utc)
+        rec = MeetingState(key="alice:8815:old", task_id="8815", title="Гранты",
+                           url=url, start=now - timedelta(minutes=30),
+                           owner="alice", state="recording")
+        dup = MeetingState(key="alice:8815:new", task_id="8815", title="Гранты",
+                           url=url, start=now, owner="alice", state="scheduled")
+        with s._lock:
+            s._states[rec.key] = rec
+            s._states[dup.key] = dup
+        launched = []
+        monkeypatch.setattr(sched_mod.recorder, "acquire_slot",
+                            lambda: launched.append(1) or object())
+        s._maybe_trigger("alice", {"lookahead_min": 2})
+        assert launched == []                     # слот даже не бронировался
+        assert s._states[dup.key].state == "skipped"
+        assert "уже записывается" in s._states[dup.key].detail
+
+    def test_run_now_refuses_busy_url(self):
+        from datetime import datetime, timezone
+        from app import security as sec
+        s = Scheduler()
+        url = "https://telemost.yandex.ru/j/43"
+        rec = MeetingState(key="alice:1:a", task_id="1", title="x", url=url,
+                           start=datetime.now(timezone.utc), owner="alice",
+                           state="recording")
+        other = MeetingState(key="alice:2:b", task_id="2", title="x", url=url,
+                             start=datetime.now(timezone.utc), owner="alice",
+                             state="missed")
+        with s._lock:
+            s._states[rec.key] = rec
+            s._states[other.key] = other
+        res = s.run_now("alice", "2")
+        assert not res["ok"] and "уже записывается" in res["error"]
