@@ -94,13 +94,19 @@ class Scheduler:
                 (s for s in self._states.values() if s.owner == user),
                 key=lambda s: (s.start is None, s.start or datetime.max.replace(
                     tzinfo=timezone.utc)))]
-        # Don't let old "missed" meetings pile up: keep only the single most
-        # recent one, plus everything else (upcoming / in-progress / done).
+        # Don't let old "missed" meetings pile up — but EVERY missed meeting of
+        # the last 24 h must stay visible: each still has its «Подключиться»,
+        # and hiding one (as the old keep-only-latest rule did) left a LIVE
+        # meeting with no way to send the bot manually.
         missed = [m for m in meetings if m.get("state") == "missed"]
         if len(missed) > 1:
-            latest = max(missed, key=lambda m: m.get("start") or "")
+            from datetime import timedelta
+            cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+            fresh = [m for m in missed if (m.get("start") or "") >= cutoff]
+            keep = fresh or [max(missed, key=lambda m: m.get("start") or "")]
+            keep_ids = {id(m) for m in keep}
             meetings = [m for m in meetings
-                        if m.get("state") != "missed" or m is latest]
+                        if m.get("state") != "missed" or id(m) in keep_ids]
         # Reflect the LIVE pipeline stage (recognition → protocol → done) from
         # the job's own status, so the UI shows real progress after recording.
         for m in meetings:
