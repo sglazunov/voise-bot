@@ -302,7 +302,7 @@ class TestOneUrlOneBot:
         s._maybe_trigger("alice", {"lookahead_min": 2})
         assert launched == []                     # слот даже не бронировался
         assert s._states[dup.key].state == "skipped"
-        assert "уже записывается" in s._states[dup.key].detail
+        assert "уже в этом звонке" in s._states[dup.key].detail
 
     def test_run_now_refuses_busy_url(self):
         from datetime import datetime, timezone
@@ -319,4 +319,4 @@ class TestOneUrlOneBot:
             s._states[rec.key] = rec
             s._states[other.key] = other
         res = s.run_now("alice", "2")
-        assert not res["ok"] and "уже записывается" in res["error"]
+        assert not res["ok"] and "уже в этом звонке" in res["error"]

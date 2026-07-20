@@ -341,8 +341,10 @@ class Scheduler:
                 with self._lock:
                     if chosen.state == "scheduled":
                         chosen.state, chosen.detail = (
-                            "skipped", "Эта ссылка уже записывается другим "
-                                       "слотом (перенос времени).")
+                            "skipped", "Бот уже в этом звонке (та же ссылка "
+                                       "записывается): всё сказанное попадёт в ту "
+                                       "запись. Ссылки этой задаче можно "
+                                       "прикрепить вручную (кнопка-скрепка).")
                 continue
             slot = recorder.acquire_slot()
             if slot is None:
@@ -1146,8 +1148,10 @@ class Scheduler:
             if st.url and any(s.url == st.url and s.state == "recording"
                               and s.key != st.key
                               for s in self._states.values() if s.owner == user):
-                return {"ok": False, "error": "Эта ссылка уже записывается "
-                        "другим слотом той же встречи."}
+                return {"ok": False, "error": "Бот уже в этом звонке — эта "
+                        "ссылка сейчас записывается. Второй бот в ту же комнату "
+                        "ничего не добавит; ссылки можно прикрепить к задаче "
+                        "вручную после записи."}
         slot = recorder.acquire_slot()
         if slot is None:
             return {"ok": False, "error": f"Все слоты записи заняты "
