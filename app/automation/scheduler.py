@@ -26,7 +26,10 @@ from . import clouds, recorder, settings as auto_settings, weeek
 # How late after start we'll still auto-join (avoids joining long-finished
 # meetings on the first poll after startup).
 _LATE_GRACE_SEC = 10 * 60
-_TICK_SEC = 15  # loop granularity; actual Weeek polling honours poll_interval_sec
+_TICK_SEC = 15
+# Слоты одной задачи в этом окне считаются ОДНОЙ встречей с переносом
+# времени (недельный recurring — 7 суток, не попадает).
+_RESLOT_WINDOW_SEC = 20 * 3600  # loop granularity; actual Weeek polling honours poll_interval_sec
 
 
 @dataclass
@@ -206,11 +209,15 @@ class Scheduler:
                         m.start.isoformat() if m.start else "no-time")
                        for m in meetings}
             fetched_ids = {str(m.task_id) for m in meetings}
-            recorded_days = {
-                (str(s.task_id), s.start.date().isoformat() if s.start else None)
+            # Слоты одной задачи ближе _RESLOT_WINDOW друг к другу — это ОДНА
+            # встреча с переносом времени (день по UTC сравнивать нельзя:
+            # полночь по Москве — это ещё 21:00 UTC накануне). Недельный
+            # recurring отстоит на 7 суток и под окно не попадает.
+            recorded_slots: list[tuple[str, datetime]] = [
+                (str(s.task_id), s.start)
                 for s in self._states.values()
-                if s.owner == user and s.state in (
-                    "recording", "uploading", "transcribing", "analyzing", "done")}
+                if s.owner == user and s.start is not None and s.state in (
+                    "recording", "uploading", "transcribing", "analyzing", "done")]
             # После рестарта записанный слот живёт только в СНАПШОТЕ (его ключа
             # нет в выдаче Weeek) — без этого «пропущена»-дубль не распознался бы.
             snaps_for_dedup = self._load_snaps(user)
@@ -219,24 +226,29 @@ class Scheduler:
                 if (len(parts) == 3 and sv.get("state") in (
                         "recording", "uploading", "transcribing",
                         "analyzing", "done", "error")):
-                    recorded_days.add((parts[1], parts[2][:10]))
+                    try:
+                        recorded_slots.append((parts[1],
+                                               datetime.fromisoformat(parts[2])))
+                    except ValueError:
+                        pass
             for k, s in list(self._states.items()):
                 if s.owner != user or s.state not in ("scheduled", "no_time", "missed"):
                     continue
                 slot = (str(s.task_id),
                         s.start.isoformat() if s.start else "no-time")
                 stale = str(s.task_id) in fetched_ids and slot not in current
-                dup_missed = (s.state == "missed" and (
-                    str(s.task_id),
-                    s.start.date().isoformat() if s.start else None) in recorded_days)
+                dup_missed = (s.state == "missed" and s.start is not None
+                              and any(tid == str(s.task_id)
+                                      and abs((s.start - st0).total_seconds())
+                                      <= _RESLOT_WINDOW_SEC
+                                      for tid, st0 in recorded_slots))
                 if stale or dup_missed:
                     self._states.pop(k, None)
                     if dup_missed and s.start is not None:
                         # Вместо шумового дубля вернуть НАСТОЯЩУЮ карточку — тот
-                        # слот этого дня, под которым встреча была записана.
+                        # слот, под которым встреча была записана.
                         self._revive_recorded_slot(
-                            user, str(s.task_id),
-                            s.start.date().isoformat(), snaps_for_dedup)
+                            user, str(s.task_id), s.start, snaps_for_dedup)
 
     @staticmethod
     def _kw(raw) -> list[str]:
@@ -758,15 +770,15 @@ class Scheduler:
         except Exception:  # persistence is best-effort, never breaks the loop
             pass
 
-    def _revive_recorded_slot(self, user: str, task_id: str, day: str,
-                              snaps: dict) -> None:
-        """Rebuild the RECORDED slot of this task/day from its snapshot, so the
-        meetings list shows «Готово. Запись…» instead of nothing after the slot
-        vanished from Weeek (время в задаче поменяли задним числом)."""
+    def _revive_recorded_slot(self, user: str, task_id: str,
+                              near: datetime, snaps: dict) -> None:
+        """Rebuild the RECORDED slot of this task (within the reslot window of
+        `near`) from its snapshot, so the meetings list shows «Готово. Запись…»
+        instead of nothing after the slot vanished from Weeek (время в задаче
+        поменяли задним числом)."""
         for sk, sv in snaps.items():
             parts = sk.split(":", 2)
             if (len(parts) != 3 or parts[1] != task_id
-                    or not parts[2].startswith(day)
                     or sk in self._states
                     or sv.get("state") not in (
                         "recording", "uploading", "transcribing",
@@ -775,7 +787,9 @@ class Scheduler:
             try:
                 start = datetime.fromisoformat(parts[2])
             except ValueError:
-                start = None
+                continue
+            if abs((near - start).total_seconds()) > _RESLOT_WINDOW_SEC:
+                continue
             title = Path(sv["out_path"]).stem if sv.get("out_path") else ""
             self._states[sk] = MeetingState(
                 key=sk, task_id=task_id, title=title, url="", start=start,

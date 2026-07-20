@@ -255,10 +255,10 @@ class TestRescheduledSlots:
         # «пропущена» должен уйти, а карточка «Готово» — восстановиться.
         from datetime import datetime, timezone
         s = Scheduler()
-        rec_key = "alice:9209:2026-07-20T00:00:00+00:00"
+        rec_key = "alice:9209:2026-07-19T21:00:00+00:00"
         st = MeetingState(key=rec_key, task_id="9209", title="Онбординг",
                           url="", owner="alice",
-                          start=datetime(2026, 7, 20, 0, 0, tzinfo=timezone.utc),
+                          start=datetime(2026, 7, 19, 21, 0, tzinfo=timezone.utc),
                           state="done", job_id="j1", cloud_url="https://disk/x",
                           out_path="/data/rec/onb.mp4")
         s._save_state(st)          # снапшот записанного слота
