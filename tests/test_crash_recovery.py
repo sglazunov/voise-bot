@@ -249,3 +249,28 @@ class TestRescheduledSlots:
             s._states[missed.key] = missed
         self._poll_with(s, monkeypatch, [self._meeting("9209", this_start)])
         assert s._states[missed.key].state == "missed"   # легитимная — осталась
+
+    def test_after_restart_missed_dup_replaced_by_recorded_snapshot(self, monkeypatch):
+        # После рестарта записанный слот живёт только в снапшоте. Дубль-
+        # «пропущена» должен уйти, а карточка «Готово» — восстановиться.
+        from datetime import datetime, timezone
+        s = Scheduler()
+        rec_key = "alice:9209:2026-07-20T00:00:00+00:00"
+        st = MeetingState(key=rec_key, task_id="9209", title="Онбординг",
+                          url="", owner="alice",
+                          start=datetime(2026, 7, 20, 0, 0, tzinfo=timezone.utc),
+                          state="done", job_id="j1", cloud_url="https://disk/x",
+                          out_path="/data/rec/onb.mp4")
+        s._save_state(st)          # снапшот записанного слота
+        new_start = datetime(2026, 7, 20, 11, 0, tzinfo=timezone.utc)
+        missed = MeetingState(key="alice:9209:2026-07-20T11:00:00+00:00",
+                              task_id="9209", title="x", url="", owner="alice",
+                              start=new_start, state="missed")
+        with s._lock:
+            s._states[missed.key] = missed   # _states после рестарта: только дубль
+        self._poll_with(s, monkeypatch, [self._meeting("9209", new_start)])
+        states = {k: v for k, v in s._states.items() if ":9209:" in k}
+        assert missed.key not in states                  # дубль убран
+        assert states[rec_key].state == "done"           # записанный слот воскрес
+        assert states[rec_key].cloud_url == "https://disk/x"
+        assert states[rec_key].job_id == "j1"

@@ -211,6 +211,15 @@ class Scheduler:
                 for s in self._states.values()
                 if s.owner == user and s.state in (
                     "recording", "uploading", "transcribing", "analyzing", "done")}
+            # После рестарта записанный слот живёт только в СНАПШОТЕ (его ключа
+            # нет в выдаче Weeek) — без этого «пропущена»-дубль не распознался бы.
+            snaps_for_dedup = self._load_snaps(user)
+            for sk, sv in snaps_for_dedup.items():
+                parts = sk.split(":", 2)
+                if (len(parts) == 3 and sv.get("state") in (
+                        "recording", "uploading", "transcribing",
+                        "analyzing", "done", "error")):
+                    recorded_days.add((parts[1], parts[2][:10]))
             for k, s in list(self._states.items()):
                 if s.owner != user or s.state not in ("scheduled", "no_time", "missed"):
                     continue
@@ -222,6 +231,12 @@ class Scheduler:
                     s.start.date().isoformat() if s.start else None) in recorded_days)
                 if stale or dup_missed:
                     self._states.pop(k, None)
+                    if dup_missed and s.start is not None:
+                        # Вместо шумового дубля вернуть НАСТОЯЩУЮ карточку — тот
+                        # слот этого дня, под которым встреча была записана.
+                        self._revive_recorded_slot(
+                            user, str(s.task_id),
+                            s.start.date().isoformat(), snaps_for_dedup)
 
     @staticmethod
     def _kw(raw) -> list[str]:
@@ -742,6 +757,34 @@ class Scheduler:
             os.replace(tmp, p)
         except Exception:  # persistence is best-effort, never breaks the loop
             pass
+
+    def _revive_recorded_slot(self, user: str, task_id: str, day: str,
+                              snaps: dict) -> None:
+        """Rebuild the RECORDED slot of this task/day from its snapshot, so the
+        meetings list shows «Готово. Запись…» instead of nothing after the slot
+        vanished from Weeek (время в задаче поменяли задним числом)."""
+        for sk, sv in snaps.items():
+            parts = sk.split(":", 2)
+            if (len(parts) != 3 or parts[1] != task_id
+                    or not parts[2].startswith(day)
+                    or sk in self._states
+                    or sv.get("state") not in (
+                        "recording", "uploading", "transcribing",
+                        "analyzing", "done", "error")):
+                continue
+            try:
+                start = datetime.fromisoformat(parts[2])
+            except ValueError:
+                start = None
+            title = Path(sv["out_path"]).stem if sv.get("out_path") else ""
+            self._states[sk] = MeetingState(
+                key=sk, task_id=task_id, title=title, url="", start=start,
+                owner=user, state=sv.get("state") or "done",
+                detail=sv.get("detail") or "", job_id=sv.get("job_id"),
+                cloud_url=sv.get("cloud_url"), out_path=sv.get("out_path"),
+                live_notes=str(sv.get("live_notes") or ""),
+                do_protocol=bool(sv.get("do_protocol")))
+            return
 
     def _resume_pending(self) -> None:
         """After a restart: meetings whose snapshot froze mid-pipeline still have
