@@ -184,3 +184,68 @@ class TestInterruptedRecognitionRetry:
         monkeypatch.setattr(store, "retry", lambda jid: retried.append(jid))
         s._resume_pending()
         assert retried == []
+
+
+class TestRescheduledSlots:
+    def _poll_with(self, s, monkeypatch, meetings):
+        from app.automation import scheduler as sched_mod
+        monkeypatch.setattr(sched_mod.weeek, "upcoming_meetings",
+                            lambda tok, pid, tz: meetings)
+        monkeypatch.setattr(sched_mod.weeek, "custom_field_bool",
+                            lambda raw, field: None)
+        s._poll("alice", {"weeek_token": "t"})
+
+    def _meeting(self, task_id, start):
+        from app.automation import scheduler as sched_mod
+        return sched_mod.weeek.Meeting(task_id=task_id, title="Онбординг",
+                                       url="https://telemost.yandex.ru/j/1",
+                                       start=start)
+
+    def test_time_change_removes_empty_old_slot(self, monkeypatch):
+        from datetime import datetime, timezone
+        s = Scheduler()
+        old = MeetingState(key="alice:9209:2026-07-20T00:00:00+00:00",
+                           task_id="9209", title="x", url="", owner="alice",
+                           start=datetime(2026, 7, 20, 0, 0, tzinfo=timezone.utc),
+                           state="scheduled")
+        with s._lock:
+            s._states[old.key] = old
+        self._poll_with(s, monkeypatch, [self._meeting(
+            "9209", datetime(2026, 7, 20, 11, 0, tzinfo=timezone.utc))])
+        keys = [k for k in s._states if ":9209:" in k]
+        assert keys == ["alice:9209:2026-07-20T11:00:00+00:00"]
+
+    def test_missed_dup_removed_when_same_day_recorded(self, monkeypatch):
+        from datetime import datetime, timezone
+        s = Scheduler()
+        rec = MeetingState(key="alice:9209:2026-07-20T00:00:00+00:00",
+                           task_id="9209", title="x", url="", owner="alice",
+                           start=datetime(2026, 7, 20, 0, 0, tzinfo=timezone.utc),
+                           state="uploading")   # запись уже идёт по старому слоту
+        new_start = datetime(2026, 7, 20, 11, 0, tzinfo=timezone.utc)
+        missed = MeetingState(key="alice:9209:2026-07-20T11:00:00+00:00",
+                              task_id="9209", title="x", url="", owner="alice",
+                              start=new_start, state="missed")
+        with s._lock:
+            s._states[rec.key] = rec
+            s._states[missed.key] = missed
+        self._poll_with(s, monkeypatch, [self._meeting("9209", new_start)])
+        states = {k: v.state for k, v in s._states.items() if ":9209:" in k}
+        assert states == {rec.key: "uploading"}   # дубль-«пропущена» убран
+
+    def test_recurring_missed_other_day_kept(self, monkeypatch):
+        from datetime import datetime, timezone
+        s = Scheduler()
+        done = MeetingState(key="alice:9209:2026-07-13T11:00:00+00:00",
+                            task_id="9209", title="x", url="", owner="alice",
+                            start=datetime(2026, 7, 13, 11, 0, tzinfo=timezone.utc),
+                            state="done")       # прошлая неделя записана
+        this_start = datetime(2026, 7, 20, 11, 0, tzinfo=timezone.utc)
+        missed = MeetingState(key="alice:9209:2026-07-20T11:00:00+00:00",
+                              task_id="9209", title="x", url="", owner="alice",
+                              start=this_start, state="missed")
+        with s._lock:
+            s._states[done.key] = done
+            s._states[missed.key] = missed
+        self._poll_with(s, monkeypatch, [self._meeting("9209", this_start)])
+        assert s._states[missed.key].state == "missed"   # легитимная — осталась

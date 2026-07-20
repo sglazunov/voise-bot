@@ -193,6 +193,36 @@ class Scheduler:
                     st.url, st.title, st.start = m.url, m.title, m.start
                     st.record_flag = flag
 
+            # ПЕРЕНОС ВРЕМЕНИ в задаче: карточка привязана к (task_id, start),
+            # так что смена времени рождает НОВЫЙ слот, а старый остаётся —
+            # дубль. Уборка:
+            # 1) пустой слот (scheduled/no_time/missed), которого больше нет в
+            #    выдаче Weeek (время перенесли / задачу удалили) — убрать;
+            # 2) слот «пропущена», если ЭТУ задачу в ТОТ ЖЕ день уже записали
+            #    под другим временем (перенос времени задним числом после
+            #    записи) — шумовой дубль, убрать. Повторяющиеся встречи с тем
+            #    же id в другие дни не задеваются.
+            current = {(str(m.task_id),
+                        m.start.isoformat() if m.start else "no-time")
+                       for m in meetings}
+            fetched_ids = {str(m.task_id) for m in meetings}
+            recorded_days = {
+                (str(s.task_id), s.start.date().isoformat() if s.start else None)
+                for s in self._states.values()
+                if s.owner == user and s.state in (
+                    "recording", "uploading", "transcribing", "analyzing", "done")}
+            for k, s in list(self._states.items()):
+                if s.owner != user or s.state not in ("scheduled", "no_time", "missed"):
+                    continue
+                slot = (str(s.task_id),
+                        s.start.isoformat() if s.start else "no-time")
+                stale = str(s.task_id) in fetched_ids and slot not in current
+                dup_missed = (s.state == "missed" and (
+                    str(s.task_id),
+                    s.start.date().isoformat() if s.start else None) in recorded_days)
+                if stale or dup_missed:
+                    self._states.pop(k, None)
+
     @staticmethod
     def _kw(raw) -> list[str]:
         text = str(raw or "").replace("\n", ",")
