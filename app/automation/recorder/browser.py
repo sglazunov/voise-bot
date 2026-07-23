@@ -22,6 +22,10 @@ from pathlib import Path
 
 from ... import config
 
+# Max letter-word tokens on a chat line for it to count as a deliberate stop
+# COMMAND, not a sentence that merely mentions the word. Override via env.
+BROWSER_STOP_MAX_TOKENS = int(os.getenv("VTX_CHAT_STOP_MAX_TOKENS", "6"))
+
 # Candidate selectors (first match wins). Tune against the live site if needed.
 _NAME_INPUTS = [
     'input[name="name"]', 'input[placeholder*="мя"]',
@@ -627,14 +631,21 @@ class TelemostBot:
 
     @staticmethod
     def _is_stop_line(line: str, word: str) -> bool:
-        """Is this chat line the stop command? The word must be present and NO
-        other letters may be — so «стоп», «Стоп!», even «стоп 12:50» (a trailing
-        timestamp/emoji) count, but «давайте без стоп слов» does not."""
-        low = line.strip().lower()
-        if word not in low:
+        """Is this chat line the stop command?
+
+        Robust to how Telemost lays out a message: whether «стоп» sits on its
+        own line OR inline after the author name/time («Зоя Р. 12:53 стоп»).
+        Rule: the stop word must appear as a STANDALONE letter-token, and the
+        line must be short (a command, not a sentence). Digits, punctuation and
+        emoji are ignored, so «стоп!», «стоп 12:50», «стоп 🔴» all count."""
+        low = line.strip().lower().replace("ё", "е")
+        w = word.replace("ё", "е")
+        # Letter-only tokens (Unicode letters); drops author-name punctuation,
+        # timestamps and emoji so only real words remain.
+        tokens = re.findall(r"[^\W\d_]+", low, re.UNICODE)
+        if w not in tokens:
             return False
-        rest = re.sub(re.escape(word), " ", low)
-        return not any(ch.isalpha() for ch in rest)
+        return len(tokens) <= BROWSER_STOP_MAX_TOKENS
 
     def maybe_chat_stop(self, word: str) -> bool:
         """True when a NEW stop-word message appeared in the chat.
@@ -654,9 +665,20 @@ class TelemostBot:
         text = self._read_all_text()
         if text is None:
             return False
-        n = sum(1 for ln in text.splitlines() if self._is_stop_line(ln, word))
+        lines = text.splitlines()
+        n = sum(1 for ln in lines if self._is_stop_line(ln, word))
         if n != self._chat_last_n:
-            self._on_log(f"Чат: сообщений «{word}» видно {n}.")  # live diagnostics
+            # When the word IS on the page but no line qualified as a command,
+            # show a sample — so a layout change is diagnosable from the card log
+            # («вижу слово, но строка не похожа на команду» vs «слова нет вовсе»).
+            if n == 0 and any(word in ln.lower().replace("ё", "е") for ln in lines):
+                sample = next(ln.strip() for ln in lines
+                              if word in ln.lower().replace("ё", "е"))[:80]
+                self._on_log(f"Чат: слово «{word}» вижу, но не как отдельную "
+                             f"команду (строка: «{sample}»). Напишите «{word}» "
+                             "отдельным сообщением.")
+            else:
+                self._on_log(f"Чат: сообщений «{word}» видно {n}.")
             self._chat_last_n = n
         if self._chat_baseline is None:
             self._chat_baseline = n           # ignore whatever was already there
