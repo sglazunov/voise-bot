@@ -36,6 +36,11 @@ def _friendly_error(exc: BaseException) -> str:
     The full traceback still goes to the server log for debugging."""
     traceback.print_exc()
     s = str(exc) or exc.__class__.__name__
+    # "Nothing was recognised" is already a finished, actionable sentence —
+    # pass it through untouched instead of wrapping it in a second prefix.
+    from .analyze import NoTranscript
+    if isinstance(exc, NoTranscript):
+        return s
     low = s.lower()
     if "503" in low or "unavailable" in low or "high demand" in low or "overload" in low:
         return ("Движок ИИ сейчас перегружен и не отвечает (503). Это временно — "

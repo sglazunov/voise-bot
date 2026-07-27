@@ -12,6 +12,15 @@ from app.analyze import (MapNotes, Protocol, TaskNote, TopicNote, _ctx_budget,
                          _dedup_maps, _mech_merge, _notes_blob, _parse_ts)
 
 
+@pytest.fixture(autouse=True)
+def _no_speech_gate(monkeypatch):
+    """Здесь проверяется МЕХАНИКА конвейера, а не защита от пустой записи:
+    транскрипты нарочно крошечные («[00:01] короткая встреча»), чтобы арифметика
+    чанков читалась глазами. Гейт минимальной речи для них отключён — он покрыт
+    отдельно в tests/test_no_transcript.py."""
+    monkeypatch.setattr(analyze, "MIN_SPEECH_WORDS", 0)
+
+
 # --------------------------------------------------------------------------- #
 # Pure helpers
 # --------------------------------------------------------------------------- #

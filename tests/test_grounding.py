@@ -137,6 +137,9 @@ class TestVerifyProtocol:
 
 class TestNotesInPrompt:
     def test_notes_block_reaches_single_pass_prompt(self, monkeypatch):
+        # Проверяется СОСТАВ промпта, а не защита от пустой записи — транскрипт
+        # здесь условный. Сам гейт покрыт в tests/test_no_transcript.py.
+        monkeypatch.setattr(analyze, "MIN_SPEECH_WORDS", 0)
         backend = FakeBackend([json.dumps({
             "participants": [], "summary": "ок", "detailed": [], "key_thoughts": [],
             "conclusions": [], "decisions": [], "done_tasks": [], "tasks": [],

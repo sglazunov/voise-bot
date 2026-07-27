@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import difflib
 import json
+import os
 import re
 import time
 
@@ -586,6 +587,57 @@ def _with_extra(prompt: str, extra: str) -> str:
             "их, но сохрани формат JSON и все поля):\n" + extra)
 
 
+# --------------------------------------------------------------------------- #
+# Guard: never build a protocol without real speech to build it from.
+# --------------------------------------------------------------------------- #
+# The analysis input is NOT just the transcript — the app appends the call
+# roster («УЧАСТНИКИ ЗВОНКА», read off the video grid), the team's standing
+# context («ПОСТОЯННЫЙ КОНТЕКСТ») and any on-screen OCR. When recognition
+# produced nothing, those blocks are still there, so the model receives real
+# names and real project topics with no speech — and writes a plausible meeting
+# that never happened. Observed on real data: 10 of 45 protocols were pure
+# invention (a 5-minute interview came back as a module-design discussion with
+# tasks assigned to people who never spoke).
+#
+# So the gate measures ONLY the speech, with those blocks stripped out.
+_INJECTED_BLOCK_RE = re.compile(
+    r"\n*===\s*(УЧАСТНИКИ ЗВОНКА|ПОСТОЯННЫЙ КОНТЕКСТ|ТЕКСТ С ЭКРАНА)"
+    r"[\s\S]*?(?=\n\s*===|\Z)", re.IGNORECASE)
+# Timecodes are structure, not content: "[00:12]" must not count as speech.
+_TIMECODE_RE = re.compile(r"\[\d{1,2}:\d{2}(?::\d{2})?\]")
+# Minimum genuinely spoken words before a protocol may be generated. A meeting
+# worth a protocol always clears this; failed recognition never does.
+MIN_SPEECH_WORDS = int(os.getenv("VTX_MIN_SPEECH_WORDS", "40"))
+
+
+class NoTranscript(RuntimeError):
+    """Raised instead of inventing a protocol when there is nothing to analyse."""
+
+
+def speech_words(text: str) -> int:
+    """Count genuinely spoken words in the analysis input.
+
+    Strips the injected roster/context/OCR blocks and timecode markers, so an
+    empty recognition scores ~0 no matter how much context was appended.
+    """
+    body = _INJECTED_BLOCK_RE.sub(" ", text or "")
+    body = _TIMECODE_RE.sub(" ", body)
+    return len([w for w in body.split() if any(ch.isalpha() for ch in w)])
+
+
+def ensure_analysable(text: str) -> None:
+    """Raise NoTranscript when there is too little speech to build a protocol."""
+    n = speech_words(text)
+    if n < MIN_SPEECH_WORDS:
+        raise NoTranscript(
+            f"Протокол не собран: в записи не распознано речи "
+            f"(слов: {n}, нужно от {MIN_SPEECH_WORDS}). Обычно это значит, что "
+            "запись получилась без звука или пустой. Проверьте аудио-устройство "
+            "(«Проверить звук» на странице автоматизации) и запустите анализ "
+            "повторно."
+        )
+
+
 class AnalysisCancelled(RuntimeError):
     """Raised when the user cancels protocol generation mid-way."""
 
@@ -685,10 +737,16 @@ def analyze_transcript(transcript_text: str, provider: str | None = None,
     Returns a dict with keys: summary, detailed, key_thoughts, conclusions,
     decisions, done_tasks, tasks, minor_tasks, _provider.
     """
+    text = (transcript_text or "").strip()
+    # Nothing was said → say so. Checked BEFORE the engine is touched, so a
+    # failed recording can never come back as an invented meeting (the roster
+    # and standing-context blocks alone are enough material for the model to
+    # fabricate one). Covers every caller: first run and re-analysis alike.
+    ensure_analysable(text)
+
     # Chain, not a single provider: a 503 from the pinned engine must degrade to
     # the next configured one (e.g. Gemini down → Groq → Ollama), not kill the job.
     backend = llm.get_provider_chain(provider, keys)
-    text = (transcript_text or "").strip()
     custom = (custom_prompt or "").strip()
 
     # A LONG meeting must not run on a CPU-only local engine: map-reduce over an
