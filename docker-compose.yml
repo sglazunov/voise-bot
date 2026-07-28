@@ -62,5 +62,32 @@ services:
       timeout: 5s
       retries: 10
 
+  # HTTPS с автоматическим сертификатом Let's Encrypt (продление — само).
+  # Поднимается только когда в .env заданы DOMAIN и COMPOSE_PROFILES=https,
+  # иначе приложение работает как раньше, по http://IP:8000.
+  caddy:
+    image: caddy:2-alpine
+    container_name: linux-voise-caddy
+    restart: unless-stopped
+    profiles: ["https"]
+    ports:
+      - "80:80"       # нужен Let's Encrypt для проверки домена
+      - "443:443"
+      - "443:443/udp" # HTTP/3
+    environment:
+      DOMAIN: "${DOMAIN:?укажите DOMAIN в .env}"
+      ACME_EMAIL: "${ACME_EMAIL:-}"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Сертификаты переживают пересоздание контейнера — иначе при каждом
+      # перезапуске Let's Encrypt выдавал бы новый и упёрся бы в лимит.
+      - caddy_data:/data
+      - caddy_config:/config
+      - ./data/caddy-logs:/var/log/caddy
+    depends_on:
+      - app
+
 volumes:
   pgdata:
+  caddy_data:
+  caddy_config:

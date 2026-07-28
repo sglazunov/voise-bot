@@ -1,0 +1,29 @@
+# HTTPS-прокси перед приложением. Caddy сам получает сертификат Let's Encrypt
+# при первом запуске и продлевает его в фоне — certbot и cron не нужны.
+#
+# Домен берётся из переменной DOMAIN в .env. Пока она пустая, сервис caddy не
+# поднимается (профиль compose), и приложение работает по http://IP:8000.
+{
+	# Почта для Let's Encrypt: туда придёт письмо, если продление сломается.
+	email {$ACME_EMAIL:admin@example.com}
+}
+
+{$DOMAIN} {
+	# Приложение слушает внутри сети compose; наружу торчит только Caddy.
+	reverse_proxy app:8000
+
+	# Реальный IP посетителя — иначе rate-limit увидит один адрес прокси на
+	# всех (для этого в .env нужен VTX_TRUST_PROXY=1).
+	header_up X-Forwarded-For {remote_host}
+
+	# Записи встреч и загружаемые файлы большие — снимаем лимит на тело запроса.
+	request_body {
+		max_size 4GB
+	}
+
+	encode gzip
+	log {
+		output file /var/log/caddy/access.log
+		format console
+	}
+}
