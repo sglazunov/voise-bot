@@ -83,7 +83,6 @@ services:
       # перезапуске Let's Encrypt выдавал бы новый и упёрся бы в лимит.
       - caddy_data:/data
       - caddy_config:/config
-      - ./data/caddy-logs:/var/log/caddy
     depends_on:
       - app
 
