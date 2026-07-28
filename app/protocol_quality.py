@@ -144,14 +144,27 @@ def summary_is_toc(summary: str, topics: list[str], ratio: float = 0.6) -> bool:
 
 
 def report(protocol: dict) -> dict:
-    """Сводка дефектов по готовому протоколу — для метрик и для UI."""
+    """Сводка дефектов по готовому протоколу — для метрик и для UI.
+
+    `actionable` (задачи + решения) считается отдельно: по боевым данным ноль
+    задач встречался ТОЛЬКО на длинных встречах — там, где ответ движка
+    обрезался по лимиту. Пустой список по рабочей встрече почти всегда значит,
+    что задачи не выписали, а не что их не было, — такое должно быть заметно.
+    """
     detailed = protocol.get("detailed") or []
     empty = [i for i, b in enumerate(detailed)
              if topic_is_empty((b or {}).get("topic", ""), (b or {}).get("details", ""))]
     titles = [(b or {}).get("topic", "") for b in detailed]
+    tasks = sum(len(protocol.get(k) or [])
+                for k in ("tasks", "minor_tasks", "done_tasks"))
+    decisions = len(protocol.get("decisions") or [])
     return {
         "topics": len(detailed),
         "empty_topics": empty,
         "empty_ratio": round(len(empty) / len(detailed), 3) if detailed else 0.0,
         "summary_is_toc": summary_is_toc(protocol.get("summary", ""), titles),
+        "tasks_total": tasks,
+        "decisions_total": decisions,
+        # Разбор есть, а выжимки нет — читать такой протокол незачем.
+        "no_actionable": bool(detailed) and tasks == 0 and decisions == 0,
     }

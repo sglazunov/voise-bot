@@ -98,3 +98,23 @@ def test_отчёт_считает_доли():
     assert r["empty_topics"] == [0, 1]
     assert r["empty_ratio"] == 0.5
     assert r["summary_is_toc"] is False
+
+
+def test_разбор_без_задач_и_решений_помечается():
+    """Боевой случай: часовая встреча, 19 тем и ни одной задачи. Читать нечего."""
+    proto = {"summary": "Обсудили много вопросов.",
+             "detailed": [{"topic": t, "details": d} for t, d in SUBSTANTIAL[:2]],
+             "tasks": [], "minor_tasks": [], "done_tasks": [], "decisions": []}
+    r = report(proto)
+    assert r["tasks_total"] == 0 and r["decisions_total"] == 0
+    assert r["no_actionable"] is True
+
+
+def test_протокол_с_задачами_не_помечается():
+    proto = {"summary": "Ок.",
+             "detailed": [{"topic": t, "details": d} for t, d in SUBSTANTIAL[:2]],
+             "tasks": [{"task": "Закрыть alt-тексты", "owner": "—"}],
+             "minor_tasks": [], "done_tasks": [], "decisions": []}
+    r = report(proto)
+    assert r["tasks_total"] == 1
+    assert r["no_actionable"] is False
