@@ -48,6 +48,13 @@ _GB_DIFF = int(os.getenv("VTX_SPEAKER_GB_DIFF", "20"))
 _R_MAX = int(os.getenv("VTX_SPEAKER_R_MAX", "185"))
 _B_MAX = int(os.getenv("VTX_SPEAKER_B_MAX", "185"))
 _NAME_BAND = float(os.getenv("VTX_SPEAKER_NAME_BAND", "0.26"))     # bottom fraction of tile holding the name
+# Верхняя полоса кадра, где Телемост держит плитки участников во время
+# демонстрации экрана. Кандидат оттуда приоритетнее: ниже начинается чужой
+# экран, и его зелёные кнопки OCR принимал за подсветку говорящего.
+_TOP_STRIP = float(os.getenv("VTX_SPEAKER_TOP_STRIP", "0.30"))
+# Минимальная доля кадра для плитки ВНЕ верхней полосы (режим сетки, когда
+# никто не делится экраном). Строка меню столько не занимает.
+_MIN_TILE_AREA = float(os.getenv("VTX_SPEAKER_MIN_TILE", "0.02"))
 
 
 def is_video(path: str) -> bool:
@@ -193,20 +200,39 @@ def _active_bbox(arr) -> Optional[Tuple[int, int, int, int]]:
     """Bounding box (r0, r1, c0, c1) of the green active-speaker frame, or None.
 
     Looks at every green blob SEPARATELY (see _green_components) and returns the
-    largest one shaped like a rectangle border — so the bot's green avatar or a
-    green photo elsewhere in the grid can't break the detection."""
+    one shaped like a rectangle border — so the bot's green avatar or a green
+    photo elsewhere in the grid can't break the detection.
+
+    КОГДА ИДЁТ ДЕМОНСТРАЦИЯ ЭКРАНА плитки участников уезжают в узкую ПОЛОСУ
+    СВЕРХУ, а всё остальное занимает чужой экран. На нём тоже находятся зелёные
+    прямоугольники — кнопки и выделения в самом демонстрируемом приложении. По
+    ним OCR читал пункты меню и записывал их в участники встречи: в боевом
+    протоколе так появились «Удалить», «Мероприятия», «Группы», «Роли Людей».
+
+    Поэтому кандидат из верхней полосы имеет приоритет. Если там ничего нет
+    (сетка на весь экран, никто не делится), берём кандидата ниже — но только
+    достаточно крупного: плитка человека занимает заметную площадь, а строка
+    меню тонкая.
+    """
     H, W = arr.shape[:2]
     mask = _green_mask(arr)
     if mask.sum() < 200:  # basically no green — no active highlight
         return None
-    best, best_area = None, 0
+    strip_bottom = H * _TOP_STRIP
+    min_area = H * W * _MIN_TILE_AREA
+    top_best, top_area = None, 0
+    any_best, any_area = None, 0
     for bbox in _green_components(mask):
         if not _is_border_rect(mask, bbox, H, W):
             continue
         area = (bbox[1] - bbox[0]) * (bbox[3] - bbox[2])
-        if area > best_area:
-            best, best_area = bbox, area
-    return best
+        if bbox[0] < strip_bottom and area > top_area:
+            top_best, top_area = bbox, area
+        if area > any_area:
+            any_best, any_area = bbox, area
+    if top_best is not None:
+        return top_best
+    return any_best if any_area >= min_area else None
 
 
 def _clean_line(line: str) -> str:

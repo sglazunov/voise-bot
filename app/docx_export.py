@@ -182,25 +182,59 @@ def generate_report(
                 r.font.color.rgb = RGBColor(0x60, 0x60, 0x60)
             _apply_verification(bp, _vinfo(analysis, "done_tasks", ti), RGBColor)
 
-    # ---- Задачи (нужно сделать): таблица с ответственными ------------------
+    # ---- Задачи (нужно сделать) --------------------------------------------
+    # Подтверждённые цитатой и неподтверждённые разведены по разным блокам.
+    # Причина: на боевой встрече из 8 задач 6 оказались без дословного
+    # основания — модель сформулировала их «по мотивам». Вперемешку это
+    # обесценивает весь список: читателю приходится перепроверять каждую
+    # строку. Порознь основной список остаётся доверенным, а спорное не
+    # теряется — уходит в блок «Требуют проверки».
     tasks = analysis.get("tasks", [])
+    sure, unsure = [], []
+    for i, item in enumerate(tasks):
+        (sure if (_vinfo(analysis, "tasks", i) or {}).get("ok") else unsure).append((i, item))
+    # Пока grounding не отработал (старые протоколы) — verification пуст, и всё
+    # попадёт в «требуют проверки». Это неверно: там просто нет проверки.
+    if not (analysis.get("verification") or {}).get("tasks"):
+        sure, unsure = [(i, t) for i, t in enumerate(tasks)], []
+
     doc.add_heading("Задачи (нужно сделать)", level=1)
-    if tasks:
+    if sure:
         table = doc.add_table(rows=1, cols=3)
         table.style = "Table Grid"
         for cell, title in zip(table.rows[0].cells, ("№", "Задача", "Ответственный")):
             cell.paragraphs[0].add_run(title).bold = True
-        for i, item in enumerate(tasks, 1):
+        for n, (i, item) in enumerate(sure, 1):
             text, owner = _task_parts(item)
             row = table.add_row().cells
-            row[0].paragraphs[0].add_run(str(i))
+            row[0].paragraphs[0].add_run(str(n))
             tp = row[1].paragraphs[0]
             tp.add_run(text)
-            _apply_verification(tp, _vinfo(analysis, "tasks", i - 1), RGBColor)
+            _apply_verification(tp, _vinfo(analysis, "tasks", i), RGBColor)
             row[2].paragraphs[0].add_run(owner or "—")
         doc.add_paragraph().paragraph_format.space_after = Pt(6)
     else:
-        doc.add_paragraph("Задач не выявлено.").paragraph_format.space_after = Pt(6)
+        doc.add_paragraph("Задач с дословным подтверждением не найдено."
+                          ).paragraph_format.space_after = Pt(6)
+
+    if unsure:
+        doc.add_heading("Требуют проверки", level=1)
+        p = doc.add_paragraph()
+        r = p.add_run("Эти пункты ИИ сформулировал по смыслу обсуждения, но "
+                      "дословного основания в расшифровке не нашлось. "
+                      "Проверьте их перед тем, как заводить в работу.")
+        r.italic = True
+        r.font.size = Pt(10)
+        r.font.color.rgb = RGBColor(0x80, 0x80, 0x80)
+        for i, item in unsure:
+            text, owner = _task_parts(item)
+            bp = doc.add_paragraph(style="List Bullet")
+            bp.add_run(f"☐ {text}")
+            if owner:
+                ro = bp.add_run(f"  — {owner}")
+                ro.italic = True
+                ro.font.color.rgb = RGBColor(0x60, 0x60, 0x60)
+        doc.add_paragraph().paragraph_format.space_after = Pt(6)
 
     # ---- Мелкие задачи и доработки -----------------------------------------
     minor = analysis.get("minor_tasks", [])
