@@ -29,6 +29,7 @@ import os
 import re
 from typing import List, Optional, Tuple
 
+from . import names
 from .transcribe import Segment
 
 VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v"}
@@ -209,13 +210,19 @@ def _active_bbox(arr) -> Optional[Tuple[int, int, int, int]]:
 
 
 def _clean_line(line: str) -> str:
-    """Normalise one OCR line into a plausible display name ('' if junk)."""
+    """Normalise one OCR line into a plausible display name ('' if junk).
+
+    Общие правила имён — в app/names.py: те же, что для списка участников.
+    Раньше этот путь чистил подписи по-своему, и в протоколе список участников
+    показывал «Зоя Р», а метки спикеров в тексте — «ЗояР». Заодно отсекается
+    интерфейс, попадающий в кадр («Client», «Russian», «Ш Демонстрация»).
+    """
     line = re.sub(r"[^0-9A-Za-zА-Яа-яЁё .\-]", " ", line)
     line = re.sub(r"\s+", " ", line).strip(" .-")
     letters = sum(ch.isalpha() for ch in line)
     if letters < 2 or len(line) > 40:
         return ""
-    return line
+    return names.normalise(line) if names.looks_like_name(line) else ""
 
 
 def _clean_name(raw: str) -> str:

@@ -19,7 +19,7 @@ from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import Dict, Optional
 
-from . import config, db, formats, glossary
+from . import config, db, formats, glossary, names
 from .transcribe import transcribe_file
 
 STATUS_QUEUED = "queued"
@@ -30,33 +30,6 @@ STATUS_DONE = "done"
 STATUS_ERROR = "error"
 STATUS_CANCELLED = "cancelled"
 
-# Латинские буквы, неотличимые на вид от кириллических. OCR подписей с плиток
-# Телемоста читает их вперемешку, из-за чего один человек попадал в список
-# участников дважды: в боевом протоколе рядом стояли «Зоя Р» (кириллица) и
-# «Зоя P» (латиница).
-_CONFUSABLES = str.maketrans("ABCEHKMOPTXYaceopxy", "АВСЕНКМОРТХУасеорху")
-_CYR_RE = re.compile(r"[А-Яа-яЁё]")
-_LAT_RE = re.compile(r"[A-Za-z]")
-
-
-def _fold_confusables(name: str) -> str:
-    """Свести латинские буквы-двойники к кириллице — ТОЛЬКО там, где это OCR.
-
-    Осторожно: сводить всё подряд нельзя, иначе настоящая латинская фамилия
-    («Сергей Beck») превращается в кашу. Признаки именно ошибки распознавания:
-      * слово смешанного алфавита («Зoя» с латинской o) — так не пишут;
-      * одинокая латинская буква при кириллическом имени («Зоя P») — это
-        инициал, набранный не в той раскладке.
-    Целые латинские слова остаются как есть.
-    """
-    words = name.split()
-    has_cyr = any(_CYR_RE.search(w) for w in words)
-    out = []
-    for w in words:
-        mixed = _CYR_RE.search(w) and _LAT_RE.search(w)
-        lone_initial = has_cyr and len(w.strip(".")) == 1 and _LAT_RE.fullmatch(w.strip("."))
-        out.append(w.translate(_CONFUSABLES) if (mixed or lone_initial) else w)
-    return " ".join(out)
 
 
 def _friendly_error(exc: BaseException) -> str:
@@ -807,52 +780,18 @@ class JobStore:
     # Tile-caption scans of past videos catch UI noise besides real names (chat
     # snippets, «Стоп запись», dates, URLs). Whisper's prompt budget is tiny —
     # only feed it strings that actually look like a person's name.
-    _NAME_STOP = {
-        "вчера", "сегодня", "завтра", "демонстрация", "стоп", "запись", "чат",
-        "участники", "войду", "удалено", "сообщение", "сообщения", "пауза",
-        "выход", "микрофон", "камера", "экран", "поделиться", "english",
-        "гость", "организатор", "запись встречи",
-    }
+    _NAME_STOP = names.NAME_STOP      # общий список, см. app/names.py
 
-    # Окончания русских глаголов/наречий: подпись плитки вида «Развлекаешься»
-    # проходит все формальные признаки имени (одно слово с заглавной), но именем
-    # не является. Такое реально попадало в списки участников.
-    _NOT_NAME_SUFFIX = ("ешься", "аешься", "ется", "ются", "ешь", "аем", "ает",
-                        "ают", "или", "ился", "илась", "ность")
-
+    # Логика имён — в app/names.py, общая с speaker_id: раньше она жила только
+    # здесь, и метки спикеров чистились по-своему (в списке участников «Зоя Р»,
+    # а в тексте протокола «ЗояР»).
     @classmethod
     def _looks_like_name(cls, s: str) -> bool:
-        s = cls._strip_ui_badge(s)
-        if not (2 <= len(s) <= 40) or any(ch.isdigit() for ch in s):
-            return False
-        if re.search(r"[^\w\s.\-ёЁ]", s):        # punctuation → chat/UI, not a name
-            return False
-        words = s.split()
-        if not 1 <= len(words) <= 3:
-            return False
-        if s.lower() in cls._NAME_STOP:
-            return False
-        if len(words) == 1 and s.lower().endswith(cls._NOT_NAME_SUFFIX):
-            return False
-        return all(w[0].isupper() for w in words)
+        return names.looks_like_name(s)
 
     @staticmethod
     def _strip_ui_badge(s: str) -> str:
-        """Привести подпись плитки к виду, в котором её писал человек.
-
-        OCR подписей даёт три устойчивых искажения, и все три встречались в
-        одном боевом протоколе:
-          * латинские двойники вместо кириллицы («Зоя P» рядом с «Зоя Р») —
-            сводим к кириллице ПЕРВЫМ делом, иначе инициал примешь за метку;
-          * слипшийся инициал («ЗояР») — отделяем;
-          * значок интерфейса, прочитанный как буква («Виталий Овчаренко W»,
-            «Павел. W») — убираем; после сведения двойников одинокая ЛАТИНСКАЯ
-            буква в конце кириллического имени инициалом быть уже не может.
-        """
-        s = _fold_confusables((s or "").strip())
-        s = re.sub(r"^([А-ЯЁ][а-яё]{2,})([А-ЯЁ])$", r"\1 \2", s)   # ЗояР → Зоя Р
-        m = re.match(r"^(.*[А-Яа-яЁё].*?)[\s.]+([A-Za-z])$", s)
-        return (m.group(1) if m else s).strip(" .")
+        return names.normalise(s)
 
     def _auto_initial_prompt(self, job: Job) -> str:
         budget = self._PROMPT_TOKENS * 3          # ~3 chars per token
@@ -1152,9 +1091,7 @@ def _context_block(job: "Job") -> str:
         return ""
 
 
-def _name_key(s: str) -> str:
-    """Ключ для дедупликации: пробелы схлопнуты, регистр снят."""
-    return " ".join((s or "").strip().lower().split())
+_name_key = names.key      # общий ключ дедупликации, см. app/names.py
 
 
 def _tile_names(job: "Job") -> list[str]:
