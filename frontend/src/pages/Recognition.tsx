@@ -341,8 +341,19 @@ export default function Recognition() {
   }, [sel, detail?.status]);
 
   const [uploadError, setUploadError] = useState("");
+  // Выбранный, но ещё НЕ отправленный файл. Раньше он улетал в работу сразу при
+  // выборе: настройки (язык, модель, движок, пресет, заметки) применить было
+  // уже нельзя, а ошибочно выбранный файл приходилось отменять постфактум.
+  const [pending, setPending] = useState<File | null>(null);
 
-  async function onFile(f: File | undefined) {
+  function onFile(f: File | undefined) {
+    if (!f) return;
+    setUploadError("");
+    setPending(f);
+  }
+
+  async function startRecognition() {
+    const f = pending;
     if (!f) return;
     setUploadError("");
     // Бесплатный туннель Cloudflare (*.trycloudflare.com) режет тело запроса
@@ -373,6 +384,7 @@ export default function Recognition() {
     try {
       const j = await api.upload("/api/jobs", fd, (p) => setProg(p));
       toast("Файл принят — идёт распознавание");
+      setPending(null);
       await loadJobs(); setSel(j.job_id); setTab("protocol");
     } catch (e: any) {
       // Ошибка загрузки НЕ должна сгорать тостом: раньше форма молча
@@ -386,6 +398,16 @@ export default function Recognition() {
     } finally { setBusy(false); setProg(0); }
   }
   async function retry(id: string) { try { await api.post(`/api/jobs/${id}/retry`); loadJobs(); } catch (e: any) { toast(e.message, true); } }
+  // Остановка идущей работы. Спрашиваем подтверждение: у длинной записи позади
+  // могут быть десятки минут счёта, и случайный клик обидно дорог.
+  async function stopJob(id: string) {
+    if (!confirm("Остановить? Уже распознанная часть сохранится, продолжить с этого места будет нельзя.")) return;
+    try {
+      await api.post(`/api/jobs/${id}/cancel`);
+      toast("Останавливаю…");
+      loadJobs();
+    } catch (e: any) { toast(e.message, true); }
+  }
   // Delivery only (cloud upload + Weeek link) — no expensive LLM re-run.
   async function redeliver(id: string) {
     try { const r = await api.post(`/api/jobs/${id}/redeliver`); toast(r.detail || "Прикреплено"); loadJobs(); }
@@ -433,12 +455,26 @@ export default function Recognition() {
                   )}
                   <div className="mt-2 w-full" style={{ height: 6, borderRadius: 6, background: "rgba(120,140,150,.2)", overflow: "hidden" }}>
                     <div style={{ height: "100%", width: `${prog}%`, background: "linear-gradient(90deg,var(--accent),var(--accent2))" }} /></div></>
+              ) : pending ? (
+                <><Mic size={26} color="var(--accent)" />
+                  <div className="text-[13.5px] mt-2 font-semibold break-all">{pending.name}</div>
+                  <div className="text-[11.5px] mt-0.5" style={{ color: "var(--muted)" }}>
+                    {Math.max(1, Math.round(pending.size / 1024 / 1024))} МБ · проверьте настройки ниже и нажмите «Распознать»</div></>
               ) : (
                 <><UploadCloud size={26} color="var(--accent)" />
                   <div className="text-[13.5px] mt-2 font-semibold">Перетащите файл или нажмите</div>
                   <div className="text-[11.5px] mt-0.5" style={{ color: "var(--muted)" }}>mp3 · wav · m4a · mp4 · ogg…</div></>
               )}
             </div>
+
+            {/* Файл выбран, но ещё не отправлен — запуск только по кнопке. */}
+            {pending && !busy && (
+              <div className="flex gap-2 mt-3">
+                <button className="btn flex-1" onClick={startRecognition}>▶ Распознать</button>
+                <button className="btn-ghost" onClick={() => { setPending(null); if (fileRef.current) fileRef.current.value = ""; }}>
+                  Убрать файл</button>
+              </div>
+            )}
             <input ref={fileRef} type="file" className="hidden" onChange={(e) => onFile(e.target.files?.[0] || undefined)}
               accept=".mp3,.wav,.m4a,.ogg,.oga,.opus,.flac,.aac,.mp4,.mov,.mkv,.webm,.m4v" />
             {uploadError && (
@@ -573,6 +609,11 @@ export default function Recognition() {
                         style={{ color: "var(--muted)" }}>{String(live.analysis.text).slice(-400)}</pre>
                     ) : null}
                   </div>
+                  {/* Остановить долгую работу, не дожидаясь конца: часовая запись
+                      на medium считается ~40 минут, и ошибочно запущенная задача
+                      иначе занимала бы процессор и очередь всё это время. */}
+                  <button className="btn-ghost flex-none self-start" onClick={() => stopJob(detail.id)}>
+                    ■ Стоп</button>
                 </div>
               )}
               {detail.error && <div className="glass2 rounded-2xl p-3 mb-3 text-[12.5px]" style={{ color: "#fca5a5" }}>{detail.error}</div>}
