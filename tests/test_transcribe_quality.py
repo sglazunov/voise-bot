@@ -131,3 +131,38 @@ class TestLooksLikeName:
             assert store._looks_like_name(s), s
         for s in bad:
             assert not store._looks_like_name(s), s
+
+
+class TestTileNamesOcrCleanup:
+    """Чистка подписей с плиток Телемоста.
+
+    Все строки ниже — из списка участников боевого протокола (операционная
+    23.07): там рядом стояли «Зоя Р», «Зоя P» и «ЗояР» — один человек тремя
+    строками, — а также значки интерфейса, прочитанные OCR как буква «W».
+    """
+
+    def _names(self, captions):
+        from app.jobs import _tile_names
+
+        class _J:
+            video_participants = captions
+
+        return _tile_names(_J())
+
+    def test_латинский_двойник_не_двоит_человека(self):
+        names = self._names(["Зоя Р", "Зоя P", "ЗояР"])
+        assert names == ["Зоя Р"], names
+
+    def test_значок_интерфейса_снимается(self):
+        assert self._names(["Виталий Овчаренко W"]) == ["Виталий Овчаренко"]
+        assert self._names(["Павел. W"]) == ["Павел"]
+
+    def test_слипшийся_инициал_отделяется(self):
+        assert self._names(["МариянН"]) == ["Мариян Н"]
+
+    def test_глагол_не_имя(self):
+        assert self._names(["Развлекаешься"]) == []
+
+    def test_настоящие_имена_не_портятся(self):
+        src = ["Андрей Журавль", "НВ Светлана", "Дарья К", "Сергей Beck"]
+        assert self._names(src) == src

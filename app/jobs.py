@@ -30,6 +30,34 @@ STATUS_DONE = "done"
 STATUS_ERROR = "error"
 STATUS_CANCELLED = "cancelled"
 
+# Латинские буквы, неотличимые на вид от кириллических. OCR подписей с плиток
+# Телемоста читает их вперемешку, из-за чего один человек попадал в список
+# участников дважды: в боевом протоколе рядом стояли «Зоя Р» (кириллица) и
+# «Зоя P» (латиница).
+_CONFUSABLES = str.maketrans("ABCEHKMOPTXYaceopxy", "АВСЕНКМОРТХУасеорху")
+_CYR_RE = re.compile(r"[А-Яа-яЁё]")
+_LAT_RE = re.compile(r"[A-Za-z]")
+
+
+def _fold_confusables(name: str) -> str:
+    """Свести латинские буквы-двойники к кириллице — ТОЛЬКО там, где это OCR.
+
+    Осторожно: сводить всё подряд нельзя, иначе настоящая латинская фамилия
+    («Сергей Beck») превращается в кашу. Признаки именно ошибки распознавания:
+      * слово смешанного алфавита («Зoя» с латинской o) — так не пишут;
+      * одинокая латинская буква при кириллическом имени («Зоя P») — это
+        инициал, набранный не в той раскладке.
+    Целые латинские слова остаются как есть.
+    """
+    words = name.split()
+    has_cyr = any(_CYR_RE.search(w) for w in words)
+    out = []
+    for w in words:
+        mixed = _CYR_RE.search(w) and _LAT_RE.search(w)
+        lone_initial = has_cyr and len(w.strip(".")) == 1 and _LAT_RE.fullmatch(w.strip("."))
+        out.append(w.translate(_CONFUSABLES) if (mixed or lone_initial) else w)
+    return " ".join(out)
+
 
 def _friendly_error(exc: BaseException) -> str:
     """A SHORT human message for the UI instead of a raw Python traceback.
@@ -786,9 +814,15 @@ class JobStore:
         "гость", "организатор", "запись встречи",
     }
 
+    # Окончания русских глаголов/наречий: подпись плитки вида «Развлекаешься»
+    # проходит все формальные признаки имени (одно слово с заглавной), но именем
+    # не является. Такое реально попадало в списки участников.
+    _NOT_NAME_SUFFIX = ("ешься", "аешься", "ется", "ются", "ешь", "аем", "ает",
+                        "ают", "или", "ился", "илась", "ность")
+
     @classmethod
     def _looks_like_name(cls, s: str) -> bool:
-        s = (s or "").strip()
+        s = cls._strip_ui_badge(s)
         if not (2 <= len(s) <= 40) or any(ch.isdigit() for ch in s):
             return False
         if re.search(r"[^\w\s.\-ёЁ]", s):        # punctuation → chat/UI, not a name
@@ -798,7 +832,27 @@ class JobStore:
             return False
         if s.lower() in cls._NAME_STOP:
             return False
+        if len(words) == 1 and s.lower().endswith(cls._NOT_NAME_SUFFIX):
+            return False
         return all(w[0].isupper() for w in words)
+
+    @staticmethod
+    def _strip_ui_badge(s: str) -> str:
+        """Привести подпись плитки к виду, в котором её писал человек.
+
+        OCR подписей даёт три устойчивых искажения, и все три встречались в
+        одном боевом протоколе:
+          * латинские двойники вместо кириллицы («Зоя P» рядом с «Зоя Р») —
+            сводим к кириллице ПЕРВЫМ делом, иначе инициал примешь за метку;
+          * слипшийся инициал («ЗояР») — отделяем;
+          * значок интерфейса, прочитанный как буква («Виталий Овчаренко W»,
+            «Павел. W») — убираем; после сведения двойников одинокая ЛАТИНСКАЯ
+            буква в конце кириллического имени инициалом быть уже не может.
+        """
+        s = _fold_confusables((s or "").strip())
+        s = re.sub(r"^([А-ЯЁ][а-яё]{2,})([А-ЯЁ])$", r"\1 \2", s)   # ЗояР → Зоя Р
+        m = re.match(r"^(.*[А-Яа-яЁё].*?)[\s.]+([A-Za-z])$", s)
+        return (m.group(1) if m else s).strip(" .")
 
     def _auto_initial_prompt(self, job: Job) -> str:
         budget = self._PROMPT_TOKENS * 3          # ~3 chars per token
@@ -1098,14 +1152,24 @@ def _context_block(job: "Job") -> str:
         return ""
 
 
+def _name_key(s: str) -> str:
+    """Ключ для дедупликации: пробелы схлопнуты, регистр снят."""
+    return " ".join((s or "").strip().lower().split())
+
+
 def _tile_names(job: "Job") -> list[str]:
     """Name-like tile captions of THIS call, deduped (scanner noise dropped)."""
     seen: set[str] = set()
     out: list[str] = []
     for n in (getattr(job, "video_participants", None) or []):
-        if JobStore._looks_like_name(n) and n.strip().lower() not in seen:
-            seen.add(n.strip().lower())
-            out.append(n.strip())
+        if not JobStore._looks_like_name(n):
+            continue
+        clean = JobStore._strip_ui_badge(n)
+        key = _name_key(clean)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(clean)
     return out
 
 
