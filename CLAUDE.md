@@ -154,10 +154,12 @@ docs/                  РУКОВОДСТВО, АРХИТЕКТУРА, БЕКЕ�
 Спикеров и ответственных НЕ выпиливать: в этом проекте они обоснованы.
 
 ## Инфраструктура
-- **Docker**: три сервиса — `app` (образ `linux-voise:latest`), `db`
-  (postgres:16-alpine), `cloudflared` (туннель); все `restart: unless-stopped`,
-  профилей в compose нет. Сборка двухстадийная: Node собирает SPA →
-  Python-образ `python:3.12-slim-bookworm`.
+- **Docker**: два сервиса — `app` (образ `linux-voise:latest`) и `db`
+  (postgres:16-alpine); оба `restart: unless-stopped`, профилей в compose нет.
+  Сборка двухстадийная: Node собирает SPA → Python-образ
+  `python:3.12-slim-bookworm`. (Сервис `cloudflared` с quick-туннелем удалён
+  2026-07-28: у пользователя свой сервер с публичным IP, а эфемерный адрес
+  `…trycloudflare.com` менялся при каждом рестарте.)
   (Мелочь: README в «Решении проблем» упоминает `--profile local-ai` — такого
   профиля в compose нет, текст устарел.)
 - Пин на **bookworm** осознанный: в trixie загрузчик отвергает ctranslate2 4.4.0
