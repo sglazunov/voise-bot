@@ -662,6 +662,33 @@ class AnalysisCancelled(RuntimeError):
     """Raised when the user cancels protocol generation mid-way."""
 
 
+# Сколько токенов ответа нужно на полноценный протокол длинной встречи.
+# Ниже этого разбор по темам начинает схлопываться в пересказ оглавления.
+_WANT_PROTOCOL_TOKENS = 6000
+
+
+def _reduce_notes_budget(backend, want_answer: int = _WANT_PROTOCOL_TOKENS) -> int:
+    """Сколько токенов заметок можно унести в финальное сведение, чтобы у САМОГО
+    протокола осталось место.
+
+    Раньше заметки уплотнялись до размера КОНТЕКСТА движка — и этого мало.
+    У Groq контекст большой, а лимит токенов в минуту всего 12000 на вход и
+    выход вместе: заметки часовой встречи занимали почти весь лимит, и на ответ
+    оставалось 1200 токенов. Отсюда и брались протоколы на 238 слов по
+    двухчасовой встрече — чем длиннее встреча, тем сильнее её схлопывало.
+
+    Теперь приоритет обратный: сначала резервируем место под протокол, а
+    заметки ужимаем под остаток. Уплотнение заметок — смысловое (модель
+    сохраняет факты), обрезание ответа — слепое, поэтому первое лучше второго.
+    """
+    ctx = _ctx_budget(backend)
+    base = str(getattr(backend, "name", "")).split(":")[0]
+    tpm = config.PROVIDER_TPM.get(base)
+    if tpm:
+        ctx = min(ctx, max(2000, tpm - want_answer - 400))
+    return ctx
+
+
 def _fit_max_tokens(backend, prompt: str, want: int) -> int:
     """Shrink the requested answer size so one request fits the provider's
     per-minute token budget (input + requested output). Without this, asking for a
@@ -833,7 +860,10 @@ def analyze_transcript(transcript_text: str, provider: str | None = None,
         # engine's window, merge neighbours pairwise (hierarchical reduce)
         # until the final merge fits. Silent truncation is the enemy — it eats
         # the END of the meeting.
-        budget = _ctx_budget(backend)
+        # Бюджет заметок считается ОТ МЕСТА ПОД ПРОТОКОЛ, а не от контекста:
+        # иначе заметки длинной встречи съедают минутный лимит движка и ответ
+        # обрезается до пересказа оглавления.
+        budget = _reduce_notes_budget(backend)
         rounds = 0
         while (len(maps) > 1 and rounds < 4
                and _est_tokens(_notes_blob(maps)) > 0.8 * budget):

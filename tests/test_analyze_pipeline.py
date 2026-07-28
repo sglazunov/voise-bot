@@ -198,6 +198,33 @@ class TestPipeline:
         assert any("Отрезок A" in p for p in backend.prompts)   # merge happened
         assert "Тема 9" in backend.prompts[-1]                  # reduce got merged notes
 
+    def test_бюджет_заметок_оставляет_место_протоколу(self):
+        """Длинная встреча не должна схлопываться в пересказ оглавления.
+
+        Боевой случай: у Groq лимит 12000 токенов в минуту НА ВХОД И ВЫХОД
+        вместе. Заметки уплотнялись до размера контекста (те же 12000), занимали
+        почти весь лимит — и на сам протокол оставалось 1200-2000 токенов.
+        Двухчасовая встреча превращалась в 238 слов.
+        """
+        class Groq:
+            name = "groq"
+
+        g = Groq()
+        notes_budget = analyze._reduce_notes_budget(g)
+        # Заметки ужимаются сильнее, чем позволяет контекст…
+        assert notes_budget < analyze._ctx_budget(g)
+        # …и после этого протоколу достаётся объём, на котором он не схлопнется.
+        prompt = "x" * int(0.8 * notes_budget * 3)   # ~3 символа на токен
+        assert analyze._fit_max_tokens(g, prompt, 10000) >= 6000
+
+    def test_бюджет_заметок_не_режет_облака_с_большим_контекстом(self):
+        """У кого нет минутного лимита — ограничение не появляется."""
+        class Gemini:
+            name = "gemini"
+
+        g = Gemini()
+        assert analyze._reduce_notes_budget(g) == analyze._ctx_budget(g)
+
     def test_single_pass_uses_protocol_schema_validation(self, monkeypatch):
         backend = FakeBackend(["мусор без json", _protocol_answer(summary="ок")])
         monkeypatch.setattr(analyze.llm, "get_provider_chain", lambda *a, **k: backend)
