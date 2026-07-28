@@ -159,8 +159,6 @@ CREATE INDEX IF NOT EXISTS idx_jobs_owner ON jobs(owner);
 CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at);
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS user_notes TEXT;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS preset TEXT;
-ALTER TABLE meetings ADD COLUMN IF NOT EXISTS out_path TEXT;
-ALTER TABLE meetings ADD COLUMN IF NOT EXISTS live_notes TEXT;
 CREATE TABLE IF NOT EXISTS search_docs (
     job_id     TEXT PRIMARY KEY,
     username   TEXT,
@@ -194,6 +192,12 @@ CREATE TABLE IF NOT EXISTS meetings (
     saved_at     DOUBLE PRECISION,
     PRIMARY KEY (username, meeting_key)
 );
+-- Дозаливка колонок идёт СТРОГО после CREATE соответствующей таблицы: на
+-- чистой базе ALTER выше по тексту падает с UndefinedTable, и приложение
+-- уходит в бесконечный перезапуск. На базе разработчика таблица уже
+-- существовала, поэтому ошибка проявлялась только при установке с нуля.
+ALTER TABLE meetings ADD COLUMN IF NOT EXISTS out_path TEXT;
+ALTER TABLE meetings ADD COLUMN IF NOT EXISTS live_notes TEXT;
 -- One row per finished meeting/recording. Job rows are purged by retention
 -- (VTX_RETENTION_HOURS), so the business numbers are recorded here to survive it.
 CREATE TABLE IF NOT EXISTS meeting_stats (
