@@ -938,6 +938,12 @@ def analyze_transcript(transcript_text: str, provider: str | None = None,
         result[list_key] = _normalise_tasks(result.get(list_key, []))
     result["detailed"] = _normalise_detailed(result["detailed"])
     result["_provider"] = backend.name
+    # Пустые разделы не показываем человеку: сначала пробуем переписать их по
+    # расшифровке, и только безнадёжные убираем. Пометки мало — вода всё равно
+    # попадёт в документ.
+    result = refill_empty_topics(result, text, provider=provider, keys=keys,
+                                 user_notes=user_notes, on_progress=on_progress,
+                                 cancel_check=cancel_check, backend=backend)
     # Читаемость протокола — измеримая величина, а не ощущение. Пустые разделы
     # («Обсуждается X. Решается вопрос о X») и summary-оглавление кладём в
     # результат: видно в UI, считается на эталонах, не даёт дефекту тихо расти.
@@ -1188,10 +1194,14 @@ def verify_protocol(result: dict, transcript_text: str, user_notes: str = "",
 # --------------------------------------------------------------------------- #
 def regen_topic_details(transcript_text: str, topic: dict,
                         provider: str | None = None, keys: dict | None = None,
-                        user_notes: str = "") -> dict:
+                        user_notes: str = "", backend=None) -> dict:
     """Re-write ONE topic of the protocol (deeper/cleaner) without touching the
-    rest. Returns {"topic", "details"}."""
-    backend = llm.get_provider_chain(provider, keys)
+    rest. Returns {"topic", "details"}.
+
+    `backend` позволяет переиспользовать уже выбранный движок: внутри разбора
+    длинной встречи цепочка могла быть переключена на облако (prefer_cloud), и
+    создавать её заново значило бы откатиться на медленный локальный движок."""
+    backend = backend or llm.get_provider_chain(provider, keys)
     budget_chars = max(int(0.7 * _ctx_budget(backend)) * 3, 8000)
     text = (transcript_text or "")[:budget_chars]
     prompt = (
@@ -1214,6 +1224,68 @@ def regen_topic_details(transcript_text: str, topic: dict,
         out = {"topic": topic.get("topic", ""), "details": e.raw[:4000]}
     return {"topic": (out.get("topic") or topic.get("topic") or "").strip(),
             "details": (out.get("details") or "").strip()}
+
+
+# Предел перегенераций за один протокол: каждая — отдельный вызов движка, а
+# при упоре в лимит запросов страдает уже сам протокол. Обычно пустых разделов
+# нет вовсе, так что предел срабатывает только на совсем плохих расшифровках.
+_MAX_TOPIC_REGENS = int(os.getenv("VTX_MAX_TOPIC_REGENS", "6"))
+
+
+def refill_empty_topics(result: dict, transcript_text: str,
+                        provider: str | None = None, keys: dict | None = None,
+                        user_notes: str = "", on_progress=None,
+                        cancel_check=None, backend=None) -> dict:
+    """Наполнить пустые разделы содержанием, а что не наполнилось — убрать.
+
+    Пустой раздел («Обсуждаются задачи и бэклог. Решается вопрос о добавлении
+    задач в бэклог») бесполезен читателю: он повторяет заголовок и не сообщает
+    фактов. Пометить его мало — человек всё равно увидит воду. Поэтому раздел
+    сначала переписывается по расшифровке заново, и только если и после этого
+    в нём нечего сказать — он удаляется: значит тему лишь упомянули.
+
+    Работает бережно: ошибка движка оставляет исходный раздел на месте, отмена
+    пробрасывается наверх, число вызовов ограничено _MAX_TOPIC_REGENS.
+    """
+    topics = result.get("detailed") or []
+    if not topics or not (transcript_text or "").strip():
+        return result
+
+    regenerated = dropped = 0
+    kept: list[dict] = []
+    for block in topics:
+        topic = (block or {}).get("topic", "")
+        details = (block or {}).get("details", "")
+        if not protocol_quality.topic_is_empty(topic, details):
+            kept.append(block)
+            continue
+        if regenerated >= _MAX_TOPIC_REGENS:
+            kept.append(block)          # лимит исчерпан — оставляем как есть
+            continue
+        if cancel_check and cancel_check():
+            raise AnalysisCancelled()
+        if on_progress:
+            on_progress(f"Дописываю раздел «{topic}»…", "")
+        try:
+            fresh = regen_topic_details(transcript_text, block, provider=provider,
+                                        keys=keys, user_notes=user_notes,
+                                        backend=backend)
+        except AnalysisCancelled:
+            raise
+        except Exception:  # noqa: BLE001 — движок недоступен: раздел не теряем
+            kept.append(block)
+            continue
+        regenerated += 1
+        if protocol_quality.topic_is_empty(fresh.get("topic", topic),
+                                           fresh.get("details", "")):
+            dropped += 1               # в расшифровке действительно нет содержания
+            continue
+        kept.append({"topic": fresh.get("topic") or topic,
+                     "details": fresh.get("details", "")})
+
+    result["detailed"] = kept
+    result["_refill"] = {"regenerated": regenerated, "dropped": dropped}
+    return result
 
 
 def ask_meeting(transcript_text: str, question: str,

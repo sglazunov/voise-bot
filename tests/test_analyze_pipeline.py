@@ -13,12 +13,18 @@ from app.analyze import (MapNotes, Protocol, TaskNote, TopicNote, _ctx_budget,
 
 
 @pytest.fixture(autouse=True)
-def _no_speech_gate(monkeypatch):
-    """Здесь проверяется МЕХАНИКА конвейера, а не защита от пустой записи:
-    транскрипты нарочно крошечные («[00:01] короткая встреча»), чтобы арифметика
-    чанков читалась глазами. Гейт минимальной речи для них отключён — он покрыт
-    отдельно в tests/test_no_transcript.py."""
+def _pipeline_mechanics_only(monkeypatch):
+    """Здесь проверяется МЕХАНИКА конвейера, поэтому две защиты выключены:
+
+    * гейт минимальной речи — транскрипты нарочно крошечные («[00:01] короткая
+      встреча»), чтобы арифметика чанков читалась глазами
+      (покрыт в tests/test_no_transcript.py);
+    * перегенерация пустых разделов — иначе она добавляет свой вызов движка
+      последним, и проверки вида `backend.prompts[-1]` смотрели бы уже не на
+      reduce-промпт (покрыта в tests/test_refill_topics.py).
+    """
     monkeypatch.setattr(analyze, "MIN_SPEECH_WORDS", 0)
+    monkeypatch.setattr(analyze, "_MAX_TOPIC_REGENS", 0)
 
 
 # --------------------------------------------------------------------------- #
