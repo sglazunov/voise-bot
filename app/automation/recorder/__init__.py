@@ -82,6 +82,14 @@ _DISABLED_MSG = ("Бот-рекордер не входит в этот обра
                  "следующим шагом — с Xvfb и PulseAudio на сервере. "
                  "Распознавание, протоколы, Weeek и облако работают без него.")
 
+# Звуковой сервер недоступен приложению. Причина почти всегда одна: каталог
+# PULSE_RUNTIME_PATH принадлежит root (его создаёт любая команда `pactl`,
+# выполненная от root внутри контейнера), а приложение работает под app.
+_AUDIO_BROKEN_MSG = (
+    "Звук недоступен: приложение не может подключиться к PulseAudio, поэтому "
+    "запись была бы немой. Обычно каталог /tmp/pulse принадлежит root — "
+    "перезапустите контейнер (docker compose up -d), entrypoint починит права.")
+
 
 def readiness(cfg: dict) -> dict:
     """What the screen recorder needs: a browser (Playwright) + ffmpeg + audio."""
@@ -131,8 +139,14 @@ def record_meeting(url: str, out_path: str, cfg: dict,
         rec.start()
         time.sleep(3)
         if not rec.running:
+            tail = rec.error_tail() or ""
+            # Самая частая и самая непонятная причина — недоступный звуковой
+            # сервер: ffmpeg сыплет строками про probesize и x11grab, из-за чего
+            # ищут проблему в видео, хотя отвалился звук. Называем причину прямо.
+            if "secure directory" in tail or "Connection refused" in tail:
+                return {"ok": False, "error": _AUDIO_BROKEN_MSG + f" (слот {slot.index})"}
             return {"ok": False,
-                    "error": "ffmpeg не смог записывать. " + (rec.error_tail() or
+                    "error": "ffmpeg не смог записывать. " + (tail or
                              "Проверьте ffmpeg/дисплей/аудио слота.")}
         log("🔴 Идёт запись встречи — бот в звонке.")
 
