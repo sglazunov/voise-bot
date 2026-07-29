@@ -137,14 +137,22 @@ def _sample_frames(path: str, every_sec: float, max_frames: int):
 
 
 def extract_screen_text(path: str, lang: str = "rus+eng",
-                        every_sec: float = 5.0, max_frames: int = 360) -> List[dict]:
-    """Return [{time, text}] of de-duplicated on-screen text from the video."""
+                        every_sec: float = 5.0, max_frames: int = 360,
+                        should_stop=None) -> List[dict]:
+    """Return [{time, text}] of de-duplicated on-screen text from the video.
+
+    `should_stop` проверяется между кадрами: распознавание экрана на часовом
+    видео идёт десятки минут, и без этой проверки кнопка «Стоп» не действовала
+    — пользователь жал её и ничего не происходило.
+    """
     import pytesseract
     _point_pytesseract_at_binary()
 
     out: List[dict] = []
     prev = ""
     for t, img in _sample_frames(path, every_sec, max_frames):
+        if should_stop and should_stop():
+            break                    # отдаём то, что успели распознать
         try:
             raw = pytesseract.image_to_string(img, lang=lang)
         except Exception:

@@ -402,18 +402,25 @@ def _merge_short_names(names: List[str]) -> List[str]:
     return [n for n in names if n in out]
 
 
-def identify_speakers(video_path: str, segments: List[Segment]) -> List[Segment]:
+def identify_speakers(video_path: str, segments: List[Segment],
+                      should_stop=None) -> List[Segment]:
     """Detect the active speaker per moment from the video and label each
     transcript segment in place with the speaker's name. Returns `segments`.
 
     Segments with no confidently detected speaker are left as-is (speaker=None)
-    — we never guess a name."""
+    — we never guess a name.
+
+    `should_stop` проверяется между кадрами: проход по часовому видео идёт
+    десятки минут, и без него кнопка «Стоп» не действовала — отмена ловилась
+    только между фрагментами распознавания, а этот этап идёт уже после него."""
     # 1) Sample frames → per-frame (time, name-or-None). Only OCR when the
     #    active tile moves (speaker likely changed), to keep it fast.
     timeline: List[Tuple[float, Optional[str]]] = []
     prev_center: Optional[Tuple[float, float]] = None
     prev_name: Optional[str] = None
     for t, arr, img in _sample_frames(video_path, _SAMPLE_SEC, _MAX_FRAMES):
+        if should_stop and should_stop():
+            break                    # размечаем тем, что успели собрать
         bbox = _active_bbox(arr)
         if bbox is None:
             timeline.append((t, None))

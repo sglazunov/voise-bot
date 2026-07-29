@@ -915,11 +915,20 @@ class JobStore:
             # For Telemost recordings this is far more reliable than guessing from
             # text, and the real names override diarization's "Спикер N".
             speaker_err = None
+            # Отмена ловится и МЕЖДУ этапами: распознавание уже позади, а
+            # впереди разметка спикеров и OCR экрана — каждый на десятки минут.
+            # Раньше «Стоп» здесь не действовал: проверка была только между
+            # фрагментами распознавания, то есть в уже пройденном цикле.
+            if ctrl.get("cancel"):
+                raise JobCancelled()
+
             if job.identify_speakers:
                 try:
                     from . import speaker_id
                     if speaker_id.is_video(job.audio_path):
-                        segments = speaker_id.identify_speakers(job.audio_path, segments)
+                        segments = speaker_id.identify_speakers(
+                            job.audio_path, segments,
+                            should_stop=lambda: bool(ctrl.get("cancel")))
                         named = {s.speaker for s in segments if s.speaker}
                         if named:
                             n_speakers = len(named)
@@ -946,6 +955,11 @@ class JobStore:
                 formats.to_json(segments, meta), encoding="utf-8")
 
             # Optional: capture on-screen text from the video (OCR).
+            # Проверка отмены — СНАРУЖИ try: внутри стоит `except Exception`,
+            # который проглотил бы JobCancelled и превратил отмену в «ошибку
+            # OCR», а задача продолжила бы выполняться.
+            if ctrl.get("cancel"):
+                raise JobCancelled()
             screen_block = ""
             screen_err = None
             screen_segs = 0
@@ -953,7 +967,9 @@ class JobStore:
                 try:
                     from . import screen_ocr
                     if screen_ocr.is_video(job.audio_path):
-                        items = screen_ocr.extract_screen_text(job.audio_path)
+                        items = screen_ocr.extract_screen_text(
+                            job.audio_path,
+                            should_stop=lambda: bool(ctrl.get("cancel")))
                         screen_block = screen_ocr.to_block(items)
                         screen_segs = len(items)
                         if screen_block:
