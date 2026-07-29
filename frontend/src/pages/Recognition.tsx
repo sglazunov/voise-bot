@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   Mic, UploadCloud, FileAudio, Sparkles, Users, Monitor, Loader2, RotateCcw,
-  Download, FileText, X, ChevronRight,
+  Download, FileText, X, ChevronRight, ChevronLeft, CalendarDays,
 } from "lucide-react";
 import { Page } from "../components/Layout";
 import { Card, Select, useToast } from "../components/ui";
@@ -72,6 +72,68 @@ function fmtTs(sec: number): string {
   return h ? `${h}:${String(m).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`
            : `${String(m).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
 }
+const MONTHS = ["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь", "Июль",
+  "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"];
+const dayKey = (ms: number) => {
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+};
+
+/** Календарь истории: месяц, год и день. Дни без встреч не кликаются. */
+function HistoryCalendar({ jobs, value, onPick }:
+  { jobs: any[]; value: string | null; onPick: (key: string | null) => void }) {
+  const first = value ? value.split("-").map(Number) : null;
+  const [view, setView] = useState(() =>
+    first ? new Date(first[0], first[1], 1) : new Date());
+
+  // В какие дни вообще были встречи — по ним и подсвечиваем календарь.
+  const have = new Set(jobs.map((j) => dayKey((j.created_at || 0) * 1000)));
+  const y = view.getFullYear(), m = view.getMonth();
+  const daysInMonth = new Date(y, m + 1, 0).getDate();
+  // Понедельник — первый день недели (getDay(): воскресенье = 0).
+  const shift = (new Date(y, m, 1).getDay() + 6) % 7;
+
+  return (
+    <div className="glass2 rounded-2xl p-3 mb-2.5">
+      <div className="flex items-center justify-between mb-2">
+        <button className="btn-ghost grid place-items-center" style={{ width: 28, height: 28, borderRadius: 8 }}
+          onClick={() => setView(new Date(y, m - 1, 1))}><ChevronLeft size={14} /></button>
+        <div className="text-[13px] font-semibold">{MONTHS[m]} {y}</div>
+        <button className="btn-ghost grid place-items-center" style={{ width: 28, height: 28, borderRadius: 8 }}
+          onClick={() => setView(new Date(y, m + 1, 1))}><ChevronRight size={14} /></button>
+      </div>
+      <div className="grid grid-cols-7 gap-1 text-center text-[10px] mb-1" style={{ color: "var(--muted)" }}>
+        {["пн", "вт", "ср", "чт", "пт", "сб", "вс"].map((d) => <div key={d}>{d}</div>)}
+      </div>
+      <div className="grid grid-cols-7 gap-1">
+        {Array.from({ length: shift }).map((_, i) => <div key={`e${i}`} />)}
+        {Array.from({ length: daysInMonth }).map((_, i) => {
+          const day = i + 1;
+          const key = `${y}-${m}-${day}`;
+          const has = have.has(key);
+          const active = value === key;
+          return (
+            <button key={key} disabled={!has}
+              onClick={() => onPick(active ? null : key)}
+              className="text-[12px] rounded-lg py-1 transition"
+              style={{
+                background: active ? "var(--accent)" : has ? "rgba(45,212,191,.13)" : "transparent",
+                color: active ? "#04212f" : has ? "var(--text)" : "var(--muted)",
+                fontWeight: has ? 600 : 400,
+                opacity: has ? 1 : 0.35,
+                cursor: has ? "pointer" : "default",
+              }}>{day}</button>
+          );
+        })}
+      </div>
+      {value && (
+        <button className="btn-ghost w-full mt-2 text-[12px]" onClick={() => onPick(null)}>
+          Показать все встречи</button>
+      )}
+    </div>
+  );
+}
+
 function LiveTranscript({ segments }: { segments: any[] }) {
   const boxRef = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
@@ -325,6 +387,9 @@ export default function Recognition() {
   // Д14: поиск по всем встречам (debounce 350 мс)
   const [searchQ, setSearchQ] = useState("");
   const [searchRes, setSearchRes] = useState<any[]>([]);
+  // Календарь истории: выбранный день («2026-6-29») и раскрыт ли сам календарь.
+  const [dayFilter, setDayFilter] = useState<string | null>(null);
+  const [showCal, setShowCal] = useState(false);
   useEffect(() => {
     const q = searchQ.trim();
     if (q.length < 2) { setSearchRes([]); return; }
@@ -338,6 +403,10 @@ export default function Recognition() {
   const toast = useToast();
 
   const loadJobs = () => api.get("/api/jobs").then(setJobs).catch(() => {});
+  // Список для показа: либо все встречи, либо только выбранный в календаре день.
+  const shownJobs = dayFilter
+    ? jobs.filter((j: any) => dayKey((j.created_at || 0) * 1000) === dayFilter)
+    : jobs;
   useEffect(() => { loadJobs(); const t = setInterval(loadJobs, 4000); return () => clearInterval(t); }, []);
   useEffect(() => { api.get("/api/providers").then((d) => setEngines(d.engines || [])).catch(() => {}); }, []);
 
@@ -559,12 +628,23 @@ export default function Recognition() {
           </Card>
 
           <Card>
-            <div className="font-bold text-[14px] mb-2.5">История</div>
+            <div className="flex items-center justify-between mb-2.5">
+              <div className="font-bold text-[14px]">История</div>
+              <button className="btn-ghost grid place-items-center"
+                title="Протоколы по дате"
+                style={{ width: 30, height: 30, borderRadius: 9,
+                  ...(showCal || dayFilter ? { borderColor: "var(--accent)", color: "var(--accent)" } : {}) }}
+                onClick={() => setShowCal((v) => !v)}><CalendarDays size={15} /></button>
+            </div>
             {/* Д14: поиск по расшифровкам и протоколам всех встреч команды */}
             <div className="relative mb-2.5">
               <input className="field" placeholder="Поиск по всем встречам…"
                 value={searchQ} onChange={(e) => setSearchQ(e.target.value)} />
             </div>
+            {showCal && (
+              <HistoryCalendar jobs={jobs} value={dayFilter}
+                onPick={(k) => { setDayFilter(k); setSearchQ(""); }} />
+            )}
             {searchQ.trim().length >= 2 ? (
               searchRes.length ? searchRes.map((r) => (
                 <button key={r.job_id} onClick={() => { setSel(r.job_id); setTab("transcript"); }}
@@ -579,7 +659,7 @@ export default function Recognition() {
                     }} />
                 </button>
               )) : <div className="text-[12.5px] py-2" style={{ color: "var(--muted)" }}>Ничего не найдено.</div>
-            ) : jobs.length ? jobs.map((j) => (
+            ) : shownJobs.length ? shownJobs.map((j) => (
               <button key={j.id} onClick={() => { setSel(j.id); setTab("protocol"); }}
                 className="w-full glass2 rounded-2xl px-3.5 py-3 mb-2 flex items-center gap-3 text-left transition"
                 style={sel === j.id ? { borderColor: "var(--accent)" } : {}}>
@@ -590,7 +670,10 @@ export default function Recognition() {
                   <div className="text-[11px] mt-0.5" style={{ color: "var(--muted)" }}>{RU_STATUS[j.status] || j.status} · {fmtDateTime(new Date(j.created_at * 1000).toISOString())}</div></div>
                 {isBusy(j.status) && <span className="text-[11px] font-semibold" style={{ color: "var(--accent)" }}>{Math.round((j.progress || 0) * 100)}%</span>}
               </button>
-            )) : <div className="text-[13px] py-2" style={{ color: "var(--muted)" }}>Пока нет задач.</div>}
+            )) : (
+              <div className="text-[13px] py-2" style={{ color: "var(--muted)" }}>
+                {dayFilter ? "В этот день встреч не было." : "Пока нет задач."}</div>
+            )}
           </Card>
         </div>
 
