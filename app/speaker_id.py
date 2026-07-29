@@ -55,6 +55,8 @@ _TOP_STRIP = float(os.getenv("VTX_SPEAKER_TOP_STRIP", "0.30"))
 # Минимальная доля кадра для плитки ВНЕ верхней полосы (режим сетки, когда
 # никто не делится экраном). Строка меню столько не занимает.
 _MIN_TILE_AREA = float(os.getenv("VTX_SPEAKER_MIN_TILE", "0.02"))
+# Доля кадров, в которых подпись должна встретиться, чтобы считаться участником.
+_MIN_SEEN_SHARE = float(os.getenv("VTX_PARTICIPANT_MIN_SHARE", "0.34"))
 
 
 def is_video(path: str) -> bool:
@@ -363,7 +365,13 @@ def scan_participants(video_path: str, every_sec: float = 60.0,
         counts.update(seen_here)
     if not counts:
         return []
-    need = min_seen if frames >= min_seen else 1
+    # Живой участник виден почти всю встречу; случайный текст — эпизодически.
+    # Порога «2 кадра из 8» не хватало: баннер «Групповой звонок завершился»
+    # висит в конце и попадал ровно в пару последних кадров, а с ним пролезал
+    # и мусор OCR с демонстрируемого экрана («Weenies Sad», «Hireeree Том»).
+    # Требуем присутствия хотя бы в трети кадров — по форме такие строки от
+    # имени не отличить, а по устойчивости отличить можно.
+    need = max(min_seen, round(_MIN_SEEN_SHARE * frames)) if frames >= min_seen else 1
     stable = [n for n, c in counts.items() if c >= need]
     canon = _canonicalise(stable)
     out: List[str] = []
@@ -374,7 +382,24 @@ def scan_participants(video_path: str, every_sec: float = 60.0,
         if re.search(r"\b(бот|bot)\b", c.lower()):  # the recorder itself
             continue
         out.append(c)
-    return out
+    return _merge_short_names(out)
+
+
+def _merge_short_names(names: List[str]) -> List[str]:
+    """Схлопнуть «Павел» и «Шавлак Павел» в одного человека.
+
+    Телемост показывает подпись по-разному в зависимости от ширины плитки, и в
+    протокол попадали оба варианта как два участника. Если однословное имя
+    целиком входит в многословное — оставляем длинное: оно информативнее.
+    """
+    out: List[str] = []
+    for n in sorted(names, key=lambda s: -len(s.split())):
+        words = {w.lower().strip(".") for w in n.split()}
+        if any(words <= {w.lower().strip(".") for w in kept.split()} for kept in out):
+            continue          # уже есть более полный вариант этого имени
+        out.append(n)
+    # Возвращаем в исходном порядке — он отражает порядок появления на встрече.
+    return [n for n in names if n in out]
 
 
 def identify_speakers(video_path: str, segments: List[Segment]) -> List[Segment]:

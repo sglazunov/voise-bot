@@ -72,3 +72,33 @@ class TestНеСломать:
 
     def test_ключ_дедупликации_склеивает_варианты(self):
         assert names.key("ЗояР") == names.key("Зоя P") == names.key("зоя р")
+
+
+class TestУчастникиИзПротокола29_07:
+    """Список участников встречи ЭМО 29.07 — что реально пришло из OCR."""
+
+    RAW = ["Иван Ю", "Шавлак Павел", "Павел", "Групповой Звонок Завершился",
+           "Анастасия Фомичева", "Мария Н", "НВ Светлана", "Зоя Р",
+           "Weenies Sad", "Елизавета", "Hireeree Том", "Сергей Глазунов"]
+
+    def test_системное_сообщение_телемоста_не_участник(self):
+        assert not names.looks_like_name("Групповой Звонок Завершился")
+
+    def test_один_человек_не_попадает_дважды(self):
+        """Телемост подписывает плитку то «Павел», то «Шавлак Павел»."""
+        from app.speaker_id import _merge_short_names
+        kept = [n for n in self.RAW if names.looks_like_name(n)]
+        merged = _merge_short_names(kept)
+        assert "Шавлак Павел" in merged
+        assert "Павел" not in merged
+        assert sum(1 for m in merged if "Павел" in m) == 1
+
+    def test_склейка_не_трогает_разных_людей(self):
+        from app.speaker_id import _merge_short_names
+        out = _merge_short_names(["Мария Н", "Иван Ю", "Сергей Глазунов"])
+        assert len(out) == 3
+
+    def test_порядок_появления_сохраняется(self):
+        from app.speaker_id import _merge_short_names
+        out = _merge_short_names(["Иван Ю", "Павел", "Шавлак Павел"])
+        assert out == ["Иван Ю", "Шавлак Павел"]
