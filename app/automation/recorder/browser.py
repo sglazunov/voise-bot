@@ -549,6 +549,29 @@ class TelemostBot:
                 continue
         return False
 
+    # Экран, который Телемост показывает, когда организатор завершил встречу для
+    # всех. Ловим его ПО ТЕКСТУ, а не по исчезновению кнопок: часть управления на
+    # нём остаётся, is_in_call продолжает возвращать True, и бот писал пустой
+    # экран дальше. На боевой встрече так и вышло — фраза «Групповой звонок
+    # завершился» даже попала в список участников, потому что провисела в кадре
+    # достаточно долго, чтобы её распознал OCR.
+    _ENDED_HINTS = (
+        'text=Групповой звонок завершился', 'text=звонок завершился',
+        'text=Звонок завершён', 'text=Звонок завершен',
+        'text=Встреча завершена', 'text=Конференция завершена',
+        'text=The call has ended', 'text=Call ended',
+    )
+
+    def call_ended(self) -> bool:
+        """Организатор завершил встречу для всех — писать больше нечего."""
+        for sel in self._ENDED_HINTS:
+            try:
+                if self._page.query_selector(sel):
+                    return True
+            except Exception:
+                continue
+        return False
+
     def screenshot(self, path: str) -> None:
         try:
             self._page.screenshot(path=path, full_page=False)
@@ -737,6 +760,13 @@ class TelemostBot:
                     pass
                 self.ensure_muted()
                 last_mute = time.time()
+            # Явное «встреча завершена» — выходим сразу, без выдержки: это не
+            # мигание интерфейса, а конец встречи. Проверяем ДО is_in_call,
+            # потому что на этом экране часть кнопок управления остаётся и
+            # is_in_call считает, что мы всё ещё в звонке.
+            if self.call_ended():
+                return "call_ended"
+
             if not self.is_in_call():
                 # Don't bail on a transient miss (UI re-render); only conclude the
                 # call ended after the controls have been absent for a while.

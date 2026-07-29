@@ -190,6 +190,8 @@ def record_meeting(url: str, out_path: str, cfg: dict,
                                     chat_stop_word=stop_word)
         if reason == "chat_stop":
             log("🛑 В чате написали кодовое слово — останавливаю запись и выхожу.")
+        elif reason == "call_ended":
+            log("Встречу завершили для всех — останавливаю запись.")
         else:
             log(f"Останавливаю запись (причина: {reason}).")
         wd_stop.set()
