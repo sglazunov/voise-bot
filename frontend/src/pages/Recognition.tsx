@@ -72,6 +72,38 @@ function fmtTs(sec: number): string {
   return h ? `${h}:${String(m).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`
            : `${String(m).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
 }
+function LiveTranscript({ segments }: { segments: any[] }) {
+  const boxRef = useRef<HTMLDivElement>(null);
+  const stick = useRef(true);
+  // Липкая автопрокрутка: пока человек внизу — доматываем к свежему тексту, но
+  // если он отлистал назад читать, не дёргаем его обратно каждые две секунды.
+  useEffect(() => {
+    const el = boxRef.current;
+    if (el && stick.current) el.scrollTop = el.scrollHeight;
+  }, [segments.length]);
+
+  return (
+    <div>
+      <div className="flex items-center gap-2 text-[11.5px] mb-2" style={{ color: "var(--muted)" }}>
+        <Loader2 size={12} className="animate-spin" color="var(--accent)" />
+        распознаётся вживую · фрагментов: {segments.length}
+      </div>
+      <div ref={boxRef} className="max-h-[420px] overflow-y-auto pr-1"
+        onScroll={(e) => {
+          const el = e.currentTarget;
+          stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+        }}>
+        {/* Живые фрагменты приходят как {start, end, text} — имён говорящих в
+            них ещё нет (спикеры определяются после распознавания), поэтому
+            показываем сплошной текст. */}
+        <div className="text-[12.5px] leading-relaxed">
+          {segments.map((s: any, i: number) => String(s.text || "").trim()).join(" ")}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function SegmentView({ segments }: { segments: any[] }) {
   const anyConf = segments.some((s) => typeof s.avg_logprob === "number");
   let lastSpeaker: string | null | undefined = undefined;
@@ -698,10 +730,17 @@ export default function Recognition() {
                     {isBusy(detail.status) ? "Протокол формируется…" : "Протокол не создавался для этой записи."}</div>
               ) : segments ? (
                 <SegmentView segments={segments} />
+              ) : transcript ? (
+                <pre className="text-[12.5px] leading-relaxed whitespace-pre-wrap font-sans">{transcript}</pre>
+              ) : isBusy(detail.status) && live?.segments?.length ? (
+                // Живая расшифровка: фрагменты приходят с /partial каждые 2 с.
+                // Раньше здесь висело «Расшифровка идёт…», и по часовой записи
+                // человек больше часа не видел ни слова — непонятно, работает
+                // ли вообще. Теперь текст растёт на глазах.
+                <LiveTranscript segments={live.segments} />
               ) : (
-                transcript ? <pre className="text-[12.5px] leading-relaxed whitespace-pre-wrap font-sans">{transcript}</pre> :
-                  <div className="text-[13px] py-6 text-center" style={{ color: "var(--muted)" }}>
-                    {isBusy(detail.status) ? "Расшифровка идёт…" : "Расшифровка недоступна."}</div>
+                <div className="text-[13px] py-6 text-center" style={{ color: "var(--muted)" }}>
+                  {isBusy(detail.status) ? "Расшифровка идёт…" : "Расшифровка недоступна."}</div>
               )}
             </>
           )}
