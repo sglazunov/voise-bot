@@ -390,6 +390,8 @@ export default function Recognition() {
   // Календарь истории: выбранный день («2026-6-29») и раскрыт ли сам календарь.
   const [dayFilter, setDayFilter] = useState<string | null>(null);
   const [showCal, setShowCal] = useState(false);
+  // Связь с сервером потеряна — показываем это честно, а не замиранием.
+  const [offline, setOffline] = useState(false);
   useEffect(() => {
     const q = searchQ.trim();
     if (q.length < 2) { setSearchRes([]); return; }
@@ -402,7 +404,29 @@ export default function Recognition() {
   const fileRef = useRef<HTMLInputElement>(null);
   const toast = useToast();
 
-  const loadJobs = () => api.get("/api/jobs").then(setJobs).catch(() => {});
+  // Опрос списка задач, устойчивый к обрыву связи.
+  //
+  // Раньше он слал запрос каждые 4 секунды безусловно. Когда у клиента пропадала
+  // сеть (сон ноутбука, переключение Wi-Fi или VPN), запросы копились по
+  // 30 секунд в «Pending», консоль заполнялась ERR_NAME_NOT_RESOLVED, а человек
+  // видел лишь замерший интерфейс и не понимал, что связи нет.
+  const inFlight = useRef(false);
+  const loadJobs = async () => {
+    if (inFlight.current) return;          // предыдущий ответ ещё не пришёл
+    if (typeof navigator !== "undefined" && navigator.onLine === false) {
+      setOffline(true);
+      return;                              // сети нет — не плодим мёртвые запросы
+    }
+    inFlight.current = true;
+    try {
+      setJobs(await api.get("/api/jobs"));
+      setOffline(false);
+    } catch {
+      setOffline(true);
+    } finally {
+      inFlight.current = false;
+    }
+  };
   // Список для показа: либо все встречи, либо только выбранный в календаре день.
   const shownJobs = dayFilter
     ? jobs.filter((j: any) => dayKey((j.created_at || 0) * 1000) === dayFilter)
@@ -628,6 +652,15 @@ export default function Recognition() {
           </Card>
 
           <Card>
+            {offline && (
+              <div className="glass2 rounded-2xl p-3 mb-2.5 flex items-start gap-2.5 text-[12.5px]"
+                style={{ color: "var(--warn)", border: "1px solid rgba(217,119,6,.35)" }}>
+                <span className="min-w-0 flex-1">
+                  ⚠ Нет связи с сервером — список не обновляется. Работа на сервере
+                  при этом продолжается: как только связь вернётся, всё подтянется само.
+                </span>
+              </div>
+            )}
             <div className="flex items-center justify-between mb-2.5">
               <div className="font-bold text-[14px]">История</div>
               <button className="btn-ghost grid place-items-center"
