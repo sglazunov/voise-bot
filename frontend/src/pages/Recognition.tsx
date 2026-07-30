@@ -78,6 +78,13 @@ const dayKey = (ms: number) => {
   const d = new Date(ms);
   return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
 };
+/** «2026-6-29» → «29 июля» — чтобы на кнопке было видно, что фильтр включён. */
+const MONTHS_GEN = ["января", "февраля", "марта", "апреля", "мая", "июня",
+  "июля", "августа", "сентября", "октября", "ноября", "декабря"];
+const fmtDayLabel = (key: string) => {
+  const [, m, d] = key.split("-").map(Number);
+  return `${d} ${MONTHS_GEN[m] ?? ""}`.trim();
+};
 
 /** Календарь истории: месяц, год и день. Дни без встреч не кликаются. */
 function HistoryCalendar({ jobs, value, onPick }:
@@ -661,13 +668,20 @@ export default function Recognition() {
                 </span>
               </div>
             )}
-            <div className="flex items-center justify-between mb-2.5">
+            {/* Кнопка ПОДПИСАНА намеренно: первая версия была безымянной
+                иконкой 15 px рядом с жирным заголовком — функцию просто не
+                находили, «в истории только строка поиска». */}
+            <div className="flex items-center justify-between gap-2 mb-2.5">
               <div className="font-bold text-[14px]">История</div>
-              <button className="btn-ghost grid place-items-center"
-                title="Протоколы по дате"
-                style={{ width: 30, height: 30, borderRadius: 9,
-                  ...(showCal || dayFilter ? { borderColor: "var(--accent)", color: "var(--accent)" } : {}) }}
-                onClick={() => setShowCal((v) => !v)}><CalendarDays size={15} /></button>
+              <button className="btn btn-ghost flex-none"
+                title="Показать протоколы за выбранный день"
+                style={{ padding: "6px 12px",
+                  ...(showCal || dayFilter
+                    ? { borderColor: "var(--accent)", color: "var(--accent)" } : {}) }}
+                onClick={() => setShowCal((v) => !v)}>
+                <CalendarDays size={14} />
+                {dayFilter ? fmtDayLabel(dayFilter) : "По дате"}
+              </button>
             </div>
             {/* Д14: поиск по расшифровкам и протоколам всех встреч команды */}
             <div className="relative mb-2.5">
