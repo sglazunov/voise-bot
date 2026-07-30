@@ -61,6 +61,30 @@ def test_лучшие_модели_идут_первыми(monkeypatch):
     assert out.index("meta/llama-3.3-70b-instruct") < out.index("deepseek-ai/deepseek-r1")
 
 
+def test_свежая_версия_обгоняет_старую(monkeypatch):
+    """Каталог обновляется чаще этого файла: «deepseek-v4» должен обойти «v3»
+    сам, без правок кода. Раньше сравнение шло по полному имени, и новая версия
+    уезжала в конец списка как незнакомая — то есть лучшая модель оказывалась
+    худшей по порядку."""
+    _fake_catalog(monkeypatch, [
+        "deepseek-ai/deepseek-v3",
+        "deepseek-ai/deepseek-v4-flash",
+        "deepseek-ai/deepseek-v4-pro",
+    ])
+    out = llm.nvidia_models("nvapi-test")
+    assert out.index("deepseek-ai/deepseek-v4-pro") < out.index("deepseek-ai/deepseek-v3")
+    # Внутри одной версии полная модель важнее быстрой: для протокола решает
+    # качество. Без этого правила «flash» опережал «pro» просто по алфавиту.
+    assert out.index("deepseek-ai/deepseek-v4-pro") < out.index("deepseek-ai/deepseek-v4-flash")
+
+
+def test_облегчённые_модели_ниже_полноразмерных(monkeypatch):
+    _fake_catalog(monkeypatch, [
+        "meta/llama-3.1-8b-instruct", "meta/llama-3.3-70b-instruct"])
+    out = llm.nvidia_models("nvapi-test")
+    assert out[0] == "meta/llama-3.3-70b-instruct"
+
+
 def test_неизвестные_модели_не_теряются(monkeypatch):
     """Каталог пополняется — новое имя должно оставаться в списке, просто ниже."""
     _fake_catalog(monkeypatch, ["zzz/brand-new-model", "moonshotai/kimi-k2-instruct"])

@@ -237,16 +237,42 @@ class GroqProvider:
 # сильный русский, длинный контекст и послушность формату. Reasoning-модели
 # (deepseek-r1 и подобные) стоят ниже: они склонны «размышлять» в ответе, а нам
 # нужен чистый JSON.
-_NVIDIA_RANK = (
-    ("moonshotai/kimi", 0),          # Kimi K2 — длинный контекст, сильный русский
-    ("deepseek-ai/deepseek-v3", 1),
-    ("qwen/qwen3", 2),
-    ("qwen/qwen2.5-72b", 2),
-    ("meta/llama-3.3-70b", 3),
-    ("nvidia/llama-3.3-nemotron-super", 3),
-    ("mistralai/mistral-large", 4),
-    ("deepseek-ai/deepseek-r1", 6),  # reasoning — ниже: мешает строгому JSON
+# Семейства моделей: чем меньше число, тем выше в списке. Сравнение по
+# ПОДСТРОКЕ, а не по полному имени — иначе новая версия («deepseek-v4-flash»
+# против прописанного «deepseek-v3») выпадала бы в конец как незнакомая, то есть
+# самая свежая модель оказывалась бы худшей по порядку.
+_NVIDIA_FAMILY = (
+    ("kimi", 0),          # Kimi K2 — длинный контекст, сильный русский
+    ("deepseek", 1),
+    ("qwen", 2),
+    ("nemotron", 3),
+    ("llama", 3),
+    ("mistral", 4),
+    ("gemma", 5),
+    ("phi", 6),
 )
+# Reasoning-модели: «размышляют» в ответе, что мешает строгому JSON протокола.
+_NVIDIA_REASONING = ("-r1", "/r1", "reason", "thinking")
+# Мелкие/облегчённые варианты — на час русской речи заметно слабее.
+_NVIDIA_SMALL = ("8b", "7b", "4b", "3b", "1.5b", "mini", "-lite", "small")
+# Быстрые варианты той же версии («flash», «turbo») слабее полных («pro»,
+# «max»). Для протокола важнее качество, поэтому внутри одной версии полная
+# идёт первой: без этого «deepseek-v4-flash» опережал «deepseek-v4-pro» просто
+# потому, что «f» раньше «p» по алфавиту.
+_NVIDIA_FAST = ("flash", "turbo", "instant")
+_NVIDIA_FULL = ("pro", "max", "-large", "ultra")
+
+
+def _nvidia_version(model_id: str) -> float:
+    """Номер версии из имени модели: «v4» → 4, «3.3» → 3.3, иначе 0.
+
+    Нужен, чтобы новая версия семейства шла впереди старой без правок кода:
+    каталог обновляется чаще, чем этот файл."""
+    m = re.search(r"[-/]v(\d+(?:\.\d+)?)", model_id)
+    if m:
+        return float(m.group(1))
+    m = re.search(r"(\d+\.\d+)", model_id)
+    return float(m.group(1)) if m else 0.0
 
 
 def nvidia_models(api_key: str | None = None) -> list[str]:
@@ -270,10 +296,17 @@ def nvidia_models(api_key: str | None = None) -> list[str]:
 
     def rank(mid: str) -> tuple:
         low = mid.lower()
-        for prefix, r in _NVIDIA_RANK:
-            if low.startswith(prefix):
-                return (r, low)
-        return (9, low)          # всё остальное — после известных, по алфавиту
+        base = next((r for name, r in _NVIDIA_FAMILY if name in low), 8)
+        if any(t in low for t in _NVIDIA_REASONING):
+            base += 5            # reasoning — ниже обычных моделей семейства
+        if any(t in low for t in _NVIDIA_SMALL):
+            base += 2            # облегчённые — после полноразмерных
+        # Внутри семейства: сначала свежая версия, потом полная перед быстрой.
+        # Минус у версии — потому что сортируем по возрастанию, значит
+        # «deepseek-v4-flash» обгонит «deepseek-v3».
+        variant = 0 if any(t in low for t in _NVIDIA_FULL) else \
+                  2 if any(t in low for t in _NVIDIA_FAST) else 1
+        return (base, -_nvidia_version(low), variant, low)
 
     return sorted(ids, key=rank)
 
