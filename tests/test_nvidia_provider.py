@@ -50,15 +50,29 @@ def test_лучшие_модели_идут_первыми(monkeypatch):
     _fake_catalog(monkeypatch, [
         "meta/llama-3.1-8b-instruct",
         "deepseek-ai/deepseek-r1",
-        "moonshotai/kimi-k2-instruct",
+        "moonshotai/kimi-k2.6",
         "deepseek-ai/deepseek-v3",
         "meta/llama-3.3-70b-instruct",
     ])
     out = llm.nvidia_models("nvapi-test")
-    assert out[0].startswith("moonshotai/kimi")
+    # Впереди — длинноконтекстные DeepSeek и Kimi, а не Llama.
+    assert out[0].startswith(("deepseek-ai/deepseek-v", "moonshotai/kimi"))
+    assert out.index("moonshotai/kimi-k2.6") < out.index("meta/llama-3.3-70b-instruct")
     # Reasoning-модель не должна опережать обычные — она мешает строгому JSON.
     assert out.index("deepseek-ai/deepseek-v3") < out.index("deepseek-ai/deepseek-r1")
     assert out.index("meta/llama-3.3-70b-instruct") < out.index("deepseek-ai/deepseek-r1")
+
+
+def test_версии_разных_семейств_не_сравниваются(monkeypatch):
+    """«deepseek-v3» и «kimi-k2.6» — числа из разных вселенных. Если сравнивать
+    их напрямую, порядок внутри одинакового приоритета становится случайным."""
+    _fake_catalog(monkeypatch, ["moonshotai/kimi-k2.6", "deepseek-ai/deepseek-v3",
+                                "deepseek-ai/deepseek-v4-pro"])
+    out = llm.nvidia_models("nvapi-test")
+    # Внутри DeepSeek версия решает…
+    assert out.index("deepseek-ai/deepseek-v4-pro") < out.index("deepseek-ai/deepseek-v3")
+    # …а Kimi стоит цельным блоком, а не втискивается между версиями DeepSeek.
+    assert out.index("moonshotai/kimi-k2.6") > out.index("deepseek-ai/deepseek-v3")
 
 
 def test_свежая_версия_обгоняет_старую(monkeypatch):
@@ -91,6 +105,43 @@ def test_неизвестные_модели_не_теряются(monkeypatch):
     out = llm.nvidia_models("nvapi-test")
     assert "zzz/brand-new-model" in out
     assert out[0].startswith("moonshotai/kimi")
+
+
+class TestРеальныйКаталог:
+    """Дословные имена из каталога NVIDIA (скриншоты пользователя)."""
+
+    CHAT = ["moonshotai/kimi-k2.6", "deepseek-ai/deepseek-v4-pro",
+            "qwen/qwen3-next-80b-a3b-instruct", "zai/glm-5.2",
+            "nvidia/nemotron-3-ultra-550b-a55b", "meta/llama-3.3-70b-instruct"]
+    NOT_CHAT = ["nvidia/nv-embed-v1", "nvidia/magpie-tts-zeroshot",
+                "nvidia/cosmos3-nano", "meta/esm2-650m",
+                "meta/llama-guard-4-12b", "nvidia/bevformer",
+                "nvidia/nemotron-nano-12b-v2-vl", "google/paligemma",
+                "nvidia/riva-translate-4b-instruct-v2"]
+
+    def test_не_чат_модели_не_предлагаются(self, monkeypatch):
+        """Каталог — это не только LLM: эмбеддинги, синтез речи, зрение,
+        автопилот, даже белки. Выбрав такую, человек получил бы непонятную
+        ошибку уже ПОСЛЕ встречи."""
+        _fake_catalog(monkeypatch, self.CHAT + self.NOT_CHAT)
+        out = llm.nvidia_models("nvapi-test")
+        assert set(out) == set(self.CHAT), f"лишние/потерянные: {set(out) ^ set(self.CHAT)}"
+
+    def test_moe_имена_не_считаются_мелкими(self, monkeypatch):
+        """«80b-a3b» — 80 млрд всего, 3 млрд активных. Сила по первому числу;
+        раньше «a3b» принималось за 3B-модель, и qwen3-next уезжал в конец."""
+        _fake_catalog(monkeypatch, ["qwen/qwen3-next-80b-a3b-instruct",
+                                    "meta/llama-3.1-8b-instruct"])
+        out = llm.nvidia_models("nvapi-test")
+        assert out[0] == "qwen/qwen3-next-80b-a3b-instruct"
+
+    def test_длинный_контекст_впереди(self, monkeypatch):
+        """DeepSeek V4 (1M токенов) и Kimi K2.6 (262K) — на них час встречи
+        влезает целиком, без разбиения на части, где мы теряем детали."""
+        _fake_catalog(monkeypatch, self.CHAT)
+        out = llm.nvidia_models("nvapi-test")
+        assert out[0] == "deepseek-ai/deepseek-v4-pro"
+        assert out.index("moonshotai/kimi-k2.6") < out.index("meta/llama-3.3-70b-instruct")
 
 
 def test_без_ключа_не_ходим_в_сеть(monkeypatch):

@@ -242,14 +242,36 @@ class GroqProvider:
 # против прописанного «deepseek-v3») выпадала бы в конец как незнакомая, то есть
 # самая свежая модель оказывалась бы худшей по порядку.
 _NVIDIA_FAMILY = (
-    ("kimi", 0),          # Kimi K2 — длинный контекст, сильный русский
-    ("deepseek", 1),
+    ("deepseek", 0),      # V4: окно 1M токенов — час встречи влезает целиком
+    ("kimi", 0),          # K2.6: 262K, structured output, сильный русский
+    ("nemotron-3-ultra", 1),
+    ("nemotron-3-super", 2),
     ("qwen", 2),
-    ("nemotron", 3),
-    ("llama", 3),
+    ("glm", 2),
+    ("minimax", 3),
+    ("step-", 3),
+    ("gpt-oss", 3),
+    ("nemotron", 4),
+    ("llama", 4),
     ("mistral", 4),
     ("gemma", 5),
+    ("sarvam", 6),
     ("phi", 6),
+)
+
+# В каталоге NVIDIA не только чат-модели: эмбеддинги, синтез речи, зрение,
+# автопилот, модерация, даже белки (esm2). В списке движков протокола им делать
+# нечего — иначе человек выбирает «magpie-tts» и получает непонятную ошибку уже
+# после встречи. Отсекаем по назначению, а не по вендору.
+_NVIDIA_NOT_CHAT = (
+    "embed", "esm2",                                  # эмбеддинги, биология
+    "tts", "voicechat", "studio-voice", "parakeet",    # речь
+    "riva",                                           # перевод/ASR-сервисы
+    "guard", "content-safety",                         # модерация
+    "cosmos", "paligemma", "bevformer", "sparsedrive", "streampetr",
+    "synthetic-video-detector", "ising-calibration",   # зрение, видео, автопилот
+    "-vl", "vision",                                   # только картинки
+    "rerank", "retriever",
 )
 # Reasoning-модели: «размышляют» в ответе, что мешает строгому JSON протокола.
 _NVIDIA_REASONING = ("-r1", "/r1", "reason", "thinking")
@@ -293,20 +315,31 @@ def nvidia_models(api_key: str | None = None) -> list[str]:
     except Exception:      # noqa: BLE001 — нет сети/ключ отклонён: просто пусто
         return []
     ids = [str(m.get("id")) for m in (data.get("data") or []) if m.get("id")]
+    # Оставляем только то, что может собрать протокол: см. _NVIDIA_NOT_CHAT.
+    ids = [i for i in ids
+           if not any(t in i.lower() for t in _NVIDIA_NOT_CHAT)]
 
     def rank(mid: str) -> tuple:
         low = mid.lower()
-        base = next((r for name, r in _NVIDIA_FAMILY if name in low), 8)
+        fam_i, base = next(((i, r) for i, (name, r) in enumerate(_NVIDIA_FAMILY)
+                            if name in low), (99, 8))
         if any(t in low for t in _NVIDIA_REASONING):
             base += 5            # reasoning — ниже обычных моделей семейства
-        if any(t in low for t in _NVIDIA_SMALL):
+        # У MoE в имени два числа: всего параметров и активных («80b-a3b» — 80
+        # млрд всего, 3 млрд активных). Сила модели — по ПЕРВОМУ, поэтому
+        # суффикс активных вырезаем: иначе qwen3-next-80b-a3b считался мелкой
+        # моделью из-за «a3b» и уезжал в конец списка.
+        sized = re.sub(r"-a\d+(?:\.\d+)?b", "", low)
+        if any(t in sized for t in _NVIDIA_SMALL):
             base += 2            # облегчённые — после полноразмерных
-        # Внутри семейства: сначала свежая версия, потом полная перед быстрой.
-        # Минус у версии — потому что сортируем по возрастанию, значит
-        # «deepseek-v4-flash» обгонит «deepseek-v3».
+        # Семейство идёт в ключе ПЕРЕД версией: номера версий разных семейств
+        # несравнимы («deepseek v3» против «kimi k2.6» — ни о чём), поэтому
+        # версия решает только внутри одного семейства.
+        # Дальше: свежая версия впереди (минус — сортировка по возрастанию),
+        # затем полная модель перед быстрой.
         variant = 0 if any(t in low for t in _NVIDIA_FULL) else \
                   2 if any(t in low for t in _NVIDIA_FAST) else 1
-        return (base, -_nvidia_version(low), variant, low)
+        return (base, fam_i, -_nvidia_version(low), variant, low)
 
     return sorted(ids, key=rank)
 

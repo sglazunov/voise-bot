@@ -88,7 +88,10 @@ GROQ_MODEL = os.getenv("VTX_GROQ_MODEL", "llama-3.3-70b-versatile")
 # Ограничение: ~40 запросов в минуту на ключ и на все модели сразу — на длинной
 # встрече map-reduce может упереться, тогда помогает второй ключ (ротация).
 NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "")
-NVIDIA_MODEL = os.getenv("VTX_NVIDIA_MODEL", "moonshotai/kimi-k2-instruct")
+# Умолчание — только на случай, когда каталог недоступен: список моделей всё
+# равно приходит по ключу, и выбирают из него. Идентификатор взят из каталога
+# дословно (не «kimi-k2-instruct», которого там нет).
+NVIDIA_MODEL = os.getenv("VTX_NVIDIA_MODEL", "moonshotai/kimi-k2.6")
 
 # --- Google Gemini (free tier; key at https://aistudio.google.com/apikey) ---
 # Pin a CONCRETE model (not the gemini-flash-latest alias) so behaviour and free
