@@ -229,6 +229,97 @@ class GroqProvider:
 
 
 # ---------------------------------------------------------------------------
+# Каталог NVIDIA большой (100+ моделей) и меняется, поэтому жёстко его не
+# перечисляем: список берём по ключу через /v1/models, а этой таблицей лишь
+# ранжируем — что показывать первым. Чем меньше число, тем выше в списке.
+#
+# Приоритет под нашу задачу (час русской речи → строгий JSON-протокол): нужны
+# сильный русский, длинный контекст и послушность формату. Reasoning-модели
+# (deepseek-r1 и подобные) стоят ниже: они склонны «размышлять» в ответе, а нам
+# нужен чистый JSON.
+_NVIDIA_RANK = (
+    ("moonshotai/kimi", 0),          # Kimi K2 — длинный контекст, сильный русский
+    ("deepseek-ai/deepseek-v3", 1),
+    ("qwen/qwen3", 2),
+    ("qwen/qwen2.5-72b", 2),
+    ("meta/llama-3.3-70b", 3),
+    ("nvidia/llama-3.3-nemotron-super", 3),
+    ("mistralai/mistral-large", 4),
+    ("deepseek-ai/deepseek-r1", 6),  # reasoning — ниже: мешает строгому JSON
+)
+
+
+def nvidia_models(api_key: str | None = None) -> list[str]:
+    """Модели, доступные КОНКРЕТНОМУ ключу (GET /v1/models), лучшие — первыми.
+
+    Список приходит с сервера, а не из кода: каталог NVIDIA обновляется, и
+    захардкоженные идентификаторы устарели бы молча — «модель не найдена» в
+    момент сборки протокола."""
+    key = api_key or config.NVIDIA_API_KEY
+    if not key:
+        return []
+    try:
+        req = urllib.request.Request(
+            "https://integrate.api.nvidia.com/v1/models",
+            headers={"Authorization": f"Bearer {key}"})
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception:      # noqa: BLE001 — нет сети/ключ отклонён: просто пусто
+        return []
+    ids = [str(m.get("id")) for m in (data.get("data") or []) if m.get("id")]
+
+    def rank(mid: str) -> tuple:
+        low = mid.lower()
+        for prefix, r in _NVIDIA_RANK:
+            if low.startswith(prefix):
+                return (r, low)
+        return (9, low)          # всё остальное — после известных, по алфавиту
+
+    return sorted(ids, key=rank)
+
+
+class NvidiaProvider:
+    """NVIDIA NIM (build.nvidia.com) — OpenAI-совместимый, ключ `nvapi-…`.
+
+    Бесплатный, без карты. Важное ограничение: лимит ~40 запросов в минуту на
+    ключ И НА ВСЕ МОДЕЛИ СРАЗУ. Наш map-reduce на длинной встрече делает
+    десятки запросов, поэтому на больших записях он может упереться в лимит —
+    ротация ключей (_RotatingProvider) здесь особенно к месту.
+    """
+
+    name = "nvidia"
+
+    def __init__(self, model: str | None = None, api_key: str | None = None,
+                 extra: str | None = None) -> None:
+        self.model = model or config.NVIDIA_MODEL
+        self.api_key = api_key or config.NVIDIA_API_KEY
+
+    def complete(self, prompt: str, max_tokens: int = 2000, force_json: bool = True) -> str:
+        url = "https://integrate.api.nvidia.com/v1/chat/completions"
+        payload = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": max_tokens,
+            "temperature": 0.1,
+        }
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+        if force_json:
+            payload["response_format"] = {"type": "json_object"}
+            try:
+                out = _http_post_json(url, payload, headers, timeout=180)
+                return out["choices"][0]["message"]["content"].strip()
+            except Exception as e:      # noqa: BLE001
+                # В каталоге сотня моделей, и не каждая понимает
+                # response_format. Не теряем запрос из-за этого: повторяем без
+                # него — JSON всё равно валидируется на нашей стороне.
+                if "response_format" not in str(e).lower():
+                    raise
+                payload.pop("response_format", None)
+        out = _http_post_json(url, payload, headers, timeout=180)
+        return out["choices"][0]["message"]["content"].strip()
+
+
+# ---------------------------------------------------------------------------
 class AnthropicProvider:
     """Anthropic Claude. Paid per token, highest quality."""
 
@@ -384,6 +475,7 @@ class GigaChatProvider:
 _PROVIDERS = {
     "ollama": OllamaProvider,
     "groq": GroqProvider,
+    "nvidia": NvidiaProvider,
     "gemini": GeminiProvider,
     "yandex": YandexProvider,
     "gigachat": GigaChatProvider,

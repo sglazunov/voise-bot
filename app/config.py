@@ -81,6 +81,15 @@ ANALYSIS_MODEL = os.getenv("VTX_ANALYSIS_MODEL", "claude-sonnet-4-6")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 GROQ_MODEL = os.getenv("VTX_GROQ_MODEL", "llama-3.3-70b-versatile")
 
+# --- NVIDIA NIM (build.nvidia.com) — бесплатно, без карты ---------------------
+# OpenAI-совместимый API, ключ вида `nvapi-…` с build.nvidia.com/settings/api-keys.
+# Каталог — сотня открытых моделей (Kimi, DeepSeek, Qwen, Llama, Nemotron…),
+# поэтому список моделей НЕ хардкодим: он запрашивается по ключу (llm.nvidia_models).
+# Ограничение: ~40 запросов в минуту на ключ и на все модели сразу — на длинной
+# встрече map-reduce может упереться, тогда помогает второй ключ (ротация).
+NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "")
+NVIDIA_MODEL = os.getenv("VTX_NVIDIA_MODEL", "moonshotai/kimi-k2-instruct")
+
 # --- Google Gemini (free tier; key at https://aistudio.google.com/apikey) ---
 # Pin a CONCRETE model (not the gemini-flash-latest alias) so behaviour and free
 # limits don't silently change when Google re-points the alias — that surprise is
@@ -111,6 +120,7 @@ OLLAMA_ENABLED = os.getenv("VTX_OLLAMA", "1") == "1"
 PROVIDER_LABELS = {
     "ollama": "Локально · Ollama (бесплатно, оффлайн)",
     "groq": "Groq · Llama (бесплатно, облако)",
+    "nvidia": "NVIDIA NIM · Kimi/DeepSeek/Qwen (бесплатно, ~40 запросов/мин)",
     "gemini": "Google Gemini (по ключу)",
     "yandex": "YandexGPT (ключ + folder id)",
     "gigachat": "GigaChat / Sber (по ключу)",
@@ -121,7 +131,7 @@ PROVIDER_LABELS = {
 # CPU-сервере облачный протокол готов за минуты, локальный — за десятки минут
 # (Ollama остаётся последним резервом цепочки на случай недоступности облаков).
 # Переопределяется через VTX_PROVIDER_ORDER="ollama,groq,…".
-_default_order = "groq,gemini,yandex,gigachat,anthropic,ollama"
+_default_order = "groq,nvidia,gemini,yandex,gigachat,anthropic,ollama"
 PROVIDER_ORDER = [p.strip() for p in
                   os.getenv("VTX_PROVIDER_ORDER", _default_order).split(",")
                   if p.strip()]
@@ -158,7 +168,7 @@ PROVIDER_MODELS = {
 }
 
 # Providers configurable from the UI by an API key (+ optional extra field).
-KEY_PROVIDERS = {"anthropic", "groq", "gemini", "yandex", "gigachat"}
+KEY_PROVIDERS = {"anthropic", "groq", "nvidia", "gemini", "yandex", "gigachat"}
 
 # Per-minute token budget (TPM) of a provider's free tier, counted per REQUEST as
 # input + the REQUESTED max_tokens. Asking for a big answer can therefore fail on
@@ -179,6 +189,7 @@ def provider_creds(provider: str, user_keys: dict | None = None) -> list[tuple[s
     env = {
         "anthropic": (ANTHROPIC_API_KEY, ""),
         "groq": (GROQ_API_KEY, ""),
+        "nvidia": (NVIDIA_API_KEY, ""),
         "gemini": (GEMINI_API_KEY, ""),
         "yandex": (YANDEX_API_KEY, YANDEX_FOLDER_ID),
         "gigachat": (GIGACHAT_AUTH_KEY, GIGACHAT_SCOPE),
@@ -201,7 +212,7 @@ def available_providers(user_keys: dict | None = None) -> list[str]:
     out = []
     if OLLAMA_ENABLED:
         out.append("ollama")
-    for p in ("groq", "gemini", "yandex", "gigachat", "anthropic"):
+    for p in ("groq", "nvidia", "gemini", "yandex", "gigachat", "anthropic"):
         if _has_provider_key(p, user_keys):
             out.append(p)
     return [p for p in PROVIDER_ORDER if p in out]
@@ -219,12 +230,14 @@ def set_provider_key(provider: str, key: str, extra: str = "") -> None:
 
     `extra` carries the provider's second credential where needed:
     YandexGPT → folder id; GigaChat → scope (optional)."""
-    global ANTHROPIC_API_KEY, GROQ_API_KEY, GEMINI_API_KEY
+    global ANTHROPIC_API_KEY, GROQ_API_KEY, NVIDIA_API_KEY, GEMINI_API_KEY
     global YANDEX_API_KEY, YANDEX_FOLDER_ID, GIGACHAT_AUTH_KEY, GIGACHAT_SCOPE
     if provider == "anthropic":
         ANTHROPIC_API_KEY = key
     elif provider == "groq":
         GROQ_API_KEY = key
+    elif provider == "nvidia":
+        NVIDIA_API_KEY = key
     elif provider == "gemini":
         GEMINI_API_KEY = key
     elif provider == "yandex":

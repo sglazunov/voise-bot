@@ -68,6 +68,25 @@ def _engine_list(user_keys: dict | None = None) -> list[dict]:
     for p in avail:
         if p == "ollama":
             continue
+        if p == "nvidia":
+            # Каталог NVIDIA — сотня моделей и он меняется, поэтому список
+            # берётся ПО КЛЮЧУ с сервера, а не из кода: захардкоженные
+            # идентификаторы устарели бы молча. Лучшие под нашу задачу
+            # (Kimi, DeepSeek, Qwen) llm.nvidia_models ставит первыми.
+            key = ""
+            for cred in (user_keys or {}).get("nvidia") or []:
+                key = cred.get("key") or ""
+                if key:
+                    break
+            models = llm.nvidia_models(key or None)
+            if models:
+                for m in models:
+                    engines.append({"value": f"nvidia:{m}",
+                                    "label": f"NVIDIA · {m}"})
+            else:
+                engines.append({"value": "nvidia",
+                                "label": f"NVIDIA · {config.NVIDIA_MODEL} (по умолчанию)"})
+            continue
         tiers = config.PROVIDER_MODELS.get(p)
         if tiers:
             # One entry per model tier so the user picks how powerful it is.
