@@ -386,18 +386,30 @@ def scan_participants(video_path: str, every_sec: float = 60.0,
 
 
 def _merge_short_names(names: List[str]) -> List[str]:
-    """Схлопнуть «Павел» и «Шавлак Павел» в одного человека.
+    """Схлопнуть варианты подписи одного человека в одну запись.
 
-    Телемост показывает подпись по-разному в зависимости от ширины плитки, и в
-    протокол попадали оба варианта как два участника. Если однословное имя
-    целиком входит в многословное — оставляем длинное: оно информативнее.
+    Телемост показывает подпись по-разному, и в протокол попадали дубли:
+      * «Павел» и «Шавлак Павел» — ширина плитки решает, влезет ли фамилия;
+      * «Сергей Beck» и «Сергей Беск» — одно и то же имя двумя алфавитами.
+    В первом случае оставляем более полный вариант, во втором — сравниваем в
+    транслитерации, потому что посимвольно эти строки не совпадают вообще.
     """
+    from . import names as names_mod
+
     out: List[str] = []
     for n in sorted(names, key=lambda s: -len(s.split())):
         words = {w.lower().strip(".") for w in n.split()}
-        if any(words <= {w.lower().strip(".") for w in kept.split()} for kept in out):
-            continue          # уже есть более полный вариант этого имени
-        out.append(n)
+        dup = False
+        for kept in out:
+            if words <= {w.lower().strip(".") for w in kept.split()}:
+                dup = True        # уже есть более полный вариант этого имени
+                break
+            a, b = names_mod.translit_key(n), names_mod.translit_key(kept)
+            if a and b and difflib.SequenceMatcher(None, a, b).ratio() >= 0.85:
+                dup = True        # то же имя, записанное другим алфавитом
+                break
+        if not dup:
+            out.append(n)
     # Возвращаем в исходном порядке — он отражает порядок появления на встрече.
     return [n for n in names if n in out]
 

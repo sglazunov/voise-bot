@@ -90,7 +90,13 @@ export default function Meetings() {
   const [protoUrl, setProtoUrl] = useState("");
   const [sending, setSending] = useState(false);
   function openLinks(m: Meeting) {
-    setLinksFor(m); setVideoUrl(m.cloud_url || ""); setProtoUrl("");
+    // Подставляем то, что приложение уже знает. Раньше поле протокола было
+    // всегда пустым, и если записи в облаке тоже не оказалось, кнопка
+    // «Прикрепить» оставалась заблокированной — со стороны это выглядело как
+    // «нажал, и ничего не произошло».
+    setLinksFor(m);
+    setVideoUrl(m.cloud_url || "");
+    setProtoUrl((m as any).protocol_url || "");
   }
   async function sendLinks() {
     if (!linksFor || sending) return;
@@ -236,6 +242,13 @@ export default function Meetings() {
         <label className="lbl">Ссылка на протокол</label>
         <input className="field mb-4" placeholder="https://…" value={protoUrl}
           onChange={(e) => setProtoUrl(e.target.value)} />
+        {!(videoUrl.trim() || protoUrl.trim()) && (
+          <div className="text-[12px] mb-3" style={{ color: "var(--warn)" }}>
+            ⚠ Прикреплять пока нечего: ни запись, ни протокол не выгружены в облако.
+            Вставьте ссылку вручную — или сначала выгрузите файлы, тогда поля
+            заполнятся сами.
+          </div>
+        )}
         <div className="flex gap-2 justify-end">
           <button className="btn btn-ghost" onClick={() => setLinksFor(null)}>Отмена</button>
           <button className="btn btn-primary" onClick={sendLinks}

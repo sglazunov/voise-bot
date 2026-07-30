@@ -722,6 +722,11 @@ class Scheduler:
         job = store.get(jid)
         if job is None:
             return
+        # Ссылка на протокол в облаке — чтобы окно «Прикрепить» подставляло её
+        # само. Раньше поле оставалось пустым, кнопка была заблокирована, и это
+        # выглядело как «нажал — ничего не произошло».
+        if getattr(job, "protocol_cloud_url", None):
+            m["protocol_url"] = job.protocol_cloud_url
         where = ("в облаке" if m.get("cloud_url") else
                  "⚠ пока локально — выгружаю в облако повторно"
                  if m.get("upload_error") else "локально")
