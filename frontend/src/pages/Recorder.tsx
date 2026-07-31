@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Bot, Play, MessageSquareOff, Users, Timer } from "lucide-react";
 import { Page } from "../components/Layout";
 import { Card, Switch, useToast } from "../components/ui";
@@ -15,6 +16,8 @@ function Num({ label, k, s, set, hint }: any) {
 export default function Recorder() {
   const { s, set, save } = useSettings();
   const toast = useToast();
+  const [logs, setLogs] = useState<string[] | null>(null);
+  const [testing, setTesting] = useState(false);
 
   async function onSave() {
     try {
@@ -28,16 +31,27 @@ export default function Recorder() {
       toast("Настройки бота сохранены");
     } catch (e: any) { toast(e.message, true); }
   }
+  // Кнопка звала /recorder/test-join — такого маршрута нет, тест всегда падал
+  // с 404. Настоящий эндпоинт синхронный: он пишет несколько секунд и отдаёт
+  // подробный лог захода. Лог показываем — ради него тест и запускают.
   async function testJoin() {
     const url = prompt("Ссылка на Телемост для теста подключения:");
     if (!url) return;
-    try { const r = await api.post("/api/automation/recorder/test-join", { url }); toast(r.detail || "Тест запущен"); }
-    catch (e: any) { toast(e.message, true); }
+    setTesting(true); setLogs(null);
+    try {
+      // 60 с — чтобы успеть написать в чат стоп-слово и увидеть в логе,
+      // разглядел ли его бот.
+      const r = await api.post("/api/automation/recorder/test", { url, seconds: 60 });
+      setLogs(r.logs?.length ? r.logs : ["Лог пуст — бот не дошёл до записи."]);
+      toast(r.ok ? "Тест завершён" : (r.error || "Тест не удался"), !r.ok);
+    } catch (e: any) { toast(e.message, true); }
+    finally { setTesting(false); }
   }
 
   return (
     <Page title="Бот-рекордер" subtitle="Как бот подключается к встрече и когда её покидает"
-      actions={<button className="btn btn-ghost" onClick={testJoin}><Play size={15} /> Тест подключения</button>}>
+      actions={<button className="btn btn-ghost" onClick={testJoin} disabled={testing}>
+        <Play size={15} /> {testing ? "Идёт тест…" : "Тест подключения"}</button>}>
       <div className="grid lg:grid-cols-2 gap-3.5">
         <Card>
           <div className="flex items-center gap-3 mb-3">
@@ -90,6 +104,17 @@ export default function Recorder() {
           <input className="field" value={s.ffmpeg_path || ""} onChange={(e) => set("ffmpeg_path", e.target.value)} placeholder="/usr/bin/ffmpeg" />
         </Card>
       </div>
+      {logs && (
+        <Card className="mt-3.5">
+          <div className="font-bold text-[15px] mb-2">Лог теста</div>
+          <div className="text-[11.5px] mb-2" style={{ color: "var(--muted)" }}>
+            Строки со словом «Чат» показывают, открыл ли бот панель чата и сколько
+            стоп-слов он в ней видит.
+          </div>
+          <pre className="glass2 rounded-2xl p-3 text-[11.5px] whitespace-pre-wrap"
+            style={{ maxHeight: 320, overflow: "auto" }}>{logs.join("\n")}</pre>
+        </Card>
+      )}
       <div className="mt-3.5"><button className="btn btn-primary" onClick={onSave}>Сохранить настройки бота</button></div>
     </Page>
   );
