@@ -39,6 +39,14 @@ def test_провайдер_зарегистрирован():
     assert "nvidia" in llm._PROVIDERS
 
 
+def test_счётчик_ключей_знает_всех_провайдеров():
+    """У user_creds был СВОЙ список провайдеров, и он разошёлся с config: без
+    «nvidia» counts() возвращал 0, и карточка показывала «0 ключа» при рабочем
+    подключённом ключе. Списку положено быть одним."""
+    from app import user_creds
+    assert set(user_creds.KEY_PROVIDERS) == set(config.KEY_PROVIDERS)
+
+
 def test_модель_выбирается_из_названия_движка(monkeypatch):
     monkeypatch.setattr(config, "NVIDIA_API_KEY", "nvapi-test")
     p = llm.get_provider("nvidia:deepseek-ai/deepseek-v3")

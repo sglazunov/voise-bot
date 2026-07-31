@@ -15,10 +15,13 @@ import json
 import os
 from pathlib import Path
 
-from . import db, security
+from . import config, db, security
 
-# Providers that authenticate with an API key (Ollama is keyless).
-KEY_PROVIDERS = ("anthropic", "groq", "gemini", "yandex", "gigachat")
+# Providers that authenticate with an API key (Ollama is keyless). Берём из
+# config, а НЕ дублируем списком: своя копия уже разошлась — в ней не было
+# «nvidia», и counts() возвращал 0 ключей для подключённого провайдера
+# («0 ключа» на карточке при рабочем ключе).
+KEY_PROVIDERS = tuple(sorted(config.KEY_PROVIDERS))
 
 
 def _path(user: str) -> Path:
