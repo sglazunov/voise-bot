@@ -91,7 +91,12 @@ NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "")
 # Умолчание — только на случай, когда каталог недоступен: список моделей всё
 # равно приходит по ключу, и выбирают из него. Идентификатор взят из каталога
 # дословно (не «kimi-k2-instruct», которого там нет).
-NVIDIA_MODEL = os.getenv("VTX_NVIDIA_MODEL", "moonshotai/kimi-k2.6")
+# ВАЖНО: /v1/models перечисляет ВЕСЬ опубликованный каталог, а не то, что вправе
+# вызывать конкретный аккаунт. Недоступная модель отвечает 404 «Function …: Not
+# found for account …» — на боевом ключе так вела себя kimi-k2.6. Поэтому
+# умолчанием стоит первая по нашему же ранжированию: 1M контекста, то есть час
+# встречи влезает целиком.
+NVIDIA_MODEL = os.getenv("VTX_NVIDIA_MODEL", "deepseek-ai/deepseek-v4-pro")
 
 # --- Google Gemini (free tier; key at https://aistudio.google.com/apikey) ---
 # Pin a CONCRETE model (not the gemini-flash-latest alias) so behaviour and free

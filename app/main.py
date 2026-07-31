@@ -594,6 +594,33 @@ def list_providers(user: str = Depends(current_user)):
     }
 
 
+_PROBE_MODELS = 4      # столько верхних моделей пробуем, чтобы не ждать минуту
+
+
+def _first_working_model(provider: str, trial: dict, key: str) -> str | None:
+    """Первая модель провайдера, которая реально отвечает по этому ключу.
+
+    Нужна там, где каталог моделей и права аккаунта расходятся (NVIDIA NIM):
+    модель числится опубликованной, а вызов возвращает 404 «Not found for
+    account». Пробуем только верхушку ранжированного списка — это несколько
+    запросов, и лишь на пути, где подключение и так уже дало ошибку.
+    """
+    if provider != "nvidia":
+        return None
+    try:
+        models = llm.nvidia_models(key)
+    except Exception:  # noqa: BLE001 — подсказка не обязана работать
+        return None
+    for mid in models[:_PROBE_MODELS]:
+        try:
+            llm.get_provider(f"{provider}:{mid}", trial).complete(
+                "Ответь одним словом: ok", max_tokens=5, force_json=False)
+            return mid
+        except Exception:  # noqa: BLE001
+            continue
+    return None
+
+
 @app.post("/api/providers/connect")
 def connect_provider(body: ProviderKey, user: str = Depends(current_user)):
     """Save an LLM API key IN THIS USER'S ACCOUNT (encrypted) and verify it.
@@ -634,12 +661,22 @@ def connect_provider(body: ProviderKey, user: str = Depends(current_user)):
                 or "not available" in es or "not_found" in es:
             # Текст был написан под Gemini и дословно предлагал «выберите
             # другую модель Gemini» — какой бы провайдер ни подключали.
-            # Ответ сервиса показываем целиком: без него непонятно, модель
-            # просто не включена в аккаунте или названа иначе.
-            note = ("Ключ принят, но модель по умолчанию недоступна для этого "
-                    "аккаунта. Откройте «Движок протокола» и выберите другую "
-                    "модель — в списке показаны доступные именно по вашему "
-                    f"ключу. Ответ сервиса: {e}")
+            #
+            # У NVIDIA этого мало: каталог /v1/models перечисляет ВЕСЬ
+            # опубликованный список, а не то, что доступно аккаунту, поэтому
+            # «выберите другую из списка» — совет наугад. Пробуем несколько
+            # верхних по нашему ранжированию и называем ту, что реально
+            # ответила.
+            alt = _first_working_model(provider, trial, key)
+            if alt:
+                note = (f"Ключ принят. Модель по умолчанию вашему аккаунту не "
+                        f"выдана, но работает «{alt}» — выберите её в «Движке "
+                        f"протокола».")
+            else:
+                note = ("Ключ принят, но модель по умолчанию недоступна для "
+                        "этого аккаунта. Откройте «Движок протокола» и выберите "
+                        "другую модель — в списке показаны опубликованные "
+                        f"модели, но доступны не все. Ответ сервиса: {e}")
         else:
             raise HTTPException(400, f"Не удалось подключиться: {e}")
     # Append to the provider's key POOL (several keys rotate on rate limits).

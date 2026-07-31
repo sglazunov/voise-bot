@@ -144,6 +144,46 @@ class TestРеальныйКаталог:
         assert out.index("moonshotai/kimi-k2.6") < out.index("meta/llama-3.3-70b-instruct")
 
 
+class TestКаталогНеРавенПравам:
+    """Каталог NVIDIA перечисляет ВСЁ опубликованное, а не то, что вправе
+    вызывать аккаунт. Боевой ключ отвечал на kimi-k2.6 ошибкой 404 «Function
+    '…': Not found for account '…'» — при том, что модель в списке была.
+    Совет «выберите другую из списка» тут бесполезен: выбирать наугад."""
+
+    def _probe(self, monkeypatch, ok_model):
+        from app import main
+
+        class _P:
+            def __init__(self, mid):
+                self.model = mid
+
+            def complete(self, *a, **k):
+                if self.model != ok_model:
+                    raise RuntimeError("HTTP 404 … Not found for account")
+                return "ok"
+
+        monkeypatch.setattr(main.llm, "nvidia_models",
+                            lambda key: ["a/one", "b/two", "c/three"])
+        monkeypatch.setattr(main.llm, "get_provider",
+                            lambda spec, trial=None: _P(spec.split(":", 1)[1]))
+        return main._first_working_model("nvidia", {}, "nvapi-test")
+
+    def test_называем_модель_которая_ответила(self, monkeypatch):
+        assert self._probe(monkeypatch, "b/two") == "b/two"
+
+    def test_если_не_ответил_никто_молчим(self, monkeypatch):
+        """Подсказка необязательна — тогда показываем ответ сервиса как есть."""
+        assert self._probe(monkeypatch, "нет такой") is None
+
+    def test_чужих_провайдеров_не_трогаем(self, monkeypatch):
+        """У Gemini/Groq каталог совпадает с правами — лишние запросы не нужны."""
+        from app import main
+        monkeypatch.setattr(main.llm, "nvidia_models",
+                            lambda key: (_ for _ in ()).throw(
+                                AssertionError("каталог не должен запрашиваться")))
+        assert main._first_working_model("gemini", {}, "key") is None
+
+
 def test_без_ключа_не_ходим_в_сеть(monkeypatch):
     monkeypatch.setattr(config, "NVIDIA_API_KEY", "")
     monkeypatch.setattr(llm.urllib.request, "urlopen",
