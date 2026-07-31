@@ -634,8 +634,13 @@ class Scheduler:
             self._save_state(st)  # the late-delivered cloud link survives restarts
             if self._delivered_elsewhere(up, out):
                 job = store.get(st.job_id) if st.job_id else None
-                if job and job.status in ("queued", "running", "paused", "analyzing"):
+                if job is not None and job.status != "done":
                     # Recognition still reads the file — it deletes it on finish.
+                    # Задачи со статусом error/cancelled тоже держим: именно из
+                    # них человек жмёт «Повторить», а без исходника повтор
+                    # невозможен («файл больше недоступен»). Ровно в таком
+                    # статусе задачу оставляет перезапуск сервиса. Диск не течёт:
+                    # незавершённые записи всё равно убирает retention.
                     job.delete_audio_when_done = True
                 else:
                     for p in (out, out + ".ffmpeg.log"):

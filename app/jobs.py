@@ -616,6 +616,15 @@ class JobStore:
         or cancelled job, reusing the originally uploaded file if it still exists.
         Recognition can't resume mid-way, so this restarts the pipeline cleanly."""
         job = self._require(job_id)
+        if job.status in (STATUS_QUEUED, STATUS_RUNNING, STATUS_PAUSED, STATUS_ANALYZING):
+            # После перезапуска сервиса планировщик сам возвращает прерванную
+            # задачу в очередь, но карточка ещё показывает прежнюю ошибку.
+            # Человек жмёт «Повторить» и раньше получал невнятное «продолжить
+            # можно только задачу с ошибкой» — теперь видно, что всё идёт своим
+            # ходом и ждать нужно, а не чинить.
+            raise ValueError("Задача уже в работе — она вернулась в очередь после "
+                             "перезапуска сервиса. Повтор не нужен, дождитесь "
+                             "распознавания.")
         if job.status not in (STATUS_ERROR, STATUS_CANCELLED):
             raise ValueError("Продолжить можно только задачу с ошибкой или отменённую.")
         if not job.audio_path or not Path(job.audio_path).exists():

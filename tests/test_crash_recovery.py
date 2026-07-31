@@ -186,6 +186,62 @@ class TestInterruptedRecognitionRetry:
         assert retried == []
 
 
+class TestЗаписьДоживаетДоПовтора:
+    """Перезапуск сервиса оставляет задачу в статусе error — и именно из этого
+    статуса человек жмёт «Повторить». Поздняя выгрузка в облако не имеет права
+    унести исходник из-под такой задачи: без файла повтор невозможен."""
+
+    def _late_upload(self, monkeypatch, rec, job):
+        s = Scheduler()
+        st = MeetingState(key="alice:61:2026-07-31T09:00:00+00:00", task_id="61",
+                          title="x", url="", start=None, owner="alice",
+                          state="uploading", job_id=job.id, out_path=str(rec))
+        monkeypatch.setattr(sched_mod.time, "sleep", lambda *_: None)
+        monkeypatch.setattr(
+            Scheduler, "_upload_with_retry",
+            lambda self, out, cfg, log, attempts=1:
+            {"ok": True, "url": "https://disk/x", "backend": "yadisk"})
+        s._late_upload("alice", st, {"weeek_token": "tok"}, str(rec))
+
+    def _job(self, rec, status):
+        job = store.create(filename=rec.name, audio_path=str(rec), language="ru",
+                           diarize=False, owner="alice")
+        job.status = status
+        return job
+
+    def test_исходник_упавшей_задачи_остаётся(self, tmp_path, monkeypatch):
+        rec = tmp_path / "late.mp4"
+        rec.write_bytes(b"x" * 512)
+        job = self._job(rec, "error")
+        job.error = "Прервано (сервис был перезапущен)."
+        self._late_upload(monkeypatch, rec, job)
+        assert rec.exists(), "без исходника «Повторить» отвечает 409"
+        assert job.delete_audio_when_done
+
+    def test_исходник_готовой_задачи_убирается(self, tmp_path, monkeypatch):
+        """Текст уже получен — локальная копия видео на сервере не нужна."""
+        rec = tmp_path / "ready.mp4"
+        rec.write_bytes(b"x" * 512)
+        self._late_upload(monkeypatch, rec, self._job(rec, "done"))
+        assert not rec.exists()
+
+
+class TestПовторВОчереди:
+    def test_очередь_объясняет_что_ждать_а_не_чинить(self, tmp_path):
+        """После перезапуска планировщик сам возвращает задачу в очередь, но
+        карточка ещё показывает прежнюю ошибку. Нажатие «Повторить» должно
+        сказать, что всё идёт своим ходом."""
+        import pytest
+        rec = tmp_path / "q.mp4"
+        rec.write_bytes(b"x" * 512)
+        job = store.create(filename="q.mp4", audio_path=str(rec), language="ru",
+                           diarize=False, owner="alice")
+        job.status = "queued"
+        with pytest.raises(ValueError) as e:
+            store.retry(job.id)
+        assert "уже в работе" in str(e.value)
+
+
 class TestRescheduledSlots:
     def _poll_with(self, s, monkeypatch, meetings):
         from app.automation import scheduler as sched_mod
