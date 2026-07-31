@@ -632,9 +632,14 @@ def connect_provider(body: ProviderKey, user: str = Depends(current_user)):
         # authenticated — save it and tell the user to pick a working model.
         elif "404" in es or "not found" in es or "no longer available" in es \
                 or "not available" in es or "not_found" in es:
+            # Текст был написан под Gemini и дословно предлагал «выберите
+            # другую модель Gemini» — какой бы провайдер ни подключали.
+            # Ответ сервиса показываем целиком: без него непонятно, модель
+            # просто не включена в аккаунте или названа иначе.
             note = ("Ключ принят, но модель по умолчанию недоступна для этого "
-                    "аккаунта. Выберите другую модель Gemini в списке «Движок "
-                    "протокола» (например, «актуальная» — не устаревает).")
+                    "аккаунта. Откройте «Движок протокола» и выберите другую "
+                    "модель — в списке показаны доступные именно по вашему "
+                    f"ключу. Ответ сервиса: {e}")
         else:
             raise HTTPException(400, f"Не удалось подключиться: {e}")
     # Append to the provider's key POOL (several keys rotate on rate limits).
