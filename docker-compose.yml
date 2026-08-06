@@ -17,6 +17,13 @@ services:
     image: linux-voise:latest
     container_name: linux-voise
     restart: unless-stopped
+    # PID 1 в контейнере — uvicorn (run.sh делает exec), а Python не подбирает
+    # осиротевшие процессы. Chromium и ffmpeg каждой записи оседали зомби: на
+    # бою за несколько дней накопилось 44. init:true ставит первым процессом
+    # tini, который их хоронит. Зомби не едят ни CPU, ни память, но занимают
+    # номера процессов — при достаточном количестве система перестаёт запускать
+    # новые, и это выглядит как «сервер завис».
+    init: true
     depends_on:
       db:
         condition: service_healthy

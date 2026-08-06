@@ -185,6 +185,13 @@ class FFmpegRecorder:
                 self._proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 self._proc.kill()
+                # Убитый процесс остаётся зомби, пока его не дождались. Раньше
+                # wait() здесь не было, и каждая запись, дошедшая до kill,
+                # оставляла ffmpeg висеть в таблице процессов навсегда.
+                try:
+                    self._proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
         finally:
             self._proc = None
             try:
