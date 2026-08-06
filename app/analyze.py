@@ -642,6 +642,11 @@ _TIMECODE_RE = re.compile(r"\[\d{1,2}:\d{2}(?::\d{2})?\]")
 # Minimum genuinely spoken words before a protocol may be generated. A meeting
 # worth a protocol always clears this; failed recognition never does.
 MIN_SPEECH_WORDS = int(os.getenv("VTX_MIN_SPEECH_WORDS", "40"))
+# Ниже этого — встреча фактически не состоялась: люди поздоровались и разошлись.
+# Протокол собираем (человек всё равно захочет посмотреть), но честно помечаем.
+# Замер 06.08: встреча 04.08 10:00 дала 118 слов речи за четыре часа записи и
+# получила полноценный с виду протокол на 241 слово — из воздуха.
+THIN_SPEECH_WORDS = int(os.getenv("VTX_THIN_SPEECH_WORDS", "300"))
 
 
 class NoTranscript(RuntimeError):
@@ -946,6 +951,9 @@ def analyze_transcript(transcript_text: str, provider: str | None = None,
         result[list_key] = _normalise_tasks(result.get(list_key, []))
     result["detailed"] = merge_similar_topics(_normalise_detailed(result["detailed"]))
     result["_provider"] = backend.name
+    spoken = speech_words(text)
+    if spoken < THIN_SPEECH_WORDS:
+        result["_thin_speech"] = spoken
     # Конкретная модель — рядом с провайдером: у NVIDIA под одним именем
     # «nvidia» живут и DeepSeek, и Kimi, и Llama, и по «nvidia» не понять,
     # какая из них собрала протокол. Цепочка отката подставляет сюда тот

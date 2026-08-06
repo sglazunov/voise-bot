@@ -73,3 +73,23 @@ def test_порог_настраивается(monkeypatch):
         ensure_analysable("слово " * (MIN_SPEECH_WORDS - 1))
     assert str(MIN_SPEECH_WORDS) in str(e.value)
     ensure_analysable("слово " * MIN_SPEECH_WORDS)  # ровно порог — уже можно
+
+
+class TestМалоРечи:
+    """Замер 06.08: встреча 04.08 10:00 — четыре часа записи, 118 слов речи
+    (люди поздоровались и разошлись) — и полноценный с виду протокол на 241
+    слово. Блокировать такое нельзя (человек хочет видеть, что было), но и
+    выдавать за полноценный итог — обман."""
+
+    def test_короткий_разговор_помечается(self):
+        from app import analyze
+        assert analyze.speech_words("привет " * 118) < analyze.THIN_SPEECH_WORDS
+
+    def test_нормальная_встреча_не_помечается(self):
+        from app import analyze
+        assert analyze.speech_words("слово " * 3000) >= analyze.THIN_SPEECH_WORDS
+
+    def test_порог_выше_порога_блокировки(self):
+        """Иначе пометка недостижима: всё, что ниже, уже отклонено."""
+        from app import analyze
+        assert analyze.THIN_SPEECH_WORDS > analyze.MIN_SPEECH_WORDS

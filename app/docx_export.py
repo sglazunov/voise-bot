@@ -112,6 +112,21 @@ def generate_report(
     meta_run.font.color.rgb = RGBColor(0x80, 0x80, 0x80)
     meta_run.font.size = Pt(10)
 
+    # Мало речи — предупреждаем в самом верху. Иначе протокол на 240 слов,
+    # собранный по 118 словам разговора, выглядит как полноценный итог встречи,
+    # которая на деле не состоялась.
+    thin = analysis.get("_thin_speech")
+    if isinstance(thin, int):
+        warn = doc.add_paragraph()
+        warn.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        wr = warn.add_run(
+            f"⚠ В записи мало речи — распознано слов: {thin}. Похоже, встреча "
+            "не состоялась или запись шла без звука. Выводы ниже опираются на "
+            "короткий разговор и могут быть неполными.")
+        wr.font.color.rgb = RGBColor(0xB0, 0x50, 0x00)
+        wr.font.size = Pt(10)
+        wr.bold = True
+
     doc.add_paragraph()  # spacer
 
     # ---- Участники ----------------------------------------------------------
