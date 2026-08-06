@@ -42,6 +42,16 @@ psycopg_pool>=3.2
 # VTX_RECORDER_ENABLED=1.
 playwright>=1.44
 
+# --- Тесты ---
+# pytest намеренно здесь, а не в отдельном dev-файле: разработки «на стороне» у
+# проекта нет, и сервер — единственное место, где тесты вообще запускаются. Без
+# него `docker compose exec app python -m pytest` отвечает «No module named
+# pytest», и перед деплоем проверить нечего. Весит ~5 МБ, в рантайме не
+# импортируется. Тесты изолированы: conftest.py принудительно уводит
+# VTX_DATA_DIR во временный каталог и убирает DATABASE_URL, поэтому прогон на
+# бою не трогает боевые данные.
+pytest>=8.0
+
 # --- Optional: speaker diarization (heavy: needs >4 GB RAM + HF token) ---
 # Enable with VTX_DIARIZATION=1 after installing these in the image:
 # pyannote.audio==3.3.*

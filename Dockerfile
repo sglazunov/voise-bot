@@ -67,6 +67,10 @@ RUN playwright install --with-deps chromium \
 # App code + entrypoint.
 COPY app/ ./app/
 COPY scripts/ ./scripts/
+# Тесты едут в образ: сервер — единственное место, где их запускают
+# (`docker compose exec app python -m pytest`). Каталог маленький и в рантайме
+# не используется.
+COPY tests/ ./tests/
 # Built SPA from stage 1 — FastAPI serves the whole UI at the site root.
 COPY --from=frontend /build/dist ./frontend/dist
 COPY Modelfile ./Modelfile
