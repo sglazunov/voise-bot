@@ -946,6 +946,11 @@ def analyze_transcript(transcript_text: str, provider: str | None = None,
         result[list_key] = _normalise_tasks(result.get(list_key, []))
     result["detailed"] = merge_similar_topics(_normalise_detailed(result["detailed"]))
     result["_provider"] = backend.name
+    # Конкретная модель — рядом с провайдером: у NVIDIA под одним именем
+    # «nvidia» живут и DeepSeek, и Kimi, и Llama, и по «nvidia» не понять,
+    # какая из них собрала протокол. Цепочка отката подставляет сюда тот
+    # движок, который реально ответил, а не тот, который выбрали.
+    result["_model"] = str(getattr(backend, "model", "") or "")
     # Пустые разделы не показываем человеку: сначала пробуем переписать их по
     # расшифровке, и только безнадёжные убираем. Пометки мало — вода всё равно
     # попадёт в документ.

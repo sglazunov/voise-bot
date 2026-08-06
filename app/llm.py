@@ -676,6 +676,12 @@ class _FallbackChain:
         return str(getattr(self._backends[self._i], "name", "llm"))
 
     @property
+    def model(self) -> str:
+        """Модель ТОГО движка, который отвечает сейчас — чтобы в протоколе было
+        видно, кто его собрал, когда сработал откат на другого провайдера."""
+        return str(getattr(self._backends[self._i], "model", "") or "")
+
+    @property
     def supports_stream(self) -> bool:
         return any(isinstance(b, OllamaProvider) for b in self._backends)
 

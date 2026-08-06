@@ -101,7 +101,14 @@ def generate_report(
     meta_line.alignment = WD_ALIGN_PARAGRAPH.CENTER
     shown_date = date_str or datetime.datetime.now().strftime("%d.%m.%Y")
     dur_str = f"  ·  Длительность: {_fmt_time(duration)}" if duration else ""
-    meta_run = meta_line.add_run(f"Дата: {shown_date}{dur_str}")
+    # Движок — прямо в документе. Раньше он был только в имени файла, и понять
+    # «этот протокол собрал DeepSeek или всё-таки Groq?» по открытому документу
+    # было нельзя. Важно как раз при откате: выбрали один движок, ответил другой.
+    prov = str(analysis.get("_provider") or "").strip()
+    model = str(analysis.get("_model") or "").strip()
+    eng = f"{prov} · {model}" if prov and model else (prov or model)
+    eng_str = f"  ·  Движок: {eng}" if eng else ""
+    meta_run = meta_line.add_run(f"Дата: {shown_date}{dur_str}{eng_str}")
     meta_run.font.color.rgb = RGBColor(0x80, 0x80, 0x80)
     meta_run.font.size = Pt(10)
 
