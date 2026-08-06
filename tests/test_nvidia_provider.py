@@ -192,6 +192,76 @@ class TestКаталогНеРавенПравам:
         assert main._first_working_model("gemini", {}, "key") is None
 
 
+class TestПроверкаКлюча:
+    """Список движков должен показывать не каталог, а то, что ключ реально
+    может вызвать. Узнать это можно только вызовом, поэтому перебираем модели
+    и кэшируем результат."""
+
+    def _probe(self, monkeypatch, tmp_path, ok):
+        monkeypatch.setattr(llm.config, "DATA_DIR", tmp_path)
+        _fake_catalog(monkeypatch, ["a/one", "b/two", "c/three"])
+
+        class _P:
+            def __init__(self, model=None, api_key=None, extra=None):
+                self.model = model
+
+            def complete(self, *a, **k):
+                if self.model not in ok:
+                    raise RuntimeError("HTTP 404 Not found for account")
+                return "ok"
+
+        monkeypatch.setattr(llm, "NvidiaProvider", _P)
+        return llm.nvidia_verify_models("nvapi-test")
+
+    def test_остаются_только_ответившие(self, monkeypatch, tmp_path):
+        assert self._probe(monkeypatch, tmp_path, {"a/one", "c/three"}) == \
+            ["a/one", "c/three"]
+
+    def test_результат_кэшируется(self, monkeypatch, tmp_path):
+        self._probe(monkeypatch, tmp_path, {"b/two"})
+        assert llm.nvidia_usable_models("nvapi-test") == ["b/two"]
+
+    def test_до_проверки_отвечаем_none(self, monkeypatch, tmp_path):
+        """None — сигнал «ещё не знаем»: интерфейс тогда покажет весь каталог,
+        а не пустой список."""
+        monkeypatch.setattr(llm.config, "DATA_DIR", tmp_path)
+        assert llm.nvidia_usable_models("nvapi-непроверенный") is None
+
+    def test_лимит_не_считается_недоступностью(self, monkeypatch, tmp_path):
+        """429 значит «ключ устал», а не «модель не выдана». Иначе перебор
+        выбросил бы половину каталога из-за скорости собственных запросов."""
+        monkeypatch.setattr(llm.config, "DATA_DIR", tmp_path)
+        _fake_catalog(monkeypatch, ["a/one"])
+        monkeypatch.setattr(llm.time, "sleep", lambda *_: None)
+
+        class _P:
+            def __init__(self, model=None, api_key=None, extra=None):
+                pass
+
+            def complete(self, *a, **k):
+                raise RuntimeError("HTTP 429: rate limit exceeded")
+
+        monkeypatch.setattr(llm, "NvidiaProvider", _P)
+        assert llm.nvidia_verify_models("nvapi-test") == ["a/one"]
+
+    def test_ключ_в_кэш_не_попадает(self, monkeypatch, tmp_path):
+        self._probe(monkeypatch, tmp_path, {"a/one"})
+        assert "nvapi-test" not in (tmp_path / "nvidia_usable.json").read_text(
+            encoding="utf-8")
+
+
+def test_каталог_чистится_от_нечатовых(monkeypatch):
+    """Из боевого каталога 06.08: эмбеддинги, оценщики ответов, разбор
+    документов и генерация картинок в списке движков не нужны."""
+    _fake_catalog(monkeypatch, [
+        "deepseek-ai/deepseek-v4-pro", "baai/bge-m3",
+        "nvidia/nemotron-4-340b-reward", "nvidia/nemotron-parse",
+        "google/diffusiongemma-26b-a4b-it", "nvidia/llama3-chatqa-1.5-70b",
+        "meta/codellama-70b",
+    ])
+    assert llm.nvidia_models("nvapi-test") == ["deepseek-ai/deepseek-v4-pro"]
+
+
 def test_без_ключа_не_ходим_в_сеть(monkeypatch):
     monkeypatch.setattr(config, "NVIDIA_API_KEY", "")
     monkeypatch.setattr(llm.urllib.request, "urlopen",

@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import threading
 from pathlib import Path
 
 from fastapi import (Depends, FastAPI, File, Form, HTTPException, Request,
@@ -78,7 +79,12 @@ def _engine_list(user_keys: dict | None = None) -> list[dict]:
                 key = cred.get("key") or ""
                 if key:
                     break
-            models = llm.nvidia_models(key or None)
+            # Сначала — проверенный по ключу список (что реально вызывается),
+            # и только пока проверка не прошла — весь каталог. Каталог
+            # перечисляет всё опубликованное, а аккаунту выдана лишь часть.
+            models = llm.nvidia_usable_models(key or None)
+            if models is None:
+                models = llm.nvidia_models(key or None)
             if models:
                 for m in models:
                     engines.append({"value": f"nvidia:{m}",
@@ -681,6 +687,13 @@ def connect_provider(body: ProviderKey, user: str = Depends(current_user)):
             raise HTTPException(400, f"Не удалось подключиться: {e}")
     # Append to the provider's key POOL (several keys rotate on rate limits).
     user_creds.add(user, provider, key, extra)
+    if provider == "nvidia":
+        # Каталог NVIDIA — это не права аккаунта. Перебираем модели в фоне
+        # (десятки секунд, лимит 40 запросов в минуту) и запоминаем рабочие,
+        # чтобы в списке движков остались только они. Пока проверка идёт,
+        # показывается весь каталог — это лучше пустого списка.
+        threading.Thread(target=llm.nvidia_verify_models, args=(key,),
+                         daemon=True, name="vtx-nvidia-probe").start()
     return {"ok": True, "connected": provider, "note": note,
             "keys": user_creds.counts(user).get(provider, 1),
             "providers": _provider_list(user_creds.load(user))}

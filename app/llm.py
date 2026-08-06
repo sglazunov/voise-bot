@@ -12,14 +12,17 @@ parsing/validation happens in analyze.py.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import ssl
+import threading
 import time
 import urllib.error
 import urllib.request
 import uuid
+from pathlib import Path
 from typing import Protocol
 
 from . import config
@@ -272,6 +275,13 @@ _NVIDIA_NOT_CHAT = (
     "synthetic-video-detector", "ising-calibration",   # зрение, видео, автопилот
     "-vl", "vision",                                   # только картинки
     "rerank", "retriever",
+    # Замечено в боевом каталоге 06.08 — всё это не умеет вести диалог:
+    "bge-", "e5-", "nvclip", "nv-embedqa",             # эмбеддинги под другими именами
+    "reward",                                          # оценивают ответы, а не пишут
+    "-parse", "ocdrnet", "ocr",                        # разбор документов и картинок
+    "diffusion",                                       # генерация изображений
+    "chatqa",                                          # заточены под RAG-ответ по куску текста
+    "codegemma", "codellama", "codestral", "-coder",   # только код, не деловой русский
 )
 # Reasoning-модели: «размышляют» в ответе, что мешает строгому JSON протокола.
 _NVIDIA_REASONING = ("-r1", "/r1", "reason", "thinking")
@@ -342,6 +352,83 @@ def nvidia_models(api_key: str | None = None) -> list[str]:
         return (base, fam_i, -_nvidia_version(low), variant, low)
 
     return sorted(ids, key=rank)
+
+
+# ---- какие модели ключ РЕАЛЬНО может вызвать ------------------------------
+# GET /v1/models отдаёт весь опубликованный каталог, а не права аккаунта:
+# недоступная модель отвечает 404 «Function '<uuid>': Not found for account».
+# Узнать это можно только вызовом, поэтому проверяем по одному дешёвому запросу
+# на модель и складываем результат в кэш — на боевом ключе из сотни каталожных
+# моделей рабочими оказываются единицы.
+_NVIDIA_PROBE_MAX = int(os.getenv("VTX_NVIDIA_PROBE_MAX", "30"))
+_NVIDIA_CACHE_TTL = int(os.getenv("VTX_NVIDIA_CACHE_TTL", str(7 * 24 * 3600)))
+_nvidia_probe_lock = threading.Lock()
+
+
+def _nvidia_cache_file() -> Path:
+    return config.DATA_DIR / "nvidia_usable.json"
+
+
+def _nvidia_key_id(api_key: str) -> str:
+    """Ключи в кэше не храним — только их отпечаток."""
+    return hashlib.sha256((api_key or "").encode()).hexdigest()[:16]
+
+
+def _nvidia_cache_read() -> dict:
+    try:
+        return json.loads(_nvidia_cache_file().read_text(encoding="utf-8")) or {}
+    except (OSError, ValueError):
+        return {}
+
+
+def nvidia_usable_models(api_key: str | None = None) -> list[str] | None:
+    """Проверенный список для ключа, либо None — если ещё не проверяли."""
+    key = api_key or config.NVIDIA_API_KEY
+    if not key:
+        return None
+    rec = _nvidia_cache_read().get(_nvidia_key_id(key))
+    if not isinstance(rec, dict):
+        return None
+    if time.time() - float(rec.get("at") or 0) > _NVIDIA_CACHE_TTL:
+        return None
+    models = rec.get("models")
+    return models if isinstance(models, list) else None
+
+
+def nvidia_verify_models(api_key: str, on_log=None) -> list[str]:
+    """Перебрать каталог и оставить модели, которые ответили. Долго (десятки
+    секунд) — вызывать в фоне. Результат кладётся в кэш.
+
+    Лимит NVIDIA ~40 запросов в минуту на ключ и на все модели сразу, поэтому
+    проверяем не весь каталог, а верхушку ранжированного списка."""
+    if not api_key:
+        return []
+    with _nvidia_probe_lock:          # два параллельных перебора съели бы лимит
+        catalog = nvidia_models(api_key)[:_NVIDIA_PROBE_MAX]
+        ok: list[str] = []
+        for mid in catalog:
+            try:
+                NvidiaProvider(model=mid, api_key=api_key).complete(
+                    "ok", max_tokens=1, force_json=False)
+                ok.append(mid)
+            except Exception as e:    # noqa: BLE001
+                # Лимит — это НЕ «модель недоступна»: ключ просто устал.
+                # Считаем такую модель рабочей, иначе перебор выбросит
+                # половину каталога из-за скорости собственных запросов.
+                if _is_rate_limit(e):
+                    ok.append(mid)
+                    time.sleep(2)
+            if on_log:
+                on_log(f"NVIDIA: проверено {len(catalog)}, доступно {len(ok)}")
+        cache = _nvidia_cache_read()
+        cache[_nvidia_key_id(api_key)] = {"at": time.time(), "models": ok}
+        try:
+            _nvidia_cache_file().parent.mkdir(parents=True, exist_ok=True)
+            _nvidia_cache_file().write_text(
+                json.dumps(cache, ensure_ascii=False), encoding="utf-8")
+        except OSError:
+            pass
+        return ok
 
 
 class NvidiaProvider:
