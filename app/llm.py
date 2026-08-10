@@ -366,6 +366,22 @@ _NVIDIA_CACHE_TTL = int(os.getenv("VTX_NVIDIA_CACHE_TTL", str(7 * 24 * 3600)))
 # иначе перебор упирается в 429 и сам портит себе результат.
 _NVIDIA_PROBE_PAUSE = float(os.getenv("VTX_NVIDIA_PROBE_PAUSE", "2"))
 _nvidia_probe_lock = threading.Lock()
+# Ход перебора — чтобы интерфейс показывал прогресс, а не держал запрос
+# открытым две минуты (и не выглядел зависшим).
+_nvidia_progress: dict = {"running": False, "done": 0, "total": 0}
+
+
+def nvidia_probe_state() -> dict:
+    return dict(_nvidia_progress)
+
+
+def nvidia_start_verify(api_key: str) -> dict:
+    """Запустить перебор в фоне и сразу вернуть состояние."""
+    if not _nvidia_probe_lock.locked():
+        threading.Thread(target=nvidia_verify_models, args=(api_key,),
+                         daemon=True, name="vtx-nvidia-probe").start()
+        time.sleep(0.2)          # дать потоку выставить running
+    return nvidia_probe_state()
 
 # «Function '<uuid>': Not found for account '<id>'» — единственный ответ,
 # который действительно означает «модель этому ключу не выдана».
@@ -457,35 +473,48 @@ def nvidia_verify_models(api_key: str, on_log=None, force: bool = True) -> list[
                 return done
         catalog = nvidia_models(api_key)[:_NVIDIA_PROBE_MAX]
         ok: list[str] = []
-        for n, mid in enumerate(catalog):
-            if n:
-                time.sleep(_NVIDIA_PROBE_PAUSE)   # держимся ниже лимита
-            try:
-                NvidiaProvider(model=mid, api_key=api_key).complete(
-                    "ok", max_tokens=1, force_json=False)
-                ok.append(mid)
-            except Exception as e:    # noqa: BLE001
-                # Недоступной считаем ТОЛЬКО модель, про которую сервис прямо
-                # сказал «нет такой для этого аккаунта». Лимит, таймаут, 500 —
-                # это про наш запрос, а не про права: выбросить по ним модель
-                # значит соврать в списке. Раньше выбрасывалось по любой ошибке.
-                if _nvidia_not_entitled(e):
-                    continue
-                if _is_rate_limit(e):
-                    time.sleep(_NVIDIA_PROBE_PAUSE * 4)
-                ok.append(mid)
-            if on_log:
-                on_log(f"NVIDIA: проверено {n + 1} из {len(catalog)}, "
-                       f"доступно {len(ok)}")
-        cache = _nvidia_cache_read()
-        cache[_nvidia_key_id(api_key)] = {"at": time.time(), "models": ok}
+        _nvidia_progress.update(running=True, done=0, total=len(catalog))
         try:
-            _nvidia_cache_file().parent.mkdir(parents=True, exist_ok=True)
-            _nvidia_cache_file().write_text(
-                json.dumps(cache, ensure_ascii=False), encoding="utf-8")
-        except OSError:
-            pass
-        return ok
+            return _nvidia_probe_loop(catalog, api_key, on_log)
+        finally:
+            # Флаг обязан сняться даже при сбое, иначе интерфейс навсегда
+            # останется в состоянии «проверяю».
+            _nvidia_progress.update(running=False)
+
+
+def _nvidia_probe_loop(catalog: list[str], api_key: str, on_log) -> list[str]:
+    """Сам перебор: по одному дешёвому запросу на модель, с паузами."""
+    ok: list[str] = []
+    for n, mid in enumerate(catalog):
+        if n:
+            time.sleep(_NVIDIA_PROBE_PAUSE)   # держимся ниже лимита
+        try:
+            NvidiaProvider(model=mid, api_key=api_key).complete(
+                "ok", max_tokens=1, force_json=False)
+            ok.append(mid)
+        except Exception as e:    # noqa: BLE001
+            # Недоступной считаем ТОЛЬКО модель, про которую сервис прямо
+            # сказал «нет такой для этого аккаунта». Лимит, таймаут, 500 —
+            # это про наш запрос, а не про права: выбросить по ним модель
+            # значит соврать в списке. Раньше выбрасывалось по любой ошибке.
+            if _nvidia_not_entitled(e):
+                continue
+            if _is_rate_limit(e):
+                time.sleep(_NVIDIA_PROBE_PAUSE * 4)
+            ok.append(mid)
+        _nvidia_progress.update(done=n + 1)
+        if on_log:
+            on_log(f"NVIDIA: проверено {n + 1} из {len(catalog)}, "
+                   f"доступно {len(ok)}")
+    cache = _nvidia_cache_read()
+    cache[_nvidia_key_id(api_key)] = {"at": time.time(), "models": ok}
+    try:
+        _nvidia_cache_file().parent.mkdir(parents=True, exist_ok=True)
+        _nvidia_cache_file().write_text(
+            json.dumps(cache, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
+    return ok
 
 
 class NvidiaProvider:

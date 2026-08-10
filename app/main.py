@@ -704,22 +704,30 @@ def connect_provider(body: ProviderKey, user: str = Depends(current_user)):
             "providers": _provider_list(user_creds.load(user))}
 
 
+def _nvidia_key_of(user: str) -> str:
+    keys = (user_creds.load(user) or {}).get("nvidia") or []
+    return (keys[0].get("key") if keys else "") or config.NVIDIA_API_KEY
+
+
 @app.post("/api/providers/nvidia/verify")
 def verify_nvidia_models(user: str = Depends(current_user)):
-    """Перебрать каталог NVIDIA и оставить модели, доступные ключу.
+    """Запустить перебор моделей в фоне и сразу вернуть состояние.
 
-    Синхронно: перебор идёт с паузами под лимит 40 запросов в минуту, то есть
-    примерно минуту. Зато человек сразу видит результат, а не гадает,
-    закончилась фоновая проверка или нет."""
-    keys = (user_creds.load(user) or {}).get("nvidia") or []
-    key = (keys[0].get("key") if keys else "") or config.NVIDIA_API_KEY
+    Синхронно этого делать нельзя: тридцать моделей с паузами под лимит 40
+    запросов в минуту — это две-три минуты. Запрос всё это время висел в
+    «pending», и кнопка выглядела зависшей."""
+    key = _nvidia_key_of(user)
     if not key:
         raise HTTPException(400, "Сначала добавьте ключ NVIDIA.")
-    # Если фоновая проверка уже идёт — дожидаемся её результата вместо второго
-    # прохода: иначе кнопка стоит на замке минуту, а потом перебирает заново.
-    running = llm._nvidia_probe_lock.locked()
-    models = llm.nvidia_verify_models(key, force=not running)
-    return {"ok": True, "models": models,
+    return {"ok": True, **llm.nvidia_start_verify(key)}
+
+
+@app.get("/api/providers/nvidia/verify")
+def nvidia_verify_state(user: str = Depends(current_user)):
+    """Ход перебора — для опроса из интерфейса, пока идёт проверка."""
+    key = _nvidia_key_of(user)
+    return {"ok": True, **llm.nvidia_probe_state(),
+            "models": llm.nvidia_usable_models(key or None),
             "engines": _engine_list(user_creds.load(user))}
 
 

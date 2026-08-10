@@ -94,15 +94,25 @@ function ProviderCard({ p, models, onChange, toast }:
       onChange(); if (keys !== null) loadKeys();
     } catch (e: any) { toast(e.message, true); } finally { setBusy(false); }
   }
+  // Перебор идёт 2-3 минуты (пауза между пробами держит нас под лимитом
+  // NVIDIA), поэтому запускаем его в фоне и опрашиваем ход. Раньше запрос
+  // висел всё это время, и кнопка выглядела зависшей.
   async function verifyNvidia() {
-    setVerifying(true); setNote("");
+    setVerifying(true); setNote("Проверяю модели…");
     try {
-      const r = await api.post("/api/providers/nvidia/verify");
-      const n = (r.models || []).length;
-      setNote(n ? `Доступно моделей по вашему ключу: ${n}. Список ниже обновлён.`
-                : "Ни одна модель не ответила — проверьте, что модели включены в аккаунте NVIDIA.");
-      onChange();
-    } catch (e: any) { toast(e.message, true); } finally { setVerifying(false); }
+      await api.post("/api/providers/nvidia/verify");
+      for (;;) {
+        await new Promise((r) => setTimeout(r, 3000));
+        const s = await api.get("/api/providers/nvidia/verify");
+        if (s.running) { setNote(`Проверяю модели: ${s.done} из ${s.total}…`); continue; }
+        const n = (s.models || []).length;
+        setNote(n ? `Доступно моделей по вашему ключу: ${n}. Список ниже обновлён.`
+                  : "Ни одна модель не ответила — проверьте, что модели включены в аккаунте NVIDIA.");
+        onChange();
+        break;
+      }
+    } catch (e: any) { toast(e.message, true); setNote(""); }
+    finally { setVerifying(false); }
   }
   async function loadKeys() {
     try { const r = await api.get(`/api/providers/keys?provider=${p.id}`); setKeys(r.keys || []); }

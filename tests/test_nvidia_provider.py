@@ -339,3 +339,40 @@ class TestКнопкаНеДублируетПеребор:
         monkeypatch.setattr(llm, "nvidia_models", lambda *a, **k: (
             _ for _ in ()).throw(AssertionError("перебор не должен повторяться")))
         assert llm.nvidia_verify_models("nvapi-test", force=False) == ["a/one"]
+
+
+class TestПереборНеДержитЗапрос:
+    """Перебор тридцати моделей с паузами — это две-три минуты. Держать на нём
+    HTTP-запрос нельзя: браузер показывает «pending», кнопка выглядит зависшей.
+    Поэтому запуск отвязан от ожидания, а ход отдаётся отдельно."""
+
+    def test_состояние_доступно_во_время_перебора(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(llm.config, "DATA_DIR", tmp_path)
+        monkeypatch.setattr(llm.time, "sleep", lambda *_: None)
+        _fake_catalog(monkeypatch, ["a/one", "b/two"])
+        seen = []
+
+        class _P:
+            def __init__(self, model=None, api_key=None, extra=None):
+                pass
+
+            def complete(self, *a, **k):
+                seen.append(llm.nvidia_probe_state())   # состояние ВНУТРИ прохода
+                return "ok"
+
+        monkeypatch.setattr(llm, "NvidiaProvider", _P)
+        llm.nvidia_verify_models("nvapi-test")
+        assert seen and seen[0]["running"] is True
+        assert seen[0]["total"] == 2
+
+    def test_флаг_снимается_после_сбоя(self, monkeypatch, tmp_path):
+        """Иначе интерфейс навсегда останется в состоянии «проверяю»."""
+        monkeypatch.setattr(llm.config, "DATA_DIR", tmp_path)
+        monkeypatch.setattr(llm, "nvidia_models", lambda *a, **k: ["a/one"])
+        monkeypatch.setattr(llm, "_nvidia_probe_loop", lambda *a, **k: (
+            _ for _ in ()).throw(RuntimeError("сбой")))
+        try:
+            llm.nvidia_verify_models("nvapi-test")
+        except RuntimeError:
+            pass
+        assert llm.nvidia_probe_state()["running"] is False
