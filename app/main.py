@@ -776,7 +776,10 @@ def _require_owned(job_id: str, user: str):
 
 @app.get("/api/jobs/{job_id}")
 def get_job(job_id: str, user: str = Depends(current_user)):
-    return _require_owned(job_id, user).to_public()
+    job = _require_owned(job_id, user)
+    # `stage` — чем задача занята ПОСЛЕ расшифровки: полоса прогресса к тому
+    # моменту уже на 100%, а работы ещё на десятки минут.
+    return {**job.to_public(), "stage": store.stage(job_id)}
 
 
 @app.post("/api/jobs/{job_id}/pause")

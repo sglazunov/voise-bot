@@ -146,6 +146,10 @@ class JobStore:
         self._partial: Dict[str, list] = {}
         # Live analysis progress per job (stage + streamed text), in-memory only.
         self._analysis: Dict[str, dict] = {}
+        # Чем занята задача после расшифровки (спикеры, OCR) — тоже только в
+        # памяти: переживать перезапуск нечему, прерванная задача всё равно
+        # начинается заново.
+        self._stage: Dict[str, str] = {}
         # Per-job control flags (pause/cancel), in-memory only.
         self._control: Dict[str, dict] = {}
         # Serialises on-demand re-analysis so two LLM runs can't overlap.
@@ -257,6 +261,19 @@ class JobStore:
     def analysis_progress(self, job_id: str) -> dict:
         """Live analysis stage + streamed text (in-memory), for the UI."""
         return self._analysis.get(job_id, {})
+
+    def stage(self, job_id: str) -> str:
+        """Чем задача занята ПОСЛЕ расшифровки. Полоса прогресса показывает
+        только распознавание фрагментов, а за ним идут разметка говорящих и
+        чтение текста с экрана — каждая на десятки минут. Без этой строки
+        человек видит «распознаётся, 100%» и считает, что всё зависло."""
+        return self._stage.get(job_id, "")
+
+    def _set_stage(self, job_id: str, text: str) -> None:
+        if text:
+            self._stage[job_id] = text
+        else:
+            self._stage.pop(job_id, None)
 
     def _on_analysis(self, job_id: str):
         """Build an on_progress(stage, text) callback that updates the live buffer."""
@@ -932,6 +949,7 @@ class JobStore:
                 raise JobCancelled()
 
             if job.identify_speakers:
+                self._set_stage(job.id, "Определяю, кто говорил (разметка по видео)…")
                 try:
                     from . import speaker_id
                     if speaker_id.is_video(job.audio_path):
@@ -973,6 +991,7 @@ class JobStore:
             screen_err = None
             screen_segs = 0
             if job.capture_screen:
+                self._set_stage(job.id, "Читаю текст с экрана (слайды, документы)…")
                 try:
                     from . import screen_ocr
                     if screen_ocr.is_video(job.audio_path):
@@ -1003,6 +1022,7 @@ class JobStore:
             analysis_err = None
             if job.analyze:
                 self._analysis[job.id] = {"stage": "Готовлю анализ…", "text": "", "chars": 0}
+                self._set_stage(job.id, "")     # дальше стадии показывает анализ
                 self._set(job, status=STATUS_ANALYZING, persist=True)
                 try:
                     from .analyze import analyze_transcript, AnalysisCancelled

@@ -756,7 +756,13 @@ export default function Recognition() {
                         {live?.analysis?.chars ? ` · получено ${live.analysis.chars} символов` : ""}
                       </div>
                     )}
-                    {detail.status === "running" && live?.segments?.length ? (
+                    {/* После расшифровки полоса уже на 100%, а работы ещё на
+                        десятки минут: разметка говорящих, чтение экрана. Без
+                        этой строки выглядит как зависшая задача. */}
+                    {detail.status === "running" && detail.stage ? (
+                      <div className="text-[12px] mt-0.5" style={{ color: "var(--muted)" }}>
+                        {detail.stage}</div>
+                    ) : detail.status === "running" && live?.segments?.length ? (
                       <div className="text-[12px] mt-0.5" style={{ color: "var(--muted)" }}>
                         распознано фрагментов: {live.segments.length}</div>
                     ) : null}

@@ -86,3 +86,21 @@ class TestSnapshotNotes:
         st = _mk_state(s, live_notes="важные заметки")
         s._save_state(st)
         assert s._load_snaps("alice")[st.key]["live_notes"] == "важные заметки"
+
+
+class TestСтадияПослеРасшифровки:
+    """Полоса прогресса показывает только распознавание фрагментов. За ней
+    идут разметка говорящих и чтение текста с экрана — каждая на десятки
+    минут, и всё это время интерфейс показывал «распознаётся, 100%».
+    Человек считал, что задача зависла."""
+
+    def test_стадия_ставится_и_снимается(self):
+        from app.jobs import store
+        store._set_stage("j1", "Читаю текст с экрана…")
+        assert store.stage("j1") == "Читаю текст с экрана…"
+        store._set_stage("j1", "")
+        assert store.stage("j1") == ""
+
+    def test_у_чужой_задачи_стадии_нет(self):
+        from app.jobs import store
+        assert store.stage("нет-такой") == ""
