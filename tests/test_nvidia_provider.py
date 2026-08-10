@@ -313,3 +313,29 @@ def test_сбой_сети_не_ломает_интерфейс(monkeypatch):
     monkeypatch.setattr(llm.urllib.request, "urlopen",
                         lambda *a, **k: (_ for _ in ()).throw(OSError("нет сети")))
     assert llm.nvidia_models("nvapi-test") == []
+
+
+class TestКнопкаНеДублируетПеребор:
+    """Фоновая проверка и проверка по кнопке брали один замок, и кнопка,
+    дождавшись чужого прохода, начинала перебор заново — минута ожидания
+    превращалась в две."""
+
+    def test_force_false_возвращает_готовый_результат(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(llm.config, "DATA_DIR", tmp_path)
+        monkeypatch.setattr(llm.time, "sleep", lambda *_: None)
+        _fake_catalog(monkeypatch, ["a/one"])
+
+        class _P:
+            def __init__(self, model=None, api_key=None, extra=None):
+                pass
+
+            def complete(self, *a, **k):
+                return "ok"
+
+        monkeypatch.setattr(llm, "NvidiaProvider", _P)
+        assert llm.nvidia_verify_models("nvapi-test") == ["a/one"]
+
+        # Повторный вызов с force=False не должен ходить в сеть вообще.
+        monkeypatch.setattr(llm, "nvidia_models", lambda *a, **k: (
+            _ for _ in ()).throw(AssertionError("перебор не должен повторяться")))
+        assert llm.nvidia_verify_models("nvapi-test", force=False) == ["a/one"]

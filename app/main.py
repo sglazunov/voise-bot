@@ -715,7 +715,10 @@ def verify_nvidia_models(user: str = Depends(current_user)):
     key = (keys[0].get("key") if keys else "") or config.NVIDIA_API_KEY
     if not key:
         raise HTTPException(400, "Сначала добавьте ключ NVIDIA.")
-    models = llm.nvidia_verify_models(key)
+    # Если фоновая проверка уже идёт — дожидаемся её результата вместо второго
+    # прохода: иначе кнопка стоит на замке минуту, а потом перебирает заново.
+    running = llm._nvidia_probe_lock.locked()
+    models = llm.nvidia_verify_models(key, force=not running)
     return {"ok": True, "models": models,
             "engines": _engine_list(user_creds.load(user))}
 

@@ -437,15 +437,24 @@ def nvidia_ensure_verified(api_key: str | None = None) -> None:
                      daemon=True, name="vtx-nvidia-probe").start()
 
 
-def nvidia_verify_models(api_key: str, on_log=None) -> list[str]:
+def nvidia_verify_models(api_key: str, on_log=None, force: bool = True) -> list[str]:
     """Перебрать каталог и оставить модели, которые ответили. Долго (десятки
     секунд) — вызывать в фоне. Результат кладётся в кэш.
+
+    `force=False` — «дождись чужой проверки и верни её результат»: так кнопка
+    не запускает второй перебор поверх уже идущего фонового. Раньше она
+    вставала на замок, дожидалась конца фонового прохода и начинала всё
+    заново — минута ожидания превращалась в две.
 
     Лимит NVIDIA ~40 запросов в минуту на ключ и на все модели сразу, поэтому
     проверяем не весь каталог, а верхушку ранжированного списка."""
     if not api_key:
         return []
     with _nvidia_probe_lock:          # два параллельных перебора съели бы лимит
+        if not force:
+            done = nvidia_usable_models(api_key)
+            if done is not None:
+                return done
         catalog = nvidia_models(api_key)[:_NVIDIA_PROBE_MAX]
         ok: list[str] = []
         for n, mid in enumerate(catalog):
