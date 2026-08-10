@@ -112,6 +112,17 @@ def generate_report(
     meta_run.font.color.rgb = RGBColor(0x80, 0x80, 0x80)
     meta_run.font.size = Pt(10)
 
+    # Сработал откат на другой движок — говорим об этом прямо: выбор движка
+    # иначе выглядит проигнорированным.
+    fb = analysis.get("_fallback")
+    if isinstance(fb, list) and fb:
+        fbp = doc.add_paragraph()
+        fbp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        fr = fbp.add_run("Выбранный движок не ответил, протокол собран запасным. "
+                         + "; ".join(str(x)[:160] for x in fb[:2]))
+        fr.font.color.rgb = RGBColor(0xB0, 0x50, 0x00)
+        fr.font.size = Pt(9)
+
     # Мало речи — предупреждаем в самом верху. Иначе протокол на 240 слов,
     # собранный по 118 словам разговора, выглядит как полноценный итог встречи,
     # которая на деле не состоялась.

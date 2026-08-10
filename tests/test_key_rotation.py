@@ -70,3 +70,40 @@ class TestKeySumming:
         rot = _rot({"k1": ["ERR"], "k2": ["не должно понадобиться"]})
         with pytest.raises(RuntimeError, match="500"):
             rot.complete("p")
+
+
+class TestПричинаОтката:
+    """Человек выбрал DeepSeek, протокол собрал Gemini — и узнать почему было
+    неоткуда. Причина пропуска движков теперь сохраняется на цепочке."""
+
+    def test_причина_сохраняется_при_успешном_откате(self, monkeypatch):
+        class Bad:
+            name = "nvidia"
+            model = "deepseek"
+
+            def complete(self, *a, **k):
+                raise RuntimeError("HTTP 429: rate limit")
+
+        class Good:
+            name = "gemini"
+            model = "flash"
+
+            def complete(self, *a, **k):
+                return "ответ"
+
+        chain = _RotatingProvider and llm._FallbackChain([Bad(), Good()])
+        assert chain.complete("тест") == "ответ"
+        assert chain.skipped and "nvidia" in chain.skipped[0]
+        assert "429" in chain.skipped[0]
+
+    def test_без_отката_причин_нет(self):
+        class Good:
+            name = "groq"
+            model = "llama"
+
+            def complete(self, *a, **k):
+                return "ok"
+
+        chain = llm._FallbackChain([Good(), Good()])
+        chain.complete("тест")
+        assert chain.skipped == []

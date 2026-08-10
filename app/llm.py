@@ -848,6 +848,7 @@ class _FallbackChain:
     def __init__(self, backends: list):
         self._backends = backends
         self._i = 0     # index of the provider that served the last call
+        self.skipped: list[str] = []   # почему пропущены движки выше по списку
 
     @property
     def name(self) -> str:
@@ -907,6 +908,12 @@ class _FallbackChain:
                 else:
                     out = b.complete(prompt, mt, force_json)
                 self._i = i
+                # Почему выбранный движок не отработал. Раньше это молча
+                # терялось: человек выбирал DeepSeek, протокол собирал Gemini,
+                # и узнать причину было неоткуда.
+                for msg in errors:
+                    if msg not in self.skipped and len(self.skipped) < 3:
+                        self.skipped.append(msg)
                 return out
             except GenerationCancelled:
                 raise               # user cancellation is not a provider failure
