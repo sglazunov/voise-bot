@@ -17,6 +17,13 @@ os.environ["VTX_OLLAMA"] = "0"
 # Deterministic master key for the secret-encryption tests.
 os.environ["VTX_SECRET_KEY"] = "test-master-key-do-not-use-in-prod"
 os.environ.pop("DATABASE_URL", None)
+# Тот же случай, что и с DATA_DIR: в боевом контейнере .env задаёт VTX_HTTPS=1
+# (за Caddy), и кука сессии получает флаг Secure. TestClient ходит по
+# http://testserver и такую куку не сохраняет — все проверки авторизации падали
+# с 401 (13 штук), хотя приложение исправно. VTX_TRUST_PROXY=1 по той же логике
+# заставляет брать IP клиента из X-Forwarded-For, которого в тестах нет.
+os.environ["VTX_HTTPS"] = "0"
+os.environ["VTX_TRUST_PROXY"] = "0"
 
 import shutil  # noqa: E402
 from pathlib import Path  # noqa: E402
