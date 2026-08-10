@@ -91,7 +91,7 @@ class TestПричинаОтката:
             def complete(self, *a, **k):
                 return "ответ"
 
-        chain = _RotatingProvider and llm._FallbackChain([Bad(), Good()])
+        chain = llm._FallbackChain([Bad(), Good()])
         assert chain.complete("тест") == "ответ"
         assert chain.skipped and "nvidia" in chain.skipped[0]
         assert "429" in chain.skipped[0]
