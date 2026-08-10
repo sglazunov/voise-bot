@@ -84,6 +84,11 @@ def _engine_list(user_keys: dict | None = None) -> list[dict]:
             # перечисляет всё опубликованное, а аккаунту выдана лишь часть.
             models = llm.nvidia_usable_models(key or None)
             if models is None:
+                # Проверки ещё нет — запускаем её в фоне и пока показываем
+                # каталог. Иначе список навсегда оставался бы каталогом:
+                # перебор стартовал только при добавлении ключа и не переживал
+                # перезапуск контейнера.
+                llm.nvidia_ensure_verified(key or None)
                 models = llm.nvidia_models(key or None)
             if models:
                 for m in models:
@@ -697,6 +702,22 @@ def connect_provider(body: ProviderKey, user: str = Depends(current_user)):
     return {"ok": True, "connected": provider, "note": note,
             "keys": user_creds.counts(user).get(provider, 1),
             "providers": _provider_list(user_creds.load(user))}
+
+
+@app.post("/api/providers/nvidia/verify")
+def verify_nvidia_models(user: str = Depends(current_user)):
+    """Перебрать каталог NVIDIA и оставить модели, доступные ключу.
+
+    Синхронно: перебор идёт с паузами под лимит 40 запросов в минуту, то есть
+    примерно минуту. Зато человек сразу видит результат, а не гадает,
+    закончилась фоновая проверка или нет."""
+    keys = (user_creds.load(user) or {}).get("nvidia") or []
+    key = (keys[0].get("key") if keys else "") or config.NVIDIA_API_KEY
+    if not key:
+        raise HTTPException(400, "Сначала добавьте ключ NVIDIA.")
+    models = llm.nvidia_verify_models(key)
+    return {"ok": True, "models": models,
+            "engines": _engine_list(user_creds.load(user))}
 
 
 @app.post("/api/providers/disconnect")

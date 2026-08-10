@@ -82,6 +82,7 @@ function ProviderCard({ p, models, onChange, toast }:
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState("");
   const [keys, setKeys] = useState<any[] | null>(null);
+  const [verifying, setVerifying] = useState(false);
   const ex = EXTRA[p.id];
 
   async function connect() {
@@ -92,6 +93,16 @@ function ProviderCard({ p, models, onChange, toast }:
       setKey(""); setExtra(""); setNote(r.note || ""); toast(`${p.label}: ключ подключён`);
       onChange(); if (keys !== null) loadKeys();
     } catch (e: any) { toast(e.message, true); } finally { setBusy(false); }
+  }
+  async function verifyNvidia() {
+    setVerifying(true); setNote("");
+    try {
+      const r = await api.post("/api/providers/nvidia/verify");
+      const n = (r.models || []).length;
+      setNote(n ? `Доступно моделей по вашему ключу: ${n}. Список ниже обновлён.`
+                : "Ни одна модель не ответила — проверьте, что модели включены в аккаунте NVIDIA.");
+      onChange();
+    } catch (e: any) { toast(e.message, true); } finally { setVerifying(false); }
   }
   async function loadKeys() {
     try { const r = await api.get(`/api/providers/keys?provider=${p.id}`); setKeys(r.keys || []); }
@@ -141,6 +152,12 @@ function ProviderCard({ p, models, onChange, toast }:
         {p.keys > 0 && (
           <button className="btn btn-ghost" onClick={() => (keys === null ? loadKeys() : setKeys(null))}>
             {keys === null ? "Мои ключи" : "Скрыть"}</button>
+        )}
+        {p.id === "nvidia" && p.keys > 0 && (
+          // Каталог NVIDIA перечисляет всё опубликованное, а аккаунту выдана
+          // лишь часть — узнать это можно только вызовом каждой модели.
+          <button className="btn btn-ghost" onClick={verifyNvidia} disabled={verifying}>
+            {verifying ? "Проверяю модели…" : "Проверить модели"}</button>
         )}
         {p.keys > 0 && <button className="btn btn-danger" onClick={disconnect}><Trash2 size={14} /> Отключить</button>}
       </div>

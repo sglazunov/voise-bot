@@ -199,6 +199,7 @@ class TestПроверкаКлюча:
 
     def _probe(self, monkeypatch, tmp_path, ok):
         monkeypatch.setattr(llm.config, "DATA_DIR", tmp_path)
+        monkeypatch.setattr(llm.time, "sleep", lambda *_: None)  # без пауз
         _fake_catalog(monkeypatch, ["a/one", "b/two", "c/three"])
 
         class _P:
@@ -226,6 +227,43 @@ class TestПроверкаКлюча:
         а не пустой список."""
         monkeypatch.setattr(llm.config, "DATA_DIR", tmp_path)
         assert llm.nvidia_usable_models("nvapi-непроверенный") is None
+
+    def test_умолчание_берётся_из_каталога(self, monkeypatch, tmp_path):
+        """Прибитое имя модели молча превращается в 404: за неделю
+        «deepseek-v4-pro» из каталога NVIDIA исчез, появился
+        «deepseek-v4-flash-0731»."""
+        monkeypatch.setattr(llm.config, "DATA_DIR", tmp_path)
+        monkeypatch.setattr(llm.config, "NVIDIA_MODEL", "устаревшая/модель")
+        _fake_catalog(monkeypatch, ["deepseek-ai/deepseek-v4-flash-0731",
+                                    "meta/llama-3.1-8b-instruct"])
+        assert llm.nvidia_default_model("nvapi-test") == \
+            "deepseek-ai/deepseek-v4-flash-0731"
+
+    def test_без_сети_умолчание_из_настроек(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(llm.config, "DATA_DIR", tmp_path)
+        monkeypatch.setattr(llm.config, "NVIDIA_MODEL", "запасная/модель")
+        monkeypatch.setattr(llm, "nvidia_models", lambda *a, **k: [])
+        assert llm.nvidia_default_model("nvapi-test") == "запасная/модель"
+
+    def test_чужая_ошибка_не_выбрасывает_модель(self, monkeypatch, tmp_path):
+        """Таймаут или 500 — это про наш запрос, а не про права аккаунта.
+        Раньше модель выбрасывалась по ЛЮБОЙ ошибке, и список врал."""
+        monkeypatch.setattr(llm.config, "DATA_DIR", tmp_path)
+        monkeypatch.setattr(llm.time, "sleep", lambda *_: None)
+        _fake_catalog(monkeypatch, ["a/one", "b/two"])
+
+        class _P:
+            def __init__(self, model=None, api_key=None, extra=None):
+                self.model = model
+
+            def complete(self, *a, **k):
+                if self.model == "a/one":
+                    raise RuntimeError("HTTP 500: internal server error")
+                raise RuntimeError("404 Not found for account 'X'")
+
+        monkeypatch.setattr(llm, "NvidiaProvider", _P)
+        # a/one осталась (мы не доказали недоступность), b/two выброшена.
+        assert llm.nvidia_verify_models("nvapi-test") == ["a/one"]
 
     def test_лимит_не_считается_недоступностью(self, monkeypatch, tmp_path):
         """429 значит «ключ устал», а не «модель не выдана». Иначе перебор

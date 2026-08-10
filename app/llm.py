@@ -362,7 +362,19 @@ def nvidia_models(api_key: str | None = None) -> list[str]:
 # моделей рабочими оказываются единицы.
 _NVIDIA_PROBE_MAX = int(os.getenv("VTX_NVIDIA_PROBE_MAX", "30"))
 _NVIDIA_CACHE_TTL = int(os.getenv("VTX_NVIDIA_CACHE_TTL", str(7 * 24 * 3600)))
+# Пауза между пробами: лимит ~40 запросов в минуту, держимся заметно ниже,
+# иначе перебор упирается в 429 и сам портит себе результат.
+_NVIDIA_PROBE_PAUSE = float(os.getenv("VTX_NVIDIA_PROBE_PAUSE", "2"))
 _nvidia_probe_lock = threading.Lock()
+
+# «Function '<uuid>': Not found for account '<id>'» — единственный ответ,
+# который действительно означает «модель этому ключу не выдана».
+_NVIDIA_NO_ACCESS = ("not found for account", "not_found", "404")
+
+
+def _nvidia_not_entitled(err: Exception) -> bool:
+    s = str(err).lower()
+    return any(t in s for t in _NVIDIA_NO_ACCESS)
 
 
 def _nvidia_cache_file() -> Path:
@@ -395,6 +407,36 @@ def nvidia_usable_models(api_key: str | None = None) -> list[str] | None:
     return models if isinstance(models, list) else None
 
 
+def nvidia_default_model(api_key: str | None = None) -> str:
+    """Лучшая доступная модель: сначала проверенная по ключу, затем верхняя из
+    каталога, и только если сети нет — имя из настроек."""
+    key = api_key or config.NVIDIA_API_KEY
+    if key:
+        usable = nvidia_usable_models(key)
+        if usable:
+            return usable[0]
+        catalog = nvidia_models(key)
+        if catalog:
+            return catalog[0]
+    return config.NVIDIA_MODEL
+
+
+def nvidia_ensure_verified(api_key: str | None = None) -> None:
+    """Запустить перебор в фоне, если проверенного списка ещё нет.
+
+    Перебор стартовал только при добавлении ключа — и если в этот момент
+    контейнер перезапускали, поток погибал вместе с ним, а повторить было
+    нечем: список движков навсегда оставался каталогом. Теперь проверка
+    догоняет сама при первом обращении к списку."""
+    key = api_key or config.NVIDIA_API_KEY
+    if not key or nvidia_usable_models(key) is not None:
+        return
+    if _nvidia_probe_lock.locked():       # уже идёт
+        return
+    threading.Thread(target=nvidia_verify_models, args=(key,),
+                     daemon=True, name="vtx-nvidia-probe").start()
+
+
 def nvidia_verify_models(api_key: str, on_log=None) -> list[str]:
     """Перебрать каталог и оставить модели, которые ответили. Долго (десятки
     секунд) — вызывать в фоне. Результат кладётся в кэш.
@@ -406,20 +448,26 @@ def nvidia_verify_models(api_key: str, on_log=None) -> list[str]:
     with _nvidia_probe_lock:          # два параллельных перебора съели бы лимит
         catalog = nvidia_models(api_key)[:_NVIDIA_PROBE_MAX]
         ok: list[str] = []
-        for mid in catalog:
+        for n, mid in enumerate(catalog):
+            if n:
+                time.sleep(_NVIDIA_PROBE_PAUSE)   # держимся ниже лимита
             try:
                 NvidiaProvider(model=mid, api_key=api_key).complete(
                     "ok", max_tokens=1, force_json=False)
                 ok.append(mid)
             except Exception as e:    # noqa: BLE001
-                # Лимит — это НЕ «модель недоступна»: ключ просто устал.
-                # Считаем такую модель рабочей, иначе перебор выбросит
-                # половину каталога из-за скорости собственных запросов.
+                # Недоступной считаем ТОЛЬКО модель, про которую сервис прямо
+                # сказал «нет такой для этого аккаунта». Лимит, таймаут, 500 —
+                # это про наш запрос, а не про права: выбросить по ним модель
+                # значит соврать в списке. Раньше выбрасывалось по любой ошибке.
+                if _nvidia_not_entitled(e):
+                    continue
                 if _is_rate_limit(e):
-                    ok.append(mid)
-                    time.sleep(2)
+                    time.sleep(_NVIDIA_PROBE_PAUSE * 4)
+                ok.append(mid)
             if on_log:
-                on_log(f"NVIDIA: проверено {len(catalog)}, доступно {len(ok)}")
+                on_log(f"NVIDIA: проверено {n + 1} из {len(catalog)}, "
+                       f"доступно {len(ok)}")
         cache = _nvidia_cache_read()
         cache[_nvidia_key_id(api_key)] = {"at": time.time(), "models": ok}
         try:
@@ -444,8 +492,13 @@ class NvidiaProvider:
 
     def __init__(self, model: str | None = None, api_key: str | None = None,
                  extra: str | None = None) -> None:
-        self.model = model or config.NVIDIA_MODEL
         self.api_key = api_key or config.NVIDIA_API_KEY
+        # Умолчание НЕ прибиваем к имени модели: каталог NVIDIA живой. За неделю
+        # «deepseek-v4-pro» из него исчез, а появился «deepseek-v4-flash-0731» —
+        # прибитое имя молча превращается в 404 в момент сборки протокола.
+        # Поэтому берём лучшую из доступных по ключу, а имя из config —
+        # только если каталог недоступен.
+        self.model = model or nvidia_default_model(self.api_key)
 
     def complete(self, prompt: str, max_tokens: int = 2000, force_json: bool = True) -> str:
         url = "https://integrate.api.nvidia.com/v1/chat/completions"
