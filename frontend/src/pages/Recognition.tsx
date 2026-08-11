@@ -441,16 +441,20 @@ export default function Recognition() {
   useEffect(() => { loadJobs(); const t = setInterval(loadJobs, 4000); return () => clearInterval(t); }, []);
   useEffect(() => { api.get("/api/providers").then((d) => setEngines(d.engines || [])).catch(() => {}); }, []);
 
+  // Смена карточки — чистим тексты предыдущей встречи. ОТДЕЛЬНЫМ эффектом и
+  // только по `sel`: у опроса ниже в зависимостях есть detail?.status, и сброс
+  // detail внутри него замыкал круг (обнулили → зависимость изменилась →
+  // эффект перезапустился → обнулили), из-за чего расшифровка стиралась сразу
+  // после загрузки и страница молотила запросы без остановки.
+  useEffect(() => {
+    setTranscript(""); setSegments(null); setLive(null);
+  }, [sel]);
+
   // Load selected job detail + transcript, poll while busy.
   // While it's working we also pull /partial — the LIVE stage of recognition and
   // protocol building (stage + streamed characters), so the user sees progress.
   useEffect(() => {
-    // Чистим ВСЕГДА при смене карточки, а не только при её закрытии. Иначе,
-    // переключившись на идущую встречу, человек видел расшифровку предыдущей:
-    // у незавершённой задачи текст не запрашивается, и старый оставался на
-    // экране как её собственный.
-    setDetail(null); setTranscript(""); setSegments(null); setLive(null);
-    if (!sel) return;
+    if (!sel) { setDetail(null); return; }
     let alive = true;
     const tick = async () => {
       try {
