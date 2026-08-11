@@ -154,7 +154,17 @@ def record_meeting(url: str, out_path: str, cfg: dict,
         # records mute video for an hour — discovered only after the meeting.
         # Sample the slot's monitor every 30 s (Pulse monitors allow a second
         # reader); after 2 min of continuous silence, shout into the card log.
-        audio_state = {"silent_since": None, "warned": False, "had_silence": False}
+        audio_state = {"silent_since": None, "warned": False, "had_silence": False,
+                       "had_speech": False, "ended_by_silence": False}
+        # Д15: выход по тишине — независимо от вёрстки Телемоста. Признаки
+        # «все вышли» читаются из DOM (счётчик участников, экран «пригласите»,
+        # «встреча завершена»), и когда Телемост не отдал НИ ОДНОГО из них, бот
+        # писал пустую комнату до упора в максимальную длину: 04.08 — четыре
+        # часа на 118 слов речи, 11.08 — четыре часа на 71 минуту разговора.
+        # Три часа тишины потом ещё и распознаются. Тишина после того, как речь
+        # уже была, — надёжный признак конца встречи, и он не зависит от
+        # селекторов. 0 отключает правило.
+        end_silence = int(os.getenv("VTX_END_ON_SILENCE_SEC", "600"))
 
         def _audio_watchdog() -> None:
             ffmpeg = cfg.get("ffmpeg_path") or "ffmpeg"
@@ -169,6 +179,7 @@ def record_meeting(url: str, out_path: str, cfg: dict,
                         log("Звук снова есть ✓")
                     audio_state["silent_since"] = None
                     audio_state["warned"] = False
+                    audio_state["had_speech"] = True
                     continue
                 now = time.time()
                 audio_state["silent_since"] = audio_state["silent_since"] or now
@@ -178,6 +189,16 @@ def record_meeting(url: str, out_path: str, cfg: dict,
                     audio_state["had_silence"] = True
                     log("⚠ НЕТ ЗВУКА уже 2 минуты — запись может оказаться немой. "
                         "Проверьте, что встреча не на паузе и звук в комнате есть.")
+                # Речь была и давно кончилась — встреча закончилась, что бы ни
+                # показывал интерфейс. Требование «речь была» обязательно:
+                # иначе правило убивало бы встречу, к которой опаздывают (для
+                # этого случая есть отдельный end_if_nobody_joins_sec).
+                if (end_silence > 0 and audio_state["had_speech"]
+                        and quiet >= end_silence
+                        and not audio_state["ended_by_silence"]):
+                    audio_state["ended_by_silence"] = True
+                    log(f"Тишина {int(quiet // 60)} мин после разговора — "
+                        f"считаю встречу оконченной, останавливаю запись.")
 
         threading.Thread(target=_audio_watchdog, daemon=True,
                          name=f"vtx-audio-wd-{slot.index}").start()
@@ -186,8 +207,15 @@ def record_meeting(url: str, out_path: str, cfg: dict,
         if stop_word:
             log(f"Кодовое слово в чате: «{stop_word}» — напишите его отдельным "
                 "сообщением, и бот остановит запись и выйдет.")
-        reason = bot.wait_until_end(should_stop, max_sec, alone_sec, min_p,
+
+        def _stop_or_silent() -> bool:
+            return bool((should_stop and should_stop())
+                        or audio_state["ended_by_silence"])
+
+        reason = bot.wait_until_end(_stop_or_silent, max_sec, alone_sec, min_p,
                                     chat_stop_word=stop_word)
+        if reason == "stopped" and audio_state["ended_by_silence"]:
+            reason = "silence"          # не ручная остановка, а конец встречи
         if reason == "chat_stop":
             log("🛑 В чате написали кодовое слово — останавливаю запись и выхожу.")
         elif reason == "call_ended":
