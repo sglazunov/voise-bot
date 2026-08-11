@@ -445,7 +445,12 @@ export default function Recognition() {
   // While it's working we also pull /partial — the LIVE stage of recognition and
   // protocol building (stage + streamed characters), so the user sees progress.
   useEffect(() => {
-    if (!sel) { setDetail(null); setTranscript(""); setSegments(null); setLive(null); return; }
+    // Чистим ВСЕГДА при смене карточки, а не только при её закрытии. Иначе,
+    // переключившись на идущую встречу, человек видел расшифровку предыдущей:
+    // у незавершённой задачи текст не запрашивается, и старый оставался на
+    // экране как её собственный.
+    setDetail(null); setTranscript(""); setSegments(null); setLive(null);
+    if (!sel) return;
     let alive = true;
     const tick = async () => {
       try {

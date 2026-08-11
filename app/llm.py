@@ -383,6 +383,24 @@ def nvidia_start_verify(api_key: str) -> dict:
         time.sleep(0.2)          # дать потоку выставить running
     return nvidia_probe_state()
 
+# Сколько ждём ответа. Прежние 180 с срывали КАЖДУЮ сборку протокола:
+# «nvidia: The read operation timed out» — и работу молча забирал запасной
+# движок. Проверка моделей при этом проходила, потому что просит один токен и
+# отвечает мгновенно; отсюда и загадка «модель доступна, но не работает».
+# Бесплатный тариф NVIDIA медленный: 8000 токенов протокола там генерируются
+# минутами.
+# Потолок намеренно умеренный: воркер один, и повисший запрос задерживает всю
+# очередь. Платим это ожидание один раз за протокол — цепочка отката помнит,
+# кто ответил, и следующие вызовы начинает уже с него.
+_NVIDIA_TIMEOUT_MAX = int(os.getenv("VTX_NVIDIA_TIMEOUT", "420"))
+
+
+def _nvidia_timeout(max_tokens: int) -> int:
+    """Время ожидания под размер ответа: пробе в один токен десять минут не
+    нужны, а полному протоколу 180 секунд не хватает."""
+    return max(60, min(_NVIDIA_TIMEOUT_MAX, 120 + int(max_tokens) // 8))
+
+
 # «Function '<uuid>': Not found for account '<id>'» — единственный ответ,
 # который действительно означает «модель этому ключу не выдана».
 _NVIDIA_NO_ACCESS = ("not found for account", "not_found", "404")
@@ -547,10 +565,11 @@ class NvidiaProvider:
             "temperature": 0.1,
         }
         headers = {"Authorization": f"Bearer {self.api_key}"}
+        tmo = _nvidia_timeout(max_tokens)
         if force_json:
             payload["response_format"] = {"type": "json_object"}
             try:
-                out = _http_post_json(url, payload, headers, timeout=180)
+                out = _http_post_json(url, payload, headers, timeout=tmo)
                 return out["choices"][0]["message"]["content"].strip()
             except Exception as e:      # noqa: BLE001
                 # В каталоге сотня моделей, и не каждая понимает
@@ -559,7 +578,7 @@ class NvidiaProvider:
                 if "response_format" not in str(e).lower():
                     raise
                 payload.pop("response_format", None)
-        out = _http_post_json(url, payload, headers, timeout=180)
+        out = _http_post_json(url, payload, headers, timeout=tmo)
         return out["choices"][0]["message"]["content"].strip()
 
 
