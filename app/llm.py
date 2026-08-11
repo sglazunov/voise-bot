@@ -566,10 +566,24 @@ class NvidiaProvider:
         }
         headers = {"Authorization": f"Bearer {self.api_key}"}
         tmo = _nvidia_timeout(max_tokens)
+
+        def post(pl):
+            """Таймаут подписываем числом: «read operation timed out» не
+            говорит, сколько ждали, и по строке отката в протоколе нельзя
+            понять, поднимать ли потолок ещё или дело в другом."""
+            try:
+                return _http_post_json(url, pl, headers, timeout=tmo)
+            except Exception as e:      # noqa: BLE001
+                if "timed out" in str(e).lower():
+                    raise RuntimeError(
+                        f"ответ не пришёл за {tmo} с (просили {max_tokens} "
+                        f"токенов) — модель медленнее потолка "
+                        f"VTX_NVIDIA_TIMEOUT") from e
+                raise
         if force_json:
             payload["response_format"] = {"type": "json_object"}
             try:
-                out = _http_post_json(url, payload, headers, timeout=tmo)
+                out = post(payload)
                 return out["choices"][0]["message"]["content"].strip()
             except Exception as e:      # noqa: BLE001
                 # В каталоге сотня моделей, и не каждая понимает
@@ -578,7 +592,7 @@ class NvidiaProvider:
                 if "response_format" not in str(e).lower():
                     raise
                 payload.pop("response_format", None)
-        out = _http_post_json(url, payload, headers, timeout=tmo)
+        out = post(payload)
         return out["choices"][0]["message"]["content"].strip()
 
 
