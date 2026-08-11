@@ -46,3 +46,15 @@ def test_схема_не_пустая_и_содержит_ключевые_та�
     created = _first_create_positions()
     for table in ("jobs", "meetings", "user_settings", "user_creds"):
         assert table in created, f"в схеме нет таблицы {table}"
+
+
+def test_чистое_время_распознавания_хранится():
+    """finished_at-started_at измеряет ВСЮ жизнь задачи: пересборка протокола
+    сдвигает конец, начало остаётся от первого прогона. На бою часовая встреча
+    после пяти пересборок показала 438 минут «обработки» — по таким числам о
+    скорости судить нельзя."""
+    from app import db
+    from app.jobs import Job
+    assert "transcribe_sec" in db.JOB_SCALAR_COLS
+    assert hasattr(Job(filename="x", audio_path="y", language="ru",
+                       diarize=False), "transcribe_sec")

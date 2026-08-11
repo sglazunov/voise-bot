@@ -121,6 +121,7 @@ class Job:
     finished_at: Optional[float] = None
     error: Optional[str] = None
     duration: Optional[float] = None
+    transcribe_sec: Optional[float] = None   # чистое время распознавания
     speakers: Optional[int] = None
     diarization_error: Optional[str] = None  # why "who spoke" didn't run, if asked
     speaker_error: Optional[str] = None      # why video speaker-ID didn't run, if asked
@@ -919,11 +920,17 @@ class JobStore:
                 except Exception:  # a video quirk must not block transcription
                     pass
 
+            _t0 = time.time()
             segments, meta = transcribe_file(
                 job.audio_path, language=job.language, on_segment=on_segment,
                 on_start=on_start, initial_prompt=initial_prompt,
                 model_name=job.model or None,
             )
+            # Чистое время распознавания. Мерить его как finished_at-started_at
+            # нельзя: пересборка протокола сдвигает конец, начало остаётся от
+            # первого прогона, и часовая встреча выглядела как семь часов
+            # работы — на таких числах о скорости судить невозможно.
+            self._set(job, persist=False, transcribe_sec=time.time() - _t0)
             # Запланированные встречи модель не указывают — она берётся из
             # VTX_MODEL. Раньше поле оставалось пустым, и по завершённым
             # задачам нельзя было понять, чем их считали: сравнить скорость

@@ -74,7 +74,7 @@ JOB_SCALAR_COLS = [
     "delete_audio_when_done", "status", "progress", "created_at", "started_at",
     "finished_at", "error", "duration", "speakers", "diarization_error",
     "speaker_error", "screen_error", "protocol_cloud_url", "delivery_error",
-    "screen_segments", "analysis_error",
+    "screen_segments", "analysis_error", "transcribe_sec",
 ]
 JOB_JSON_COLS = ["video_participants", "analysis", "docx_providers"]
 JOB_COLS = JOB_SCALAR_COLS + JOB_JSON_COLS
@@ -150,6 +150,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     delivery_error         TEXT,
     screen_segments        INTEGER,
     analysis_error         TEXT,
+    transcribe_sec         DOUBLE PRECISION,
     "analyze"              BOOLEAN,
     video_participants     JSONB,
     analysis               JSONB,
@@ -159,6 +160,10 @@ CREATE INDEX IF NOT EXISTS idx_jobs_owner ON jobs(owner);
 CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at);
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS user_notes TEXT;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS preset TEXT;
+-- Чистое время РАСПОЗНАВАНИЯ. finished_at-started_at для этого не годится:
+-- пересборка протокола сдвигает конец, а начало остаётся от первого прогона,
+-- и час встречи выглядел как семь часов работы.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS transcribe_sec DOUBLE PRECISION;
 CREATE TABLE IF NOT EXISTS search_docs (
     job_id     TEXT PRIMARY KEY,
     username   TEXT,
