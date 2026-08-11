@@ -79,3 +79,52 @@ class TestStopLine:
                           ("давайте без стоп слов на этой важной встрече точно", False),
                           ("привет", False), ("стоп запись", True)]:
             assert f(line, "стоп") is exp, line
+
+
+class TestРегистрИПрокрутка:
+    """Жалоба «срабатывает только с большой буквы». Само сопоставление регистр
+    снимает — строка и слово приводятся к нижнему. Ненадёжен был МЕХАНИЗМ:
+    он считал количество совпадений и реагировал на рост. Чат в комнате общий
+    и не чистится, а Телемост держит в DOM только видимую часть списка, поэтому
+    при прокрутке счётчик скачет в обе стороны и рост нового сообщения теряется.
+    """
+
+    def _bot(self):
+        from app.automation.recorder.browser import TelemostBot
+        b = TelemostBot.__new__(TelemostBot)
+        b._chat_baseline = None
+        b._chat_last_peek = 0.0
+        b._chat_last_n = -1
+        b._chat_seen = set()
+        b._on_log = lambda *a: None
+        return b
+
+    def _feed(self, bot, lines):
+        """Подсунуть боту текст страницы вместо реального чтения чата."""
+        bot._read_all_text = lambda: "\n".join(lines)
+        bot._chat_last_peek = 0.0          # снять задержку между чтениями
+        return bot.maybe_chat_stop("стоп")
+
+    def test_регистр_не_имеет_значения(self):
+        for written in ("стоп", "Стоп", "СТОП"):
+            b = self._bot()
+            assert self._feed(b, ["Привет 10:00"]) is False       # базовый снимок
+            assert self._feed(b, ["Привет 10:00", f"{written} 10:05"]) is True, written
+
+    def test_старые_команды_в_истории_не_срабатывают(self):
+        """В комнате уже лежат «стоп» с прошлых встреч — это не команда сейчас."""
+        b = self._bot()
+        assert self._feed(b, ["стоп 12:08", "стоп 17:42"]) is False
+
+    def test_новое_сообщение_после_прокрутки_ловится(self):
+        """Старая строка ушла из DOM, новая пришла — количество не изменилось,
+        и прежний счётчик такое пропускал."""
+        b = self._bot()
+        self._feed(b, ["стоп 12:08", "стоп 17:42"])          # базовый снимок
+        assert self._feed(b, ["стоп 17:42", "стоп 18:30"]) is True
+
+    def test_повторное_чтение_того_же_чата_не_срабатывает(self):
+        b = self._bot()
+        self._feed(b, ["стоп 12:08"])
+        assert self._feed(b, ["стоп 12:08"]) is False
+        assert self._feed(b, ["стоп 12:08"]) is False

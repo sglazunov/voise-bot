@@ -227,6 +227,12 @@ class TelemostBot:
         self._chat_baseline = None    # stop-word lines present at first read
         self._chat_last_peek = 0.0    # last time we read the chat
         self._chat_last_n = -1        # last logged count (for live diagnostics)
+        # Сами строки со стоп-словом, уже виденные. Считать их КОЛИЧЕСТВО
+        # оказалось ненадёжно: чат в комнате общий и не чистится, а Телемост
+        # держит в DOM только видимую часть — при прокрутке старое сообщение
+        # уходит, новое приходит, и счётчик не растёт. Строка сообщения включает
+        # время («стоп 16:49»), поэтому новое сообщение отличимо от старого.
+        self._chat_seen: set[str] = set()
         self._chat_opened_once = False
 
     # -- lifecycle ----------------------------------------------------------
@@ -703,15 +709,26 @@ class TelemostBot:
             else:
                 self._on_log(f"Чат: сообщений «{word}» видно {n}.")
             self._chat_last_n = n
+        # Сами строки: сообщение несёт время («стоп 16:49»), поэтому новое
+        # отличимо от старого. Это надёжнее счётчика — при прокрутке
+        # виртуализированного списка количество видимых строк скачет в обе
+        # стороны, и рост «нового сообщения» терялся.
+        hits = {ln.strip() for ln in lines if self._is_stop_line(ln, word)}
         if self._chat_baseline is None:
             self._chat_baseline = n           # ignore whatever was already there
+            self._chat_seen = hits            # всё, что уже лежало в чате
             return False
+        fresh = hits - self._chat_seen
+        self._chat_seen |= hits
+        if fresh:
+            self._on_log(f"Чат: новое сообщение «{word}» — останавливаю запись.")
+            return True
+        # Запасной признак на случай, когда две команды совпали дословно
+        # (одна минута, одно слово): тогда множество не растёт, а счётчик да.
         if n > self._chat_baseline:
             self._chat_baseline = n
             return True
         if n < self._chat_baseline:
-            # Old stop-word lines scrolled out of the (virtualised) chat list —
-            # lower the floor, or a NEW «стоп» would never exceed the baseline.
             self._chat_baseline = n
         return False
 
