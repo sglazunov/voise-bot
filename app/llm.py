@@ -401,6 +401,65 @@ def _nvidia_timeout(max_tokens: int) -> int:
     return max(60, min(_NVIDIA_TIMEOUT_MAX, 120 + int(max_tokens) // 8))
 
 
+# Потоковый режим. Обычным запросом длинная генерация не доживает до конца:
+# на часовой встрече сервер NVIDIA сам отвечает 504 «gateway timeout» — ждать
+# весь ответ целиком их шлюз не готов. В потоке куски идут сразу, соединение
+# всё время живо, и ограничение по времени применяется к ПАУЗЕ между кусками,
+# а не ко всей генерации.
+_NVIDIA_STREAM = os.getenv("VTX_NVIDIA_STREAM", "1") == "1"
+_NVIDIA_CHUNK_TIMEOUT = int(os.getenv("VTX_NVIDIA_CHUNK_TIMEOUT", "120"))
+
+
+def _nvidia_stream(url: str, payload: dict, headers: dict,
+                   timeout: int = _NVIDIA_CHUNK_TIMEOUT, should_stop=None) -> str:
+    """Собрать ответ из SSE-потока OpenAI-совместимого API.
+
+    Формат: строки «data: {json}», конец — «data: [DONE]». Нас интересует
+    choices[0].delta.content. Пустые строки и служебные поля пропускаем.
+    """
+    body = json.dumps({**payload, "stream": True}).encode("utf-8")
+    req = urllib.request.Request(url, data=body, method="POST")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("Accept", "text/event-stream")
+    for k, v in headers.items():
+        req.add_header(k, v)
+    parts: list[str] = []
+    done = False
+    try:
+        # Ошибку сервер отдаёт обычным JSON, а не потоком; urllib поднимает её
+        # как HTTPError до первой строки, поэтому парсер тела ошибки не видит.
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            for raw in resp:            # построчно: таймаут — на каждый кусок
+                if should_stop and should_stop():
+                    raise GenerationCancelled()
+                line = raw.decode("utf-8", "replace").strip()
+                if not line.startswith("data:"):
+                    continue            # пустые строки — keep-alive
+                chunk = line[5:].strip()
+                if chunk == "[DONE]":
+                    done = True
+                    break
+                try:
+                    d = json.loads(chunk)
+                except ValueError:
+                    continue            # рваный кусок пропускаем, не падаем
+                choices = d.get("choices") or [{}]
+                piece = (choices[0].get("delta") or {}).get("content") or ""
+                if piece:
+                    parts.append(piece)
+    except urllib.error.HTTPError as e:
+        body_txt = e.read().decode("utf-8", "replace")
+        raise RuntimeError(f"HTTP {e.code} от {url}: {body_txt[:300]}") from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"Не удалось подключиться к {url}: {e.reason}") from e
+    if not done:
+        # Поток кончился без «[DONE]» — это обрыв, а не короткий ответ. Отдать
+        # накопленное наверх нельзя: обрезанный JSON выглядит как готовый
+        # протокол, только без половины разделов. Пусть решает обычный запрос.
+        raise RuntimeError("поток оборван до конца ответа")
+    return "".join(parts)
+
+
 # «Function '<uuid>': Not found for account '<id>'» — единственный ответ,
 # который действительно означает «модель этому ключу не выдана».
 _NVIDIA_NO_ACCESS = ("not found for account", "not_found", "404")
@@ -556,7 +615,8 @@ class NvidiaProvider:
         # только если каталог недоступен.
         self.model = model or nvidia_default_model(self.api_key)
 
-    def complete(self, prompt: str, max_tokens: int = 2000, force_json: bool = True) -> str:
+    def complete(self, prompt: str, max_tokens: int = 2000,
+                 force_json: bool = True, should_stop=None) -> str:
         url = "https://integrate.api.nvidia.com/v1/chat/completions"
         payload = {
             "model": self.model,
@@ -582,6 +642,24 @@ class NvidiaProvider:
                 raise
         if force_json:
             payload["response_format"] = {"type": "json_object"}
+
+        # Сначала поток: только так длинная генерация доживает до конца.
+        # Отказ по правам или лимиту пробрасываем как есть — это не про способ
+        # передачи; всё прочее (сеть, неподдержанный stream) отдаём обычному
+        # запросу, чтобы новый режим не отнял работающее.
+        if _NVIDIA_STREAM:
+            try:
+                text = _nvidia_stream(url, payload, headers,
+                                      should_stop=should_stop)
+                if text.strip():
+                    return text.strip()
+            except GenerationCancelled:
+                raise                   # отмена — не повод пробовать иначе
+            except Exception as e:      # noqa: BLE001
+                if _nvidia_not_entitled(e) or _is_rate_limit(e):
+                    raise
+
+        if force_json:
             try:
                 out = post(payload)
                 return out["choices"][0]["message"]["content"].strip()
@@ -938,6 +1016,11 @@ class _FallbackChain:
                     out = b.complete(prompt, max_tokens=mt, force_json=force_json,
                                      on_token=on_token, should_stop=should_stop,
                                      json_schema=json_schema)
+                elif isinstance(b, NvidiaProvider):
+                    # В потоке один вызов живёт минутами — «Стоп» обязан
+                    # действовать внутри него, а не только между вызовами.
+                    out = b.complete(prompt, mt, force_json,
+                                     should_stop=should_stop)
                 else:
                     out = b.complete(prompt, mt, force_json)
                 self._i = i
