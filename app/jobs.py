@@ -924,6 +924,14 @@ class JobStore:
                 on_start=on_start, initial_prompt=initial_prompt,
                 model_name=job.model or None,
             )
+            # Запланированные встречи модель не указывают — она берётся из
+            # VTX_MODEL. Раньше поле оставалось пустым, и по завершённым
+            # задачам нельзя было понять, чем их считали: сравнить скорость
+            # medium и large-v3-turbo по факту было не на чем. Записываем
+            # ту модель, которая реально работала.
+            if not job.model:
+                self._set(job, persist=False,
+                          model=str(meta.get("model") or config.MODEL))
 
             n_speakers = None
             diar_err = None
