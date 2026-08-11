@@ -385,6 +385,26 @@ def scan_participants(video_path: str, every_sec: float = 60.0,
     return _merge_short_names(out)
 
 
+def _is_fragment_of(short: str, full: str) -> bool:
+    """«Гла» при наличии «Сергей Глазунов» — не человек, а обрезок подписи.
+
+    Плитка Телемоста режет имя по ширине, и в списке участников встречи 10.08
+    оказались «Гла», «Mar», «Х Серге» рядом с «Я Сергей Глазунов», «Мария Н» и
+    «Сергей». Ловим так: каждое значащее слово короткой подписи должно быть
+    началом какого-то слова длинной, и сама она должна быть короче.
+    """
+    from . import names as names_mod
+
+    if len(short) >= len(full):
+        return False
+    parts = [names_mod.translit_key(w) for w in short.split()]
+    parts = [p for p in parts if len(p) >= 3]      # инициалы ничего не решают
+    if not parts:
+        return False
+    whole = [names_mod.translit_key(w) for w in full.split()]
+    return all(any(w.startswith(p) for w in whole if w) for p in parts)
+
+
 def _merge_short_names(names: List[str]) -> List[str]:
     """Схлопнуть варианты подписи одного человека в одну запись.
 
@@ -407,6 +427,9 @@ def _merge_short_names(names: List[str]) -> List[str]:
             a, b = names_mod.translit_key(n), names_mod.translit_key(kept)
             if a and b and difflib.SequenceMatcher(None, a, b).ratio() >= 0.85:
                 dup = True        # то же имя, записанное другим алфавитом
+                break
+            if _is_fragment_of(n, kept):
+                dup = True        # обрезок уже имеющегося имени
                 break
         if not dup:
             out.append(n)

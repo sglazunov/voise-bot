@@ -137,3 +137,32 @@ class TestУчастникиИзПротокола29_07:
         from app.speaker_id import _merge_short_names
         out = _merge_short_names(["Иван Ю", "Павел", "Шавлак Павел"])
         assert out == ["Иван Ю", "Шавлак Павел"]
+
+
+class TestУчастникиИзПротокола10_08:
+    """Список из боевого протокола часовой встречи с демонстрацией экрана.
+    Плитка Телемоста режет подписи по ширине, и рядом с людьми оказались
+    обрезки их же имён и надписи из соседних окон."""
+
+    RAW = ['Виктор Мухин', 'Мария Н', 'Дарья К', 'Виктор Коробов', 'Елизавета',
+           'Hite', 'Я Сергей Глазунов', 'Мельников Алексей', 'Сергей Беск',
+           'Мухаммад Г', 'Mapua H', 'Х Серге', 'Mar', 'Гла', 'Cron', 'Telegr',
+           'Кофе-брейк', 'КИРИЛЛ БУБНОВ']
+
+    def test_надписи_окон_и_распорядка_отсеяны(self):
+        for w in ("Cron", "Telegr", "Кофе-брейк"):
+            assert not names.looks_like_name(w), w
+
+    def test_обрезки_имён_склеиваются(self):
+        """«Гла» при наличии «Сергей Глазунов» — не человек."""
+        from app.speaker_id import _merge_short_names
+        kept = _merge_short_names([n for n in self.RAW if names.looks_like_name(n)])
+        for frag in ("Гла", "Mar", "Х Серге"):
+            assert frag not in kept, frag
+
+    def test_живые_люди_остались(self):
+        from app.speaker_id import _merge_short_names
+        kept = _merge_short_names([n for n in self.RAW if names.looks_like_name(n)])
+        for real in ("Виктор Мухин", "Мария Н", "Мельников Алексей",
+                     "КИРИЛЛ БУБНОВ", "Елизавета"):
+            assert real in kept, real
