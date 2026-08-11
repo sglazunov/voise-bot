@@ -371,6 +371,7 @@ export default function Recognition() {
   const [editing, setEditing] = useState(false);          // Д13: protocol editor
   useEffect(() => { setEditing(false); }, [sel]);
   const [fmt, setFmt] = useState("txt");   // transcript download format
+  const [docxProv, setDocxProv] = useState("");  // какой движок скачиваем
   const [busy, setBusy] = useState(false);
   const [prog, setProg] = useState(0);
   const [engines, setEngines] = useState<{ value: string; label: string }[]>([]);
@@ -447,7 +448,7 @@ export default function Recognition() {
   // эффект перезапустился → обнулили), из-за чего расшифровка стиралась сразу
   // после загрузки и страница молотила запросы без остановки.
   useEffect(() => {
-    setTranscript(""); setSegments(null); setLive(null);
+    setTranscript(""); setSegments(null); setLive(null); setDocxProv("");
   }, [sel]);
 
   // Load selected job detail + transcript, poll while busy.
@@ -839,8 +840,31 @@ export default function Recognition() {
                   ))}
                 </div>
                 <div className="w-full lg:w-auto lg:ml-auto flex gap-2 flex-wrap justify-end">
+                  {/* Движок — прямо на кнопке. Без него нельзя было понять, чей
+                      документ скачался: запрос без указания движка отдаёт
+                      ПОСЛЕДНИЙ собранный, и нажатие сразу после «Пересобрать»
+                      молча возвращало предыдущую версию. При нескольких
+                      версиях выбор ещё и нужен сам по себе — чтобы сравнивать
+                      движки на одной встрече. */}
                   {detail.status === "done" && detail.docx_providers?.length ? (
-                    <a className="btn btn-ghost" href={`/api/jobs/${detail.id}/result?format=docx`}><Download size={14} /> Word</a>
+                    detail.docx_providers.length > 1 ? (
+                      <>
+                        <Select className="w-[150px]" value={docxProv || detail.docx_providers[detail.docx_providers.length - 1]}
+                          onChange={setDocxProv}
+                          options={detail.docx_providers.map((p: string) => ({ value: p, label: p }))} />
+                        <a className="btn btn-ghost"
+                          href={`/api/jobs/${detail.id}/result?format=docx&provider=${encodeURIComponent(docxProv || detail.docx_providers[detail.docx_providers.length - 1])}`}>
+                          <Download size={14} /> Word</a>
+                      </>
+                    ) : (
+                      <a className="btn btn-ghost"
+                        href={`/api/jobs/${detail.id}/result?format=docx&provider=${encodeURIComponent(detail.docx_providers[0])}`}>
+                        <Download size={14} /> Word · {detail.docx_providers[0]}</a>
+                    )
+                  ) : null}
+                  {detail.status === "analyzing" && detail.docx_providers?.length ? (
+                    <span className="text-[11.5px] self-center" style={{ color: "var(--muted)" }}>
+                      собирается новая версия — прежнюю скачаете после</span>
                   ) : null}
                   {(detail.status === "done" || detail.status === "cancelled") && (
                     <>
