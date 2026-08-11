@@ -99,3 +99,52 @@ def test_поток_включён_по_умолчанию():
     # Пауза между кусками щедрая: на загруженном бесплатном тарифе они
     # приходят с задержками в десятки секунд.
     assert llm._NVIDIA_CHUNK_TIMEOUT >= 60
+
+
+class TestОтменаСквозьОбёртки:
+    """Отмена должна доходить до провайдера и через ротацию ключей. При ОДНОМ
+    ключе обёртки нет, и тест провайдера этого не поймает — а при двух ключах
+    цепочка видит уже обёртку, а не сам движок."""
+
+    class _Fake:
+        name = "nvidia"
+        accepts_should_stop = True
+
+        def __init__(self, model=None, api_key=None, extra=None):
+            self.api_key = api_key
+
+        def complete(self, prompt, max_tokens=2000, force_json=True,
+                     should_stop=None):
+            if should_stop and should_stop():
+                raise llm.GenerationCancelled()
+            return "ответ"
+
+    def test_ротация_передаёт_отмену_внутрь(self):
+        rot = llm._RotatingProvider(self._Fake, None,
+                                    [("k1", ""), ("k2", "")])
+        assert rot.accepts_should_stop is True
+        assert rot.complete("тест") == "ответ"
+        with pytest.raises(llm.GenerationCancelled):
+            rot.complete("тест", should_stop=lambda: True)
+
+    def test_цепочка_видит_признак_а_не_тип(self):
+        """Проверка по isinstance пропускала обёртку ротации."""
+        rot = llm._RotatingProvider(self._Fake, None, [("k1", ""), ("k2", "")])
+        chain = llm._FallbackChain([rot])
+        with pytest.raises(llm.GenerationCancelled):
+            chain.complete("тест", should_stop=lambda: True)
+
+    def test_движки_без_поддержки_не_получают_лишний_аргумент(self):
+        """У Groq/Gemini такого параметра нет — передача сломала бы вызов."""
+        class Plain:
+            name = "groq"
+
+            def __init__(self, *a, **k):
+                pass
+
+            def complete(self, prompt, max_tokens=2000, force_json=True):
+                return "ok"
+
+        rot = llm._RotatingProvider(Plain, None, [("k1", "")])
+        assert rot.accepts_should_stop is False
+        assert rot.complete("тест", should_stop=lambda: True) == "ok"

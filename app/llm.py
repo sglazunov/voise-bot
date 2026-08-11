@@ -604,6 +604,9 @@ class NvidiaProvider:
     """
 
     name = "nvidia"
+    # Признак для цепочки и обёртки ротации: этот движок умеет прерываться
+    # ВНУТРИ вызова (в потоке один вызов длится минутами).
+    accepts_should_stop = True
 
     def __init__(self, model: str | None = None, api_key: str | None = None,
                  extra: str | None = None) -> None:
@@ -908,6 +911,10 @@ class _RotatingProvider:
         self._i = 0                             # round-robin cursor (next key to use)
         self._cooldown: dict[int, float] = {}   # key index -> resting until (unix ts)
         self._instances: dict[int, object] = {}
+        # Умеет ли обёрнутый движок прерываться внутри вызова. Без этого при
+        # ДВУХ ключах отмена в потоке молча переставала работать: цепочка
+        # смотрит на тип, а тип здесь — обёртка, а не сам провайдер.
+        self.accepts_should_stop = getattr(cls, "accepts_should_stop", False)
 
     def _inst(self, i: int):
         if i not in self._instances:
@@ -915,9 +922,11 @@ class _RotatingProvider:
             self._instances[i] = self._cls(model=self._model, api_key=k, extra=ex)
         return self._instances[i]
 
-    def complete(self, prompt: str, max_tokens: int = 2000, force_json: bool = True) -> str:
+    def complete(self, prompt: str, max_tokens: int = 2000,
+                 force_json: bool = True, should_stop=None) -> str:
         n = len(self._creds)
         deadline = time.time() + KEY_TOTAL_WAIT_SEC
+        kw = {"should_stop": should_stop} if self.accepts_should_stop else {}
         while True:
             now = time.time()
             order = [(self._i + k) % n for k in range(n)]
@@ -925,7 +934,8 @@ class _RotatingProvider:
             if ready:
                 for i in ready:
                     try:
-                        out = self._inst(i).complete(prompt, max_tokens, force_json)
+                        out = self._inst(i).complete(prompt, max_tokens,
+                                                     force_json, **kw)
                         self._i = (i + 1) % n   # spread the NEXT request onto the next key
                         return out
                     except Exception as e:      # noqa: BLE001
@@ -1016,9 +1026,11 @@ class _FallbackChain:
                     out = b.complete(prompt, max_tokens=mt, force_json=force_json,
                                      on_token=on_token, should_stop=should_stop,
                                      json_schema=json_schema)
-                elif isinstance(b, NvidiaProvider):
+                elif getattr(b, "accepts_should_stop", False):
                     # В потоке один вызов живёт минутами — «Стоп» обязан
                     # действовать внутри него, а не только между вызовами.
+                    # Проверяем ПРИЗНАК, а не тип: при нескольких ключах здесь
+                    # лежит обёртка ротации, и проверка типа её не узнавала.
                     out = b.complete(prompt, mt, force_json,
                                      should_stop=should_stop)
                 else:
