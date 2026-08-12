@@ -193,6 +193,12 @@ function ProviderCard({ p, models, onChange, toast }:
                 <span style={{ color: "var(--muted)" }}>
                   · добавлен {new Date(k.added_at * 1000).toLocaleDateString("ru-RU")}</span>
               )}
+              {/* Ключи, добавленные до появления даты: показываем не пустоту, а
+                  что именно сделать. Иначе выглядит как неработающая функция. */}
+              {k.added_at === undefined && p.id === "nvidia" && (
+                <span style={{ color: "var(--muted)" }}>
+                  · срок неизвестен — переподключите ключ, чтобы видеть остаток</span>
+              )}
               <button className="ml-auto btn-danger grid place-items-center" style={{ width: 26, height: 26, borderRadius: 8 }}
                 onClick={() => removeKey(k.index)} title="Удалить ключ"><X size={13} /></button>
             </div>
