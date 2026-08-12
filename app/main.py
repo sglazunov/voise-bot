@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import time
 import threading
 from pathlib import Path
 
@@ -748,8 +749,25 @@ def provider_keys(provider: str, user: str = Depends(current_user)):
         k = k or ""
         return "•" * len(k) if len(k) <= 8 else f"{k[:4]}…{k[-4:]}"
 
+    # Срок жизни ключа. У NVIDIA бесплатный ключ действует полгода: когда он
+    # истекает, протоколы начинают молча собираться запасным движком, и без
+    # подсказки причину ищут долго. У остальных провайдеров срока нет — там
+    # отдаём только дату добавления.
+    ttl = config.KEY_TTL_DAYS.get(prov)
+    now = time.time()
+
+    def life(at: float) -> dict:
+        if not at:
+            return {}                       # ключ добавлен до появления даты
+        out = {"added_at": at}
+        if ttl:
+            out["expires_at"] = at + ttl * 86400
+            out["days_left"] = int((at + ttl * 86400 - now) // 86400)
+        return out
+
     return {"provider": prov, "keys": [
-        {"index": i, "masked": mask(e.get("key", "")), "extra": (e.get("extra") or "")}
+        {"index": i, "masked": mask(e.get("key", "")),
+         "extra": (e.get("extra") or ""), **life(float(e.get("at") or 0))}
         for i, e in enumerate(entries)]}
 
 

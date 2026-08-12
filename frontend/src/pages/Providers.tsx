@@ -179,6 +179,20 @@ function ProviderCard({ p, models, onChange, toast }:
               <KeyRound size={13} color="var(--muted)" />
               <span className="font-mono">{k.masked}</span>
               {k.extra && <span style={{ color: "var(--muted)" }}>· {k.extra}</span>}
+              {/* Срок жизни: бесплатный ключ NVIDIA действует полгода. Когда он
+                  истекает, протоколы начинают молча собираться запасным
+                  движком, и причину ищут долго — поэтому она видна заранее. */}
+              {k.days_left !== undefined && (
+                <span style={{ color: k.days_left < 0 ? "#f87171"
+                             : k.days_left < 30 ? "#fbbf24" : "var(--muted)" }}>
+                  · {k.days_left < 0 ? "истёк "
+                     : `осталось ${k.days_left} дн., до `}
+                  {new Date(k.expires_at * 1000).toLocaleDateString("ru-RU")}</span>
+              )}
+              {k.days_left === undefined && k.added_at !== undefined && (
+                <span style={{ color: "var(--muted)" }}>
+                  · добавлен {new Date(k.added_at * 1000).toLocaleDateString("ru-RU")}</span>
+              )}
               <button className="ml-auto btn-danger grid place-items-center" style={{ width: 26, height: 26, borderRadius: 8 }}
                 onClick={() => removeKey(k.index)} title="Удалить ключ"><X size={13} /></button>
             </div>

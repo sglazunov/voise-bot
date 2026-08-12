@@ -178,6 +178,12 @@ PROVIDER_MODELS = {
 # Providers configurable from the UI by an API key (+ optional extra field).
 KEY_PROVIDERS = {"anthropic", "groq", "nvidia", "gemini", "yandex", "gigachat"}
 
+# Сколько дней живёт ключ провайдера. Пока известен только у NVIDIA: бесплатный
+# `nvapi-…` выдаётся на полгода. Когда он истекает, протоколы начинают молча
+# собираться запасным движком — в шапке появляется «Выбранный движок не
+# ответил», а причина неочевидна. Интерфейс показывает остаток по этой цифре.
+KEY_TTL_DAYS = {"nvidia": 183}
+
 # Per-minute token budget (TPM) of a provider's free tier, counted per REQUEST as
 # input + the REQUESTED max_tokens. Asking for a big answer can therefore fail on
 # its own (HTTP 413 "Request too large"), no matter how many keys you have — every

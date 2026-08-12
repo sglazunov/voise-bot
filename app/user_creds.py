@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 
 from . import config, db, security
@@ -73,7 +74,12 @@ def load(user: str) -> dict:
         dec = []
         for e in entries:
             dec.append({"key": security.decrypt_secret(user, e.get("key", "")),
-                        "extra": security.decrypt_secret(user, e.get("extra", ""))})
+                        "extra": security.decrypt_secret(user, e.get("extra", "")),
+                        # Когда ключ добавили. Нужно для срока жизни: бесплатный
+                        # ключ NVIDIA действует полгода, и когда он истекает,
+                        # протоколы начинают молча собираться запасным движком.
+                        # У ключей, добавленных до этой правки, даты нет — 0.
+                        "at": float(e.get("at") or 0)})
         if dec:
             out[prov] = dec
     return out
@@ -90,7 +96,8 @@ def add(user: str, provider: str, key: str, extra: str = "") -> None:
             _write(user, raw)
             return
     entries.append({"key": security.encrypt_secret(user, key or ""),
-                    "extra": security.encrypt_secret(user, extra or "")})
+                    "extra": security.encrypt_secret(user, extra or ""),
+                    "at": time.time()})
     raw[provider] = entries
     _write(user, raw)
 
