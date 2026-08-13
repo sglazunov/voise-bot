@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Video, RefreshCw, Square, Clock, Loader2, Link2, NotebookPen, Radio } from "lucide-react";
+import { Video, RefreshCw, Square, Clock, Loader2, Link2, NotebookPen, Radio, ScrollText } from "lucide-react";
 import { Page } from "../components/Layout";
 import { Switch, StatusBadge, Modal, useToast } from "../components/ui";
 import { api } from "../lib/api";
@@ -45,6 +45,7 @@ export default function Meetings() {
   // recording on top, the participant's notes underneath. Notes live on the
   // meeting itself, so they work before the recognition job even exists.
   const [notesFor, setNotesFor] = useState<Meeting | null>(null);
+  const [logFor, setLogFor] = useState<Meeting | null>(null);
   const [notesText, setNotesText] = useState("");
   const [notesSaving, setNotesSaving] = useState(false);
   const [liveText, setLiveText] = useState("");
@@ -163,6 +164,16 @@ export default function Meetings() {
                   style={{ width: 30, height: 30, borderRadius: 9 }}
                   title="Live-расшифровка и заметки со встречи"
                   onClick={() => openNotes(m)}><NotebookPen size={14} /></button>
+                {/* Лог бота. Раньше наружу шла только последняя строка, и любую
+                    проблему записи (не сработало стоп-слово, не найдена кнопка
+                    чата, писал пустую комнату) приходилось разбирать вслепую. */}
+                {m.logs?.length ? (
+                  <button className="btn-ghost grid place-items-center flex-none"
+                    style={{ width: 30, height: 30, borderRadius: 9 }}
+                    title="Лог бота: что он видел и делал на встрече"
+                    onClick={() => setLogFor(logFor?.task_id === m.task_id ? null : m)}>
+                    <ScrollText size={14} /></button>
+                ) : null}
                 {!rec && (
                   <button className="btn-ghost grid place-items-center flex-none"
                     style={{ width: 30, height: 30, borderRadius: 9 }}
@@ -190,6 +201,16 @@ export default function Meetings() {
             {rec && (
               <div className="mt-3" style={{ height: 6, borderRadius: 6, background: "rgba(120,140,150,.2)", overflow: "hidden" }}>
                 <div style={{ height: "100%", width: "62%", borderRadius: 6, background: "linear-gradient(90deg,var(--accent),var(--accent2))" }} /></div>
+            )}
+            {logFor?.task_id === m.task_id && (
+              <div className="mt-3">
+                <div className="text-[11.5px] mb-1.5" style={{ color: "var(--muted)" }}>
+                  Что бот видел и делал. Строки со словом «Чат» показывают, открыл
+                  ли он панель чата и заметил ли стоп-слово.
+                </div>
+                <pre className="glass2 rounded-xl p-3 text-[11.5px] whitespace-pre-wrap"
+                  style={{ maxHeight: 300, overflow: "auto" }}>{m.logs?.join("\n")}</pre>
+              </div>
             )}
           </div>
         );

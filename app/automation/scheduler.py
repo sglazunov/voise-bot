@@ -63,7 +63,12 @@ class MeetingState:
                 "job_id": self.job_id, "cloud_url": self.cloud_url,
                 "upload_error": self.upload_error,
                 "has_live": bool(self.live_text), "has_notes": bool(self.live_notes),
-                "do_protocol": self.do_protocol, "record_flag": self.record_flag}
+                "do_protocol": self.do_protocol, "record_flag": self.record_flag,
+                # Лог рекордера копился в памяти, но наружу отдавалась только
+                # ПОСЛЕДНЯЯ строка (как detail). Из-за этого любую проблему бота
+                # — не сработавшее стоп-слово, не найденную кнопку чата, запись
+                # пустой комнаты — приходилось разбирать вслепую. Отдаём хвост.
+                "logs": list(self.logs)[-80:]}
 
 
 class Scheduler:
