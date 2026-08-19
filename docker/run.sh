@@ -48,6 +48,25 @@ start_display_and_audio() {
       xdpyinfo -display "$disp" >/dev/null 2>&1 && break
       sleep 0.2
     done
+    # Результат ПРОВЕРЯЕМ. Раньше цикл просто истекал, контейнер стартовал без
+    # экрана, и узнавали об этом на первой встрече: Playwright падал с «launched
+    # a headed browser without having a XServer running», а в карточке встречи
+    # оказывался его стектрейс. Одна повторная попытка и громкое сообщение.
+    if ! xdpyinfo -display "$disp" >/dev/null 2>&1; then
+      echo "[run] WARNING: экран $disp не поднялся, пробую ещё раз…"
+      tail -3 "/tmp/xvfb$i.log" 2>/dev/null
+      Xvfb "$disp" -screen 0 "$SCREEN_RES" -nolisten tcp -ac >>"/tmp/xvfb$i.log" 2>&1 &
+      for _ in $(seq 1 40); do
+        xdpyinfo -display "$disp" >/dev/null 2>&1 && break
+        sleep 0.25
+      done
+    fi
+    if xdpyinfo -display "$disp" >/dev/null 2>&1; then
+      echo "[run] slot $i: экран $disp готов."
+    else
+      echo "[run] ОШИБКА: экран $disp НЕ РАБОТАЕТ — бот не сможет зайти на встречу."
+      echo "[run] Лог: /tmp/xvfb$i.log. Лечится: docker compose restart app"
+    fi
     pactl load-module module-null-sink \
           "sink_name=meet$i" "sink_properties=device.description=meet$i" \
           >/dev/null 2>&1 || true

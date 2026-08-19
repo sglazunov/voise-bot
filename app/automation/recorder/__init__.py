@@ -241,6 +241,15 @@ def record_meeting(url: str, out_path: str, cfg: dict,
                 rec.stop()
         except Exception:
             pass
+        # Отсутствие виртуального экрана Playwright сообщает стектрейсом на
+        # английском, и в карточке встречи вместо причины оказывалась простыня
+        # «BrowserType.launch_persistent_context…». Причина всегда одна и
+        # лечится одинаково — скажем это по-русски.
+        if "xserver" in str(e).lower() or "xvfb-run" in str(e).lower():
+            return {"ok": False, "error":
+                    "Не запущен виртуальный экран (Xvfb) — браузер бота не может "
+                    "открыться. Лечится перезапуском: docker compose restart app. "
+                    "Подробности — в логе контейнера, строки «[run] … экран»."}
         return {"ok": False, "error": f"Ошибка записи: {e}"}
     finally:
         wd_stop.set()
