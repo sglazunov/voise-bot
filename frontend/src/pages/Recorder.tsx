@@ -79,7 +79,18 @@ export default function Recorder() {
             <div className="font-bold text-[15px]">Выход из встречи</div></div>
           <label className="lbl">Стоп-слово в чате</label>
           <input className="field" value={s.chat_stop_word || ""} onChange={(e) => set("chat_stop_word", e.target.value)} placeholder="стоп" />
-          <div className="text-[11.5px] mt-1" style={{ color: "var(--muted)" }}>Бот следит за чатом и выходит, увидев это слово.</div>
+          {/* Гостю Телемост чат не показывает — панель у бота пустая. Молчать
+              об этом нельзя: настройка выглядит рабочей, а команда не доходит. */}
+          {s.chat_stop_word && (s.auth_mode || "guest") !== "profile" ? (
+            <div className="text-[11.5px] mt-1" style={{ color: "#fbbf24" }}>
+              В режиме входа «Гость» это НЕ работает: Телемост не показывает чат
+              участникам без аккаунта, у бота он пустой. Останавливайте кнопкой
+              «Стоп» на карточке встречи — либо переключите вход на
+              «Авторизованный».
+            </div>
+          ) : (
+            <div className="text-[11.5px] mt-1" style={{ color: "var(--muted)" }}>Бот следит за чатом и выходит, увидев это слово.</div>
+          )}
           <div className="grid grid-cols-2 gap-3 mt-3">
             <Num label="Один в комнате, сек" k="end_when_alone_sec" s={s} set={set} hint="выйти, если остался один" />
             <Num label="Мин. участников" k="min_participants" s={s} set={set} />
