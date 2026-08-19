@@ -376,3 +376,65 @@ class TestOneUrlOneBot:
             s._states[other.key] = other
         res = s.run_now("alice", "2")
         assert not res["ok"] and "уже в этом звонке" in res["error"]
+
+
+class TestОднаКомнатаОдинБот:
+    """На встречу зашли ДВА «Протокол-бота». Со стороны это выглядело как
+    «стоп-слово срабатывает через раз»: по команде выходил один бот, второй
+    продолжал писать. Защита «одна ссылка — один бот» была, но сравнивала
+    строки ДОСЛОВНО, а на одну комнату ссылка приходит в разной форме."""
+
+    def test_форма_ссылки_не_мешает_узнать_комнату(self):
+        from app.automation.scheduler import room_key
+        base = "https://telemost.yandex.ru/j/8815551234"
+        for variant in (base, base + "/", base + "?from=weeek",
+                        base.upper(), base.replace("https://", ""),
+                        base + "#anchor"):
+            assert room_key(variant) == room_key(base), variant
+
+    def test_разные_комнаты_не_путаются(self):
+        from app.automation.scheduler import room_key
+        a = "https://telemost.yandex.ru/j/1111111111"
+        b = "https://telemost.yandex.ru/j/2222222222"
+        assert room_key(a) != room_key(b)
+
+    def test_второй_бот_не_идёт_в_занятую_комнату(self, monkeypatch):
+        """Две задачи Weeek с одной комнатой, ссылки записаны по-разному."""
+        from datetime import datetime, timedelta, timezone
+        from app.automation import scheduler as sched_mod
+        monkeypatch.setenv("VTX_RECORDER_ENABLED", "1")
+        s = Scheduler()
+        s._boot_time = 0
+        now = datetime.now(timezone.utc)
+        room = "https://telemost.yandex.ru/j/8815551234"
+        rec = MeetingState(key="alice:1:a", task_id="1", title="Планёрка",
+                           url=room, start=now - timedelta(minutes=10),
+                           owner="alice", state="recording")
+        dup = MeetingState(key="alice:2:b", task_id="2", title="Планёрка",
+                           url=room + "?from=weeek", start=now,
+                           owner="alice", state="scheduled")
+        with s._lock:
+            s._states[rec.key] = rec
+            s._states[dup.key] = dup
+        launched = []
+        monkeypatch.setattr(sched_mod.recorder, "acquire_slot",
+                            lambda: launched.append(1) or object())
+        s._maybe_trigger("alice", {"lookahead_min": 2})
+        assert launched == [], "второй бот не должен заходить в ту же комнату"
+        assert s._states[dup.key].state == "skipped"
+
+    def test_ручной_запуск_тоже_проверяет_комнату(self):
+        from datetime import datetime, timezone
+        s = Scheduler()
+        room = "https://telemost.yandex.ru/j/777"
+        rec = MeetingState(key="alice:1:a", task_id="1", title="x", url=room,
+                           start=datetime.now(timezone.utc), owner="alice",
+                           state="recording")
+        other = MeetingState(key="alice:2:b", task_id="2", title="x",
+                             url=room + "/", start=datetime.now(timezone.utc),
+                             owner="alice", state="missed")
+        with s._lock:
+            s._states[rec.key] = rec
+            s._states[other.key] = other
+        res = s.run_now("alice", "2")
+        assert not res["ok"] and "уже в этом звонке" in res["error"]

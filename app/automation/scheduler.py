@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -69,6 +70,26 @@ class MeetingState:
                 # — не сработавшее стоп-слово, не найденную кнопку чата, запись
                 # пустой комнаты — приходилось разбирать вслепую. Отдаём хвост.
                 "logs": list(self.logs)[-80:]}
+
+
+_ROOM_RE = re.compile(r"/j/([a-z0-9_-]+)", re.I)
+
+
+def room_key(url: str) -> str:
+    """Комната Телемоста без учёта ФОРМЫ ссылки.
+
+    Защита «одна ссылка — один бот» сравнивала строки дословно, а на одну и ту
+    же комнату ссылка приходит по-разному: с параметрами после «?», с лишним
+    слешем, в другом регистре, иногда без протокола. Достаточно любого такого
+    расхождения — и на встречу заходили ДВА «Протокол-бота». Со стороны это
+    выглядело как «стоп-слово срабатывает через раз»: по команде выходил один
+    бот, второй продолжал писать.
+    """
+    u = (url or "").strip().lower()
+    m = _ROOM_RE.search(u)
+    if m:
+        return m.group(1)
+    return u.split("?")[0].split("#")[0].rstrip("/")
 
 
 class Scheduler:
@@ -338,11 +359,11 @@ class Scheduler:
         # (или две задачи с одной ссылкой) порождает два слота одной встречи —
         # без этого на звонок заходили ДВА бота.
         with self._lock:
-            busy_urls = {s.url for s in self._states.values()
+            busy_urls = {room_key(s.url) for s in self._states.values()
                          if s.owner == user and s.url
                          and s.state == "recording"}
         for _, chosen in candidates:
-            if chosen.url and chosen.url in busy_urls:
+            if chosen.url and room_key(chosen.url) in busy_urls:
                 with self._lock:
                     if chosen.state == "scheduled":
                         chosen.state, chosen.detail = (
@@ -365,7 +386,7 @@ class Scheduler:
             if not claimed:
                 recorder.release_slot(slot)
                 continue
-            busy_urls.add(chosen.url)
+            busy_urls.add(room_key(chosen.url))
             threading.Thread(target=self._run, args=(chosen, slot), daemon=True).start()
 
     # -- per-meeting pipeline ----------------------------------------------
@@ -1160,8 +1181,8 @@ class Scheduler:
         if st.state == "recording":
             return {"ok": False, "error": "Эта встреча уже записывается."}
         with self._lock:
-            if st.url and any(s.url == st.url and s.state == "recording"
-                              and s.key != st.key
+            if st.url and any(room_key(s.url) == room_key(st.url)
+                              and s.state == "recording" and s.key != st.key
                               for s in self._states.values() if s.owner == user):
                 return {"ok": False, "error": "Бот уже в этом звонке — эта "
                         "ссылка сейчас записывается. Второй бот в ту же комнату "
