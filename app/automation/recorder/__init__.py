@@ -148,7 +148,11 @@ def record_meeting(url: str, out_path: str, cfg: dict,
             return {"ok": False,
                     "error": "ffmpeg не смог записывать. " + (tail or
                              "Проверьте ffmpeg/дисплей/аудио слота.")}
-        log("🔴 Идёт запись встречи — бот в звонке.")
+        # Номер слота и общее число занятых — чтобы «на встрече два бота» было
+        # видно из лога, а не только глазами на плитках. Второй одновременный
+        # бот появляется тут как «запись 2 из 4».
+        log(f"🔴 Идёт запись встречи — бот в звонке "
+            f"(слот {slot.index}, всего записей идёт: {active_recordings()}).")
 
         # Д9: audio watchdog. A dead PulseAudio sink means the bot silently
         # records mute video for an hour — discovered only after the meeting.
