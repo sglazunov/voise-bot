@@ -149,12 +149,24 @@ def _save_users(users: dict) -> None:
         _atomic_write_json(_USERS_FILE, users)
 
 
+def _get_user(username: str) -> dict:
+    """Одна учётка по имени. На Postgres — точечный SELECT: раньше ради проверки
+    «есть ли такой» или «в какой он команде» читалась ВСЯ таблица users, а
+    team_of дёргается на каждой загрузке настроек."""
+    name = normalize_username(username)
+    if not name:
+        return {}
+    if db.enabled():
+        return db.user_get(name) or {}
+    return _load_users().get(name) or {}
+
+
 def normalize_username(username: str) -> str:
     return (username or "").strip().lower()
 
 
 def user_exists(username: str) -> bool:
-    return normalize_username(username) in _load_users()
+    return bool(_get_user(username))
 
 
 def list_users() -> list[str]:
@@ -181,14 +193,14 @@ def normalize_phone(raw: str | None) -> str:
 
 def masked_phone(username: str) -> str:
     """Phone for display: all but the last 2 digits hidden («+7•••••••••45»)."""
-    rec = _load_users().get(normalize_username(username)) or {}
+    rec = _get_user(username)
     p = rec.get("phone", "")
     return f"+{p[0]}{'•' * (len(p) - 3)}{p[-2:]}" if len(p) >= 10 else ""
 
 
 def verify_phone(username: str, phone: str) -> bool:
     """Constant-time check that `phone` matches the user's registered one."""
-    rec = _load_users().get(normalize_username(username)) or {}
+    rec = _get_user(username)
     stored = rec.get("phone", "")
     given = normalize_phone(phone)
     return bool(stored) and bool(given) and hmac.compare_digest(stored, given)
@@ -382,7 +394,7 @@ def team_of(username: str) -> str:
     """The team-admin login this account belongs to (its own login for an admin,
     or for legacy accounts without a team)."""
     username = normalize_username(username)
-    rec = _load_users().get(username) or {}
+    rec = _get_user(username)
     return rec.get("team") or username
 
 
@@ -415,7 +427,7 @@ def invite_code_of(username: str) -> str | None:
 
 def invite_code_expires_at(username: str) -> float | None:
     """When the current code stops working (unix ts), for the UI countdown."""
-    rec = _load_users().get(normalize_username(username)) or {}
+    rec = _get_user(username)
     if not rec.get("is_admin") or not rec.get("invite_code"):
         return None
     return (rec.get("invite_code_at") or 0) + INVITE_CODE_TTL
@@ -615,8 +627,7 @@ def throttle_clear(*keys: str) -> None:
 # Sessions
 # --------------------------------------------------------------------------- #
 def _load_sessions() -> dict:
-    if db.enabled():
-        return db.sessions_load()
+    """Только файловый режим: на Postgres сессии читаются по одной."""
     if not _SESSIONS_FILE.exists():
         return {}
     try:
@@ -626,10 +637,8 @@ def _load_sessions() -> dict:
 
 
 def _save_sessions(sessions: dict) -> None:
-    if db.enabled():
-        db.sessions_save(sessions)
-    else:
-        _atomic_write_json(_SESSIONS_FILE, sessions)
+    """Только файловый режим: на Postgres сессии пишутся по одной."""
+    _atomic_write_json(_SESSIONS_FILE, sessions)
 
 
 def _token_key(token: str) -> str:
@@ -639,12 +648,22 @@ def _token_key(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
+# Работа с сессиями на Postgres идёт ТОЧЕЧНО: одна строка по ключу. Раньше
+# каждый из этих вызовов — а session_user выполняется на КАЖДОМ HTTP-запросе —
+# читал всю таблицу сессий в память и при любом изменении переписывал её
+# целиком. Файловый режим (без БД) так и остался «прочитать всё → записать
+# всё»: там это один маленький JSON и другого способа нет.
 def create_session(username: str) -> str:
     username = normalize_username(username)
     token = secrets.token_urlsafe(32)
+    exp = time.time() + SESSION_TTL
+    if db.enabled():
+        db.session_put(_token_key(token), username, exp)
+        db.sessions_prune(time.time())
+        return token
     with _LOCK:
         sessions = _load_sessions()
-        sessions[_token_key(token)] = {"user": username, "exp": time.time() + SESSION_TTL}
+        sessions[_token_key(token)] = {"user": username, "exp": exp}
         _prune(sessions)
         _save_sessions(sessions)
     return token
@@ -655,6 +674,14 @@ def session_user(token: str | None) -> str | None:
     if not token:
         return None
     key = _token_key(token)
+    if db.enabled():
+        s = db.session_get(key)
+        if not s:
+            return None
+        if s.get("exp", 0) < time.time():
+            db.session_delete(key)
+            return None
+        return s.get("user")
     with _LOCK:
         sessions = _load_sessions()
         s = sessions.get(key)
@@ -670,6 +697,9 @@ def session_user(token: str | None) -> str | None:
 def destroy_session(token: str | None) -> None:
     if not token:
         return
+    if db.enabled():
+        db.session_delete(_token_key(token))
+        return
     with _LOCK:
         sessions = _load_sessions()
         if sessions.pop(_token_key(token), None) is not None:
@@ -680,6 +710,9 @@ def destroy_user_sessions(username: str) -> None:
     """Revoke EVERY session of a user (called after a password recovery, so a
     possibly-compromised old session dies with the old password)."""
     username = normalize_username(username)
+    if db.enabled():
+        db.sessions_delete_user(username)
+        return
     with _LOCK:
         sessions = _load_sessions()
         stale = [k for k, s in sessions.items() if s.get("user") == username]
@@ -695,8 +728,8 @@ def is_admin(username: str | None) -> bool:
     server-wide operations — use is_super_admin for those."""
     if not username:
         return False
-    rec = _load_users().get(normalize_username(username))
-    return bool(rec and rec.get("is_admin"))
+    rec = _get_user(username)
+    return bool(rec.get("is_admin"))
 
 
 def is_super_admin(username: str | None) -> bool:

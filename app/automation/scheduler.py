@@ -840,32 +840,47 @@ class Scheduler:
         except (OSError, ValueError):
             return {}
 
-    # Снапшоты пишутся «прочитать всё → изменить одну запись → записать всё».
-    # Это делают одновременно поток записи, поздняя выгрузка в облако и
-    # сохранение заметок из интерфейса — без лока они затирали изменения друг
-    # друга (а на Postgres meetings_save ещё и удаляет ключи, которых нет в
-    # переданном словаре, то есть терялись целые встречи).
+    # Файловый режим пишет снапшоты «прочитать всё → изменить одну запись →
+    # записать всё». Это делают одновременно поток записи, поздняя выгрузка в
+    # облако и сохранение заметок из интерфейса — без лока они затирали правки
+    # друг друга. На Postgres лок не нужен: пишется ровно одна строка.
     _snap_lock = threading.Lock()
 
+    @staticmethod
+    def _snap_of(st: MeetingState) -> dict:
+        return {"state": st.state, "detail": st.detail,
+                "job_id": st.job_id, "cloud_url": st.cloud_url,
+                "out_path": st.out_path,
+                "live_notes": st.live_notes,
+                "do_protocol": st.do_protocol,
+                "saved_at": time.time()}
+
     def _save_state(self, st: MeetingState) -> None:
+        if db.enabled():
+            # Одна строка по ключу. Раньше здесь читались ВСЕ встречи команды и
+            # записывались обратно целиком, причём meetings_save удаляет ключи,
+            # которых нет в переданном словаре: два потока, сохранявшие разные
+            # встречи, стирали работу друг друга.
+            try:
+                db.meeting_upsert(st.owner, st.key, self._snap_of(st))
+                # Обрезка до 200 последних: в файловом режиме она делается при
+                # каждой записи, здесь — только на завершении встречи, чтобы не
+                # гонять DELETE на каждое обновление статуса.
+                if st.state in ("done", "error"):
+                    db.meetings_trim(st.owner)
+            except Exception:   # noqa: BLE001 — снапшот не должен ронять запись
+                pass
+            return
         with self._snap_lock:
             self._save_state_locked(st)
 
     def _save_state_locked(self, st: MeetingState) -> None:
         try:
             snaps = self._load_snaps(st.owner)
-            snaps[st.key] = {"state": st.state, "detail": st.detail,
-                             "job_id": st.job_id, "cloud_url": st.cloud_url,
-                             "out_path": st.out_path,
-                             "live_notes": st.live_notes,
-                             "do_protocol": st.do_protocol,
-                             "saved_at": time.time()}
+            snaps[st.key] = self._snap_of(st)
             if len(snaps) > 200:  # keep the newest 200
                 for k in sorted(snaps, key=lambda k: snaps[k].get("saved_at", 0))[:-200]:
                     snaps.pop(k, None)
-            if db.enabled():
-                db.meetings_save(st.owner, snaps)
-                return
             p = self._snap_path(st.owner)
             tmp = p.with_suffix(".tmp")
             tmp.write_text(json.dumps(snaps, ensure_ascii=False), encoding="utf-8")

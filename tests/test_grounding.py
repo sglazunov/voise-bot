@@ -117,13 +117,20 @@ class TestVerifyProtocol:
         assert notes in backend.prompts[0]      # the notes ARE the first fragment
 
     def test_engine_failure_ships_unverified_with_error(self, monkeypatch):
+        """Сбой движка — это про НАШ запрос, а не про качество протокола.
+
+        Раньше при отвалившемся движке все пункты оставались непроверенными, и
+        правило «нет цитаты — нет ответственного» снимало ответственных со ВСЕГО
+        протокола: человек получал документ, где поручения ничьи. Теперь при
+        ошибке проверки ответственные остаются как есть, а сам факт сбоя виден в
+        verification.error."""
         class Dead:
             name = "fake"
             def complete(self, *a, **k): raise RuntimeError("503")
         monkeypatch.setattr(analyze.llm, "get_provider_chain", lambda *a, **k: Dead())
         res = verify_protocol(_result(), TRANSCRIPT)
         assert "error" in res["verification"]
-        assert res["tasks"][1]["owner"] == ""    # строгое правило действует и тут
+        assert res["tasks"][1]["owner"] == "Мария"
 
     def test_empty_protocol_short_circuits(self, monkeypatch):
         called = []

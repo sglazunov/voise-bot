@@ -197,17 +197,12 @@ def _client_ip(request: Request) -> str:
     return request.client.host if request.client else "?"
 
 
-def require_admin(request: Request) -> str:
-    """Dependency for endpoints that change GLOBAL server state (installs,
-    server-wide tokens): only the SERVER FOUNDER may call them. A team admin
-    (is_admin) only owns their own workspace and must NOT touch shared infra."""
-    user = getattr(request.state, "user", None)
-    if not user:
-        raise HTTPException(401, "Требуется вход.")
-    if not security.is_super_admin(user):
-        raise HTTPException(403, "Только администратор сервера (первый "
-                                 "зарегистрированный) может менять серверные настройки.")
-    return user
+# Зависимости require_admin здесь больше нет: единственными маршрутами,
+# менявшими ГЛОБАЛЬНОЕ состояние сервера, были установка компонентов и токен
+# HuggingFace — они убраны (в контейнере установка невозможна, а токен задаётся
+# переменной окружения). Всё остальное в приложении принадлежит команде, а не
+# серверу. Понятие «основатель» осталось: security.is_super_admin. Если снова
+# появится общесерверная операция — вернуть такую зависимость поверх него.
 
 
 def current_user(request: Request) -> str:

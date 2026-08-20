@@ -268,6 +268,29 @@ def users_load() -> dict:
         return out
 
 
+def user_get(username: str) -> dict | None:
+    """Одна учётка по имени — вместо чтения всей таблицы users."""
+    with _conn() as conn, _cur(conn) as cur:
+        cur.execute("SELECT username, pw, phone, created_at, is_admin, team, "
+                    "invite_code, invite_code_at, is_super FROM users "
+                    "WHERE username=%s", (username,))
+        r = cur.fetchone()
+        if not r:
+            return None
+        rec = {"pw": r["pw"], "phone": r.get("phone") or "",
+               "created_at": r.get("created_at"),
+               "is_admin": bool(r.get("is_admin"))}
+        if r.get("team"):
+            rec["team"] = r["team"]
+        if r.get("invite_code"):
+            rec["invite_code"] = r["invite_code"]
+        if r.get("invite_code_at") is not None:
+            rec["invite_code_at"] = r["invite_code_at"]
+        if r.get("is_super"):
+            rec["is_super"] = True
+        return rec
+
+
 def users_save(users: dict) -> None:
     with _conn() as conn, _cur(conn) as cur:
         cur.execute("SELECT username FROM users")
@@ -294,25 +317,44 @@ def users_save(users: dict) -> None:
 # --------------------------------------------------------------------------- #
 # sessions  {token_hash: {user, exp}}
 # --------------------------------------------------------------------------- #
-def sessions_load() -> dict:
-    with _conn() as conn, _cur(conn) as cur:
-        cur.execute("SELECT token_hash, username, exp FROM sessions")
-        return {r["token_hash"]: {"user": r["username"], "exp": r["exp"]}
-                for r in cur.fetchall()}
 
 
-def sessions_save(sessions: dict) -> None:
+def session_get(token_hash: str) -> dict | None:
+    """Одна сессия по ключу. Раньше ради этого на КАЖДОМ запросе читалась вся
+    таблица сессий."""
     with _conn() as conn, _cur(conn) as cur:
-        cur.execute("SELECT token_hash FROM sessions")
-        existing = {r["token_hash"] for r in cur.fetchall()}
-        for th in existing - set(sessions):
-            cur.execute("DELETE FROM sessions WHERE token_hash=%s", (th,))
-        for th, s in sessions.items():
-            cur.execute(
-                """INSERT INTO sessions (token_hash, username, exp) VALUES (%s,%s,%s)
-                   ON CONFLICT (token_hash) DO UPDATE SET
-                     username=EXCLUDED.username, exp=EXCLUDED.exp""",
-                (th, s.get("user"), s.get("exp")))
+        cur.execute("SELECT username, exp FROM sessions WHERE token_hash=%s",
+                    (token_hash,))
+        r = cur.fetchone()
+        return {"user": r["username"], "exp": r["exp"]} if r else None
+
+
+def session_put(token_hash: str, username: str, exp: float) -> None:
+    with _conn() as conn, _cur(conn) as cur:
+        cur.execute(
+            """INSERT INTO sessions (token_hash, username, exp) VALUES (%s,%s,%s)
+               ON CONFLICT (token_hash) DO UPDATE SET
+                 username=EXCLUDED.username, exp=EXCLUDED.exp""",
+            (token_hash, username, exp))
+
+
+def session_delete(token_hash: str) -> None:
+    with _conn() as conn, _cur(conn) as cur:
+        cur.execute("DELETE FROM sessions WHERE token_hash=%s", (token_hash,))
+
+
+def sessions_delete_user(username: str) -> None:
+    """Погасить все сессии пользователя одним запросом."""
+    with _conn() as conn, _cur(conn) as cur:
+        cur.execute("DELETE FROM sessions WHERE username=%s", (username,))
+
+
+def sessions_prune(now: float) -> None:
+    """Убрать протухшие. Раньше это делалось перезаписью всей таблицы."""
+    with _conn() as conn, _cur(conn) as cur:
+        cur.execute("DELETE FROM sessions WHERE exp < %s", (now,))
+
+
 
 
 # --------------------------------------------------------------------------- #
@@ -386,6 +428,23 @@ def jobs_save(rows: list) -> None:
             cur.execute(sql, vals)
 
 
+def job_upsert(d: dict) -> None:
+    """Сохранить ОДНУ задачу. Раньше каждое изменение статуса или процента
+    переписывало всю таблицу задач целиком."""
+    placeholders = ", ".join(["%s"] * len(JOB_COLS))
+    updates = ", ".join(f'"{c}"=EXCLUDED."{c}"' for c in JOB_COLS if c != "id")
+    sql = (f"INSERT INTO jobs ({_JOB_COLS_Q}) VALUES ({placeholders}) "
+           f"ON CONFLICT (id) DO UPDATE SET {updates}")
+    vals = [_json(d.get(c)) if c in JOB_JSON_COLS else d.get(c) for c in JOB_COLS]
+    with _conn() as conn, _cur(conn) as cur:
+        cur.execute(sql, vals)
+
+
+def job_delete(job_id: str) -> None:
+    with _conn() as conn, _cur(conn) as cur:
+        cur.execute("DELETE FROM jobs WHERE id=%s", (job_id,))
+
+
 # --------------------------------------------------------------------------- #
 # user_settings  (per user: one JSONB bag, secrets already encrypted)
 # --------------------------------------------------------------------------- #
@@ -451,28 +510,45 @@ def meetings_load(user: str) -> dict:
                 for r in cur.fetchall()}
 
 
-def meetings_save(user: str, snaps: dict) -> None:
+
+
+def meeting_upsert(user: str, key: str, snap: dict) -> None:
+    """Сохранить ОДИН снапшот встречи. Раньше на его месте была запись всех
+    встреч команды разом, удалявшая ключи, которых нет в переданном словаре: два
+    потока, сохранявшие разные встречи, стирали работу друг друга."""
     with _conn() as conn, _cur(conn) as cur:
-        cur.execute("SELECT meeting_key FROM meetings WHERE username=%s", (user,))
-        existing = {r["meeting_key"] for r in cur.fetchall()}
-        for key in existing - set(snaps):
-            cur.execute("DELETE FROM meetings WHERE username=%s AND meeting_key=%s",
-                        (user, key))
-        for key, s in snaps.items():
-            cur.execute(
-                """INSERT INTO meetings
-                     (username, meeting_key, state, detail, job_id, cloud_url,
-                      out_path, live_notes, do_protocol, saved_at)
-                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                   ON CONFLICT (username, meeting_key) DO UPDATE SET
-                     state=EXCLUDED.state, detail=EXCLUDED.detail,
-                     job_id=EXCLUDED.job_id, cloud_url=EXCLUDED.cloud_url,
-                     out_path=EXCLUDED.out_path,
-                     live_notes=EXCLUDED.live_notes,
-                     do_protocol=EXCLUDED.do_protocol, saved_at=EXCLUDED.saved_at""",
-                (user, key, s.get("state"), s.get("detail"), s.get("job_id"),
-                 s.get("cloud_url"), s.get("out_path"), s.get("live_notes"),
-                 bool(s.get("do_protocol")), s.get("saved_at")))
+        cur.execute(
+            """INSERT INTO meetings
+                 (username, meeting_key, state, detail, job_id, cloud_url,
+                  out_path, live_notes, do_protocol, saved_at)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+               ON CONFLICT (username, meeting_key) DO UPDATE SET
+                 state=EXCLUDED.state, detail=EXCLUDED.detail,
+                 job_id=EXCLUDED.job_id, cloud_url=EXCLUDED.cloud_url,
+                 out_path=EXCLUDED.out_path,
+                 live_notes=EXCLUDED.live_notes,
+                 do_protocol=EXCLUDED.do_protocol, saved_at=EXCLUDED.saved_at""",
+            (user, key, snap.get("state"), snap.get("detail"), snap.get("job_id"),
+             snap.get("cloud_url"), snap.get("out_path"), snap.get("live_notes"),
+             bool(snap.get("do_protocol")), snap.get("saved_at")))
+
+
+def meetings_trim(user: str, keep: int = 200) -> None:
+    """Оставить только `keep` последних снапшотов команды. В файловом режиме
+    обрезка делается при каждой записи; на Postgres строка пишется точечно, так
+    что чистку зовём отдельно — при завершении встречи."""
+    with _conn() as conn, _cur(conn) as cur:
+        cur.execute(
+            """DELETE FROM meetings WHERE username=%s AND meeting_key NOT IN (
+                   SELECT meeting_key FROM meetings WHERE username=%s
+                   ORDER BY saved_at DESC NULLS LAST LIMIT %s)""",
+            (user, user, keep))
+
+
+def meeting_delete(user: str, key: str) -> None:
+    with _conn() as conn, _cur(conn) as cur:
+        cur.execute("DELETE FROM meetings WHERE username=%s AND meeting_key=%s",
+                    (user, key))
 
 
 # --------------------------------------------------------------------------- #

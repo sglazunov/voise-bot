@@ -100,7 +100,7 @@ def build_ffmpeg_cmd(out_path: str, cfg: dict,
     disp = display or _display()
     src = source or _pulse_source()
 
-    cmd = [ffmpeg, "-y", "-hide_banner"]
+    cmd = ["ffmpeg", "-y", "-hide_banner"]
     if capture_video:
         # -draw_mouse 0 hides the mouse cursor (Xvfb draws a bare "X" without a
         # cursor theme) so it never appears in the recording.

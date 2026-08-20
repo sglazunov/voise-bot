@@ -192,11 +192,18 @@ class JobStore:
 
     _save_lock = threading.Lock()
 
-    def _save(self) -> None:
-        data = [asdict(j) for j in self._jobs.values()]
+    def _save(self, job: "Job | None" = None) -> None:
+        """Сохранить состояние. На Postgres, если передана одна задача, пишется
+        ТОЛЬКО она: раньше каждое обновление процента переписывало всю таблицу
+        задач — при десятках записей это заметная нагрузка на ровном месте, да
+        ещё и затирало параллельные изменения соседних задач."""
         if db.enabled():
-            db.jobs_save(data)
+            if job is not None:
+                db.job_upsert(asdict(job))
+            else:
+                db.jobs_save([asdict(j) for j in self._jobs.values()])
             return
+        data = [asdict(j) for j in self._jobs.values()]
         # The worker thread and API threads may save concurrently; the shared
         # .tmp path must not be replaced out from under another writer.
         with self._save_lock:
@@ -240,7 +247,7 @@ class JobStore:
         )
         with self._lock:
             self._jobs[job.id] = job
-            self._save()
+            self._save(job)
         self._queue.put(job.id)
         return job
 
@@ -378,7 +385,7 @@ class JobStore:
         protocol generation — hit «Пересобрать» to apply them to an old job."""
         job = self._require(job_id)
         job.user_notes = (notes or "").strip()[:20000]
-        self._save()
+        self._save(job)
         return job
 
     def _rebuild_docx(self, job: Job) -> None:
@@ -427,7 +434,7 @@ class JobStore:
         a["_edited"] = True
         job.analysis = a
         self._rebuild_docx(job)
-        self._save()
+        self._save(job)
         self.index_search(job)
         return job
 
@@ -452,7 +459,7 @@ class JobStore:
         a["_edited"] = True
         job.analysis = a
         self._rebuild_docx(job)
-        self._save()
+        self._save(job)
         self.index_search(job)
         return job
 
@@ -772,12 +779,12 @@ class JobStore:
             for k, v in kw.items():
                 setattr(job, k, v)
             if persist:
-                self._save()
+                self._save(job)
             else:
                 # Throttle disk writes for high-frequency progress updates.
                 now = time.time()
                 if now - self._last_persist > 3:
-                    self._save()
+                    self._save(job)
                     self._last_persist = now
         # A finished job's outcome is recorded for the business metrics — job
         # rows themselves are purged by retention. Upsert by id, so re-running

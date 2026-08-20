@@ -232,9 +232,12 @@ class TestTeams:
         register(other, "other", phone="+79995556677")     # own team, is_admin=True
         assert security.is_admin("other") is True
         assert security.is_super_admin("other") is False    # but NOT server admin
-        # server-infra endpoints reject the non-founder team admin (403 before
-        # the handler runs — nothing is installed)
-        assert other.post("/api/setup/deps/ffmpeg/install").status_code == 403
+        # Оба — админы СВОЕЙ команды, и это не даёт власти над чужой: настройки
+        # видны только свои.
+        assert other.get("/api/automation/settings").status_code == 200
+        # HTTP-проверки «основателя» здесь нет намеренно: общесерверных
+        # маршрутов в приложении не осталось (установка компонентов убрана), а
+        # значит, и охранять нечего. Само разделение проверяется выше.
 
 
 # --------------------------------------------------------------------------- #
@@ -370,13 +373,14 @@ class TestPhoneRecovery:
 
     def test_recover_revokes_existing_sessions(self, client):
         register(client, "alice")                       # logged in via cookie
-        assert client.get("/api/auth/me").status_code == 200
+        # Любой маршрут, требующий входа: он и показывает, жива ли сессия.
+        assert client.get("/api/automation/settings").status_code == 200
         from starlette.testclient import TestClient
         from app.main import app
         client2 = TestClient(app)
         assert self._recover(client2, "brand-new-pass1").status_code == 200
         # the old session cookie must be dead after the reset
-        assert client.get("/api/auth/me").status_code == 401
+        assert client.get("/api/automation/settings").status_code == 401
 
     def test_profile_change_phone_needs_password(self, client):
         register(client, "alice")
