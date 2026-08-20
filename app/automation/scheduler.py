@@ -446,6 +446,13 @@ class Scheduler:
                 should_stop=lambda: (self._stop.is_set()
                                      or st.stop_flag
                                      or not auto_settings.get(user, "enabled")))
+            # Слот освобождаем СРАЗУ после записи: дальше идут выгрузка в
+            # облако и запись полей Weeek с ретраями — это минуты, а экран и
+            # звуковой приёмник для них не нужны. Раньше слот держался до
+            # конца, и параллельные встречи не получали свободного слота, а
+            # через десять минут помечались «пропущена».
+            recorder.release_slot(slot)
+            slot = None
             if not res.get("ok"):
                 self._set(st, "error", res.get("error") or "Запись не удалась.")
                 return
@@ -705,14 +712,26 @@ class Scheduler:
                 except Exception:
                     pass
 
+        # Ждём, пока задача ЖИВА. Двухчасовой срок объявлял провал даже тогда,
+        # когда задача честно стояла в очереди: воркер распознавания один, и
+        # три встречи подряд легко отодвигают последнюю на несколько часов.
+        # В Weeek уходил комментарий «протокол не собрался», в Telegram —
+        # тревога, карточка краснела, а через час протокол благополучно
+        # появлялся. Срок теперь работает только против ЗАВИСШЕЙ задачи:
+        # пока статус меняется или она в очереди, ждём дальше.
+        alive_states = ("queued", "running", "paused", "analyzing")
         deadline = time.time() + 2 * 3600
-        while time.time() < deadline:
+        while True:
             job = store.get(job_id)
             if job is None:
                 report("⚠ Протокол не прикреплён: задача распознавания пропала "
                        "(сервис перезапускался во время обработки).")
                 return
             if job.status in ("done", "error", "cancelled"):
+                break
+            if job.status in alive_states:
+                deadline = time.time() + 2 * 3600   # жива — срок сдвигаем
+            elif time.time() > deadline:
                 break
             time.sleep(5)
 
@@ -806,7 +825,18 @@ class Scheduler:
         except (OSError, ValueError):
             return {}
 
+    # Снапшоты пишутся «прочитать всё → изменить одну запись → записать всё».
+    # Это делают одновременно поток записи, поздняя выгрузка в облако и
+    # сохранение заметок из интерфейса — без лока они затирали изменения друг
+    # друга (а на Postgres meetings_save ещё и удаляет ключи, которых нет в
+    # переданном словаре, то есть терялись целые встречи).
+    _snap_lock = threading.Lock()
+
     def _save_state(self, st: MeetingState) -> None:
+        with self._snap_lock:
+            self._save_state_locked(st)
+
+    def _save_state_locked(self, st: MeetingState) -> None:
         try:
             snaps = self._load_snaps(st.owner)
             snaps[st.key] = {"state": st.state, "detail": st.detail,
@@ -1183,22 +1213,26 @@ class Scheduler:
                        if s.owner == user and str(s.task_id) == str(task_id)), None)
         if not st:
             return {"ok": False, "error": "Встреча не найдена (сначала опрос Weeek)."}
-        if st.state == "recording":
-            return {"ok": False, "error": "Эта встреча уже записывается."}
-        with self._lock:
-            if st.url and any(room_key(s.url) == room_key(st.url)
-                              and s.state == "recording" and s.key != st.key
-                              for s in self._states.values() if s.owner == user):
-                return {"ok": False, "error": "Бот уже в этом звонке — эта "
-                        "ссылка сейчас записывается. Второй бот в ту же комнату "
-                        "ничего не добавит; ссылки можно прикрепить к задаче "
-                        "вручную после записи."}
+        # Слот берём ДО проверки, чтобы проверка-и-захват состояния прошли под
+        # одним локом. Раньше проверка «уже записывается» и присвоение
+        # state="recording" стояли в РАЗНЫХ блоках лока: между ними успевал
+        # вклиниться планировщик, и на встречу заходили два бота.
         slot = recorder.acquire_slot()
         if slot is None:
             return {"ok": False, "error": f"Все слоты записи заняты "
                     f"(до {recorder.MAX_SLOTS} одновременно). Попробуйте позже."}
-        # Claim before spawning so a concurrent tick can't double-launch.
         with self._lock:
+            if st.state == "recording":
+                recorder.release_slot(slot)
+                return {"ok": False, "error": "Эта встреча уже записывается."}
+            if st.url and any(room_key(s.url) == room_key(st.url)
+                              and s.state == "recording" and s.key != st.key
+                              for s in self._states.values() if s.owner == user):
+                recorder.release_slot(slot)
+                return {"ok": False, "error": "Бот уже в этом звонке — эта "
+                        "ссылка сейчас записывается. Второй бот в ту же комнату "
+                        "ничего не добавит; ссылки можно прикрепить к задаче "
+                        "вручную после записи."}
             st.state, st.detail, st.stop_flag = "recording", "Бот заходит на встречу…", False
         threading.Thread(target=self._run, args=(st, slot), daemon=True).start()
         return {"ok": True, "detail": "Запись запущена."}
