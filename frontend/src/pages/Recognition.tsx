@@ -447,8 +447,12 @@ export default function Recognition() {
   // detail внутри него замыкал круг (обнулили → зависимость изменилась →
   // эффект перезапустился → обнулили), из-за чего расшифровка стиралась сразу
   // после загрузки и страница молотила запросы без остановки.
+  // Для какой задачи расшифровка уже скачана — чтобы не тянуть её на каждом
+  // тике опроса.
+  const fetchedFor = useRef<string | null>(null);
   useEffect(() => {
     setTranscript(""); setSegments(null); setLive(null); setDocxProv("");
+    fetchedFor.current = null;
   }, [sel]);
 
   // Load selected job detail + transcript, poll while busy.
@@ -467,13 +471,20 @@ export default function Recognition() {
         } else {
           setLive(null);
         }
-        // The transcript is FINISHED as soon as the protocol stage starts —
-        // show it during "analyzing" too, not only when the whole job is done.
-        if (j.status === "done" || j.status === "cancelled" || j.status === "analyzing") {
+        // Расшифровка готова уже к началу сборки протокола — показываем её и в
+        // состоянии «analyzing». Качаем ОДИН раз: опрос идёт каждые 2 секунды,
+        // и раньше на каждом тике заново тянулись оба формата целиком (json и
+        // txt) с полной перерисовкой — на часовой встрече это мегабайты в
+        // минуту и подтормаживающий интерфейс.
+        if ((j.status === "done" || j.status === "cancelled" || j.status === "analyzing")
+            && fetchedFor.current !== sel) {
+          fetchedFor.current = sel;
           api.get(`/api/jobs/${sel}/result?format=json`)
             .then((d) => { if (alive && d?.segments?.length) setSegments(d.segments); })
-            .catch(() => {});
-          api.text(`/api/jobs/${sel}/result?format=txt`).then((t) => alive && setTranscript(t)).catch(() => {});
+            .catch(() => { if (fetchedFor.current === sel) fetchedFor.current = null; });
+          api.text(`/api/jobs/${sel}/result?format=txt`)
+            .then((t) => alive && setTranscript(t))
+            .catch(() => { if (fetchedFor.current === sel) fetchedFor.current = null; });
         }
       } catch { /* gone */ }
     };

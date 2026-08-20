@@ -14,7 +14,7 @@ function Num({ label, k, s, set, hint }: any) {
 }
 
 export default function Recorder() {
-  const { s, set, save } = useSettings();
+  const { s, set, save , ready } = useSettings();
   const toast = useToast();
   const [logs, setLogs] = useState<string[] | null>(null);
   // Вход в Яндекс прямо из интерфейса: браузер работает на сервере, сюда
@@ -74,7 +74,7 @@ export default function Recorder() {
         join_timeout_sec: s.join_timeout_sec, end_when_alone_sec: s.end_when_alone_sec,
         min_participants: s.min_participants, max_meeting_min: s.max_meeting_min,
         chat_stop_word: s.chat_stop_word, capture_video: !!s.capture_video,
-        audio_device: s.audio_device || null, ffmpeg_path: s.ffmpeg_path || null,
+        audio_device: s.audio_device ?? "", ffmpeg_path: s.ffmpeg_path ?? "",
       });
       toast("Настройки бота сохранены");
     } catch (e: any) { toast(e.message, true); }
@@ -226,7 +226,7 @@ export default function Recorder() {
         </div>
       </Modal>
 
-      <div className="mt-3.5"><button className="btn btn-primary" onClick={onSave}>Сохранить настройки бота</button></div>
+      <div className="mt-3.5"><button className="btn btn-primary" onClick={onSave} disabled={!ready}>Сохранить настройки бота</button></div>
     </Page>
   );
 }

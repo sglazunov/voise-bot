@@ -7,7 +7,7 @@ import { api } from "../lib/api";
 import { TZ_RU, TZ_CIS, otherZones, tzLabel } from "../lib/timezones";
 
 export default function Weeek() {
-  const { s, set, save, reload } = useSettings();
+  const { s, set, save, reload , ready } = useSettings();
   const [token, setToken] = useState("");
   const [projects, setProjects] = useState<any[] | null>(null);
   const toast = useToast();
@@ -15,7 +15,8 @@ export default function Weeek() {
 
   async function onSave() {
     try {
-      const patch: any = { weeek_project_id: s.weeek_project_id || null, timezone: s.timezone || null };
+      // Пустая строка = «очистить»: null бэкенд игнорирует как «не меняли».
+      const patch: any = { weeek_project_id: s.weeek_project_id ?? "", timezone: s.timezone ?? "" };
       if (token.trim()) patch.weeek_token = token.trim();
       await save(patch); setToken(""); toast("Weeek сохранён"); reload();
     } catch (e: any) { toast(e.message, true); }
@@ -58,7 +59,7 @@ export default function Weeek() {
           </div>
           <div className="text-[12px] mt-1.5" style={{ color: "var(--muted)" }}>Пусто = все проекты</div>
           <div className="flex gap-2.5 mt-3 flex-wrap">
-            <button className="btn btn-primary" onClick={onSave}>Сохранить</button>
+            <button className="btn btn-primary" onClick={onSave} disabled={!ready}>Сохранить</button>
             <button className="btn btn-ghost" onClick={loadProjects}><RefreshCw size={15} /> Мои проекты</button>
             <button className="btn btn-danger" onClick={resetToken}><Trash2 size={14} /> Сбросить токен</button>
           </div>

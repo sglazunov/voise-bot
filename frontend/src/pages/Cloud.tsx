@@ -12,7 +12,7 @@ const DEST = [
 ];
 
 export default function CloudPage() {
-  const { s, set, save } = useSettings();
+  const { s, set, save , ready } = useSettings();
   const [ytoken, setYtoken] = useState("");
   const toast = useToast();
   const yd = s.yandex_disk || {};
@@ -20,8 +20,10 @@ export default function CloudPage() {
 
   async function onSave() {
     try {
-      const patch: any = { cloud, protocol_folder: s.protocol_folder || null,
-        yandex_disk: { folder: yd.folder || null } };
+      // Пустая строка = «очистить». null бэкенд трактует как «поле не меняли»,
+      // из-за чего папку протоколов нельзя было стереть.
+      const patch: any = { cloud, protocol_folder: s.protocol_folder ?? "",
+        yandex_disk: { folder: yd.folder ?? "" } };
       if (ytoken.trim()) patch.yandex_disk.token = ytoken.trim();
       await save(patch); setYtoken(""); toast("Облако сохранено");
     } catch (e: any) { toast(e.message, true); }
@@ -67,13 +69,13 @@ export default function CloudPage() {
               <input className="field" value={s.protocol_folder || ""} onChange={(e) => set("protocol_folder", e.target.value)} placeholder="disk:/Телемост/Протоколы" /></div>
           </div>
           <div className="flex gap-2.5 mt-3">
-            <button className="btn btn-primary" onClick={onSave}>Сохранить</button>
+            <button className="btn btn-primary" onClick={onSave} disabled={!ready}>Сохранить</button>
             <button className="btn btn-ghost" onClick={test}><UploadCloud size={15} /> Тест загрузки</button>
           </div>
         </Card>
       )}
       {cloud !== "yandex_disk" && (
-        <Card><div className="flex gap-2.5"><button className="btn btn-primary" onClick={onSave}>Сохранить</button></div></Card>
+        <Card><div className="flex gap-2.5"><button className="btn btn-primary" onClick={onSave} disabled={!ready}>Сохранить</button></div></Card>
       )}
     </Page>
   );

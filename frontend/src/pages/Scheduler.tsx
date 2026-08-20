@@ -28,7 +28,7 @@ function Toggle({ title, sub, on, onChange }: any) {
 }
 
 export default function Scheduler() {
-  const { s, set, save } = useSettings();
+  const { s, set, save , ready } = useSettings();
   const [st, setSt] = useState<Status | null>(null);
   const [engines, setEngines] = useState<{ value: string; label: string }[]>([]);
   const [presets, setPresets] = useState<{ value: string; label: string }[]>([]);
@@ -63,8 +63,8 @@ export default function Scheduler() {
     try {
       await save({
         poll_interval_sec: s.poll_interval_sec, lookahead_min: s.lookahead_min,
-        rec_time_from: s.rec_time_from || null, rec_time_to: s.rec_time_to || null, rec_days: days,
-        rec_default_on: !!s.rec_default_on, rec_include: s.rec_include || null, rec_exclude: s.rec_exclude || null,
+        rec_time_from: s.rec_time_from ?? "", rec_time_to: s.rec_time_to ?? "", rec_days: days,
+        rec_default_on: !!s.rec_default_on, rec_include: s.rec_include ?? "", rec_exclude: s.rec_exclude ?? "",
         do_transcribe: !!s.do_transcribe, do_protocol: !!s.do_protocol, ocr_screen: !!s.ocr_screen,
         identify_speakers: !!s.identify_speakers, post_back_to_weeek: !!s.post_back_to_weeek,
         weeek_set_video_field: !!s.weeek_set_video_field, upload_protocol: !!s.upload_protocol,
@@ -212,7 +212,7 @@ export default function Scheduler() {
       </Card>
 
       <div className="mt-3.5 flex gap-2.5">
-        <button className="btn btn-primary" onClick={onSave}><Send size={15} /> Сохранить планировщик</button>
+        <button className="btn btn-primary" onClick={onSave} disabled={!ready}><Send size={15} /> Сохранить планировщик</button>
       </div>
     </Page>
   );
