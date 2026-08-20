@@ -1304,6 +1304,32 @@ def _strip_unfounded_owners(result: dict, ver: dict) -> None:
 # --------------------------------------------------------------------------- #
 # Д13: targeted re-generation and meeting Q&A
 # --------------------------------------------------------------------------- #
+def _window_for_topic(text: str, topic: dict, budget_chars: int) -> str:
+    """Кусок расшифровки ВОКРУГ темы, а не её начало.
+
+    Раньше бралось `text[:budget_chars]` — префикс. На длинной встрече темы
+    второй половины переписывались по первой половине разговора: получалась
+    вода, refill_empty_topics считал раздел пустым и УДАЛЯЛ его. То есть чем
+    длиннее встреча, тем больше тем просто исчезало.
+
+    Ищем место по словам заголовка и уже имеющегося текста темы, затем берём
+    окно вокруг найденной позиции.
+    """
+    if len(text) <= budget_chars:
+        return text
+    needle = " ".join(str(topic.get(k) or "") for k in ("topic", "details"))
+    words = [w for w in re.findall(r"[^\W\d_]{5,}", needle.lower(), re.UNICODE)][:12]
+    low = text.lower()
+    hits = [low.find(w) for w in words]
+    hits = [h for h in hits if h >= 0]
+    if not hits:
+        return text[:budget_chars]
+    centre = sorted(hits)[len(hits) // 2]          # медиана устойчивее среднего
+    half = budget_chars // 2
+    start = max(0, centre - half)
+    return text[start:start + budget_chars]
+
+
 def regen_topic_details(transcript_text: str, topic: dict,
                         provider: str | None = None, keys: dict | None = None,
                         user_notes: str = "", backend=None) -> dict:
@@ -1315,7 +1341,7 @@ def regen_topic_details(transcript_text: str, topic: dict,
     создавать её заново значило бы откатиться на медленный локальный движок."""
     backend = backend or llm.get_provider_chain(provider, keys)
     budget_chars = max(int(0.7 * _ctx_budget(backend)) * 3, 8000)
-    text = (transcript_text or "")[:budget_chars]
+    text = _window_for_topic(transcript_text or "", topic, budget_chars)
     prompt = (
         "Ниже — расшифровка рабочей встречи (реплики с таймкодами [мм:сс]) и "
         "ОДНА тема её протокола. Перепиши раздел этой темы ЗАНОВО, подробнее и "

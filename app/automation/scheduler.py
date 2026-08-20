@@ -159,7 +159,11 @@ class Scheduler:
         try:
             self._poll(user, cfg)
             self._last_poll[user] = time.time()
-            self._maybe_trigger(user, cfg)
+            # Кнопка «Обновить из Weeek» обновляет список встреч, но НЕ должна
+            # запускать записи при выключенной автоматике: раньше она их
+            # запускала, и мастер-тумблер выглядел неработающим.
+            if cfg.get("enabled"):
+                self._maybe_trigger(user, cfg)
         except weeek.WeeekError as e:
             return {"ok": False, "error": str(e)}
         except Exception as e:  # noqa: BLE001
@@ -390,7 +394,14 @@ class Scheduler:
             threading.Thread(target=self._run, args=(chosen, slot), daemon=True).start()
 
     # -- per-meeting pipeline ----------------------------------------------
-    def _run(self, st: MeetingState, slot) -> None:
+    def _run(self, st: MeetingState, slot, manual: bool = False) -> None:
+        """`manual=True` — запуск кнопкой «Подключиться».
+
+        Тогда мастер-тумблер «Автоматика» в условие остановки НЕ входит: при
+        выключенной автоматике should_stop возвращал True сразу, вход в звонок
+        прерывался на первом же клике, и человек получал ложное «изменилась
+        вёрстка Телемоста» вместо «автоматика выключена».
+        """
         try:
             user = st.owner
             cfg = auto_settings.load(user)
@@ -445,7 +456,8 @@ class Scheduler:
                 st.url, out, cfg, on_log=log, slot=slot,
                 should_stop=lambda: (self._stop.is_set()
                                      or st.stop_flag
-                                     or not auto_settings.get(user, "enabled")))
+                                     or (not manual
+                                         and not auto_settings.get(user, "enabled"))))
             # Слот освобождаем СРАЗУ после записи: дальше идут выгрузка в
             # облако и запись полей Weeek с ретраями — это минуты, а экран и
             # звуковой приёмник для них не нужны. Раньше слот держался до
@@ -1234,7 +1246,8 @@ class Scheduler:
                         "ничего не добавит; ссылки можно прикрепить к задаче "
                         "вручную после записи."}
             st.state, st.detail, st.stop_flag = "recording", "Бот заходит на встречу…", False
-        threading.Thread(target=self._run, args=(st, slot), daemon=True).start()
+        threading.Thread(target=self._run, args=(st, slot, True),
+                         daemon=True).start()
         return {"ok": True, "detail": "Запись запущена."}
 
 

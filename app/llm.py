@@ -223,7 +223,22 @@ class OllamaProvider:
 
 
 # ---------------------------------------------------------------------------
-class GroqProvider:
+class _KeyProviderMixin:
+    """Общее для провайдеров, работающих по API-ключу.
+
+    `_retries` — сколько раз ждать при 429 ВНУТРИ одного ключа. Обёртка ротации
+    выставляет 0, когда ключей несколько: смысл ротации в том, чтобы при лимите
+    сразу уйти на следующий ключ, а не спать по 30 секунд на исчерпанном.
+    """
+
+    max_retries: int | None = None
+
+    @property
+    def _retries(self) -> int:
+        return 3 if self.max_retries is None else int(self.max_retries)
+
+
+class GroqProvider(_KeyProviderMixin):
     """Groq cloud, OpenAI-compatible. Free tier, needs GROQ_API_KEY."""
 
     name = "groq"
@@ -244,7 +259,8 @@ class GroqProvider:
         if force_json:
             payload["response_format"] = {"type": "json_object"}
         headers = {"Authorization": f"Bearer {self.api_key}"}
-        out = _http_post_json(url, payload, headers, timeout=180)
+        out = _http_post_json(url, payload, headers, timeout=180,
+                              max_retries=self._retries)
         return out["choices"][0]["message"]["content"].strip()
 
 
@@ -517,18 +533,34 @@ def nvidia_usable_models(api_key: str | None = None) -> list[str] | None:
     return models if isinstance(models, list) else None
 
 
+_nvidia_default_cache: dict[str, tuple[float, str]] = {}
+_NVIDIA_DEFAULT_TTL = 600.0     # 10 минут: каталог меняется днями, не минутами
+
+
 def nvidia_default_model(api_key: str | None = None) -> str:
     """Лучшая доступная модель: сначала проверенная по ключу, затем верхняя из
-    каталога, и только если сети нет — имя из настроек."""
+    каталога, и только если сети нет — имя из настроек.
+
+    Результат кэшируется в памяти на 10 минут. Без кэша КАЖДОЕ создание
+    провайдера без явной модели ходило в /v1/models с таймаутом 20 секунд — а
+    провайдер создаётся на каждый analyze/verify/ask/regen. На длинной встрече
+    это десятки лишних походов в сеть, и все они на критическом пути.
+    """
     key = api_key or config.NVIDIA_API_KEY
-    if key:
-        usable = nvidia_usable_models(key)
-        if usable:
-            return usable[0]
+    if not key:
+        return config.NVIDIA_MODEL
+    ident = _nvidia_key_id(key)
+    hit = _nvidia_default_cache.get(ident)
+    if hit and time.time() - hit[0] < _NVIDIA_DEFAULT_TTL:
+        return hit[1]
+    usable = nvidia_usable_models(key)
+    model = usable[0] if usable else ""
+    if not model:
         catalog = nvidia_models(key)
-        if catalog:
-            return catalog[0]
-    return config.NVIDIA_MODEL
+        model = catalog[0] if catalog else ""
+    model = model or config.NVIDIA_MODEL
+    _nvidia_default_cache[ident] = (time.time(), model)
+    return model
 
 
 def nvidia_ensure_verified(api_key: str | None = None) -> None:
@@ -611,7 +643,7 @@ def _nvidia_probe_loop(catalog: list[str], api_key: str, on_log) -> list[str]:
     return ok
 
 
-class NvidiaProvider:
+class NvidiaProvider(_KeyProviderMixin):
     """NVIDIA NIM (build.nvidia.com) — OpenAI-совместимый, ключ `nvapi-…`.
 
     Бесплатный, без карты. Важное ограничение: лимит ~40 запросов в минуту на
@@ -725,7 +757,7 @@ class AnthropicProvider:
 
 
 # ---------------------------------------------------------------------------
-class GeminiProvider:
+class GeminiProvider(_KeyProviderMixin):
     """Google Gemini. Free tier, needs GEMINI_API_KEY. May be region-blocked."""
 
     name = "gemini"
@@ -748,7 +780,8 @@ class GeminiProvider:
             gen["responseMimeType"] = "application/json"
         payload = {"contents": [{"parts": [{"text": prompt}]}], "generationConfig": gen}
         out = _http_post_json(url, payload,
-                              headers={"x-goog-api-key": self.api_key})
+                              headers={"x-goog-api-key": self.api_key},
+                              max_retries=self._retries)
         try:
             return out["candidates"][0]["content"]["parts"][0]["text"].strip()
         except (KeyError, IndexError) as e:
@@ -777,7 +810,8 @@ class YandexProvider:
         }
         headers = {"Authorization": f"Api-Key {self.api_key}",
                    "x-folder-id": self.folder}
-        out = _http_post_json(url, payload, headers)
+        out = _http_post_json(url, payload, headers,
+                              max_retries=self._retries)
         try:
             return out["result"]["alternatives"][0]["message"]["text"].strip()
         except (KeyError, IndexError) as e:
@@ -798,9 +832,29 @@ class GigaChatProvider:
     name = "gigachat"
     _token: str = ""
     _exp: float = 0.0
+    # Сбер выпускает сертификаты своим корневым центром («Russian Trusted Root
+    # CA»), которого нет в системном хранилище — поэтому проверка и была
+    # выключена целиком. Это плохо: ключ авторизации уходил по соединению, чью
+    # подлинность никто не подтверждал. Правильный путь — положить их корневой
+    # сертификат в образ и указать его здесь (VTX_GIGACHAT_CA либо стандартный
+    # путь /usr/local/share/ca-certificates/russian_trusted_root_ca.crt).
+    # Пока файла нет, проверка отключается КАК И РАНЬШЕ, но об этом пишется
+    # предупреждение — молча ходить без проверки нельзя.
     _ctx = ssl.create_default_context()
-    _ctx.check_hostname = False
-    _ctx.verify_mode = ssl.CERT_NONE
+    _ca_path = os.getenv(
+        "VTX_GIGACHAT_CA",
+        "/usr/local/share/ca-certificates/russian_trusted_root_ca.crt")
+    if os.path.exists(_ca_path):
+        _ctx.load_verify_locations(cafile=_ca_path)
+    else:
+        import warnings as _warnings
+        _warnings.warn(
+            "GigaChat: сертификат Минцифры не найден (%s) — TLS-проверка "
+            "отключена, ключ уходит по непроверенному соединению. Положите "
+            "файл в образ или задайте VTX_GIGACHAT_CA." % _ca_path,
+            RuntimeWarning, stacklevel=2)
+        _ctx.check_hostname = False
+        _ctx.verify_mode = ssl.CERT_NONE
 
     def __init__(self, model: str | None = None, api_key: str | None = None,
                  extra: str | None = None) -> None:
@@ -962,8 +1016,22 @@ class _RotatingProvider:
     def _inst(self, i: int):
         if i not in self._instances:
             k, ex = self._creds[i]
-            self._instances[i] = self._cls(model=self._model, api_key=k, extra=ex)
+            inst = self._cls(model=self._model, api_key=k, extra=ex)
+            # При нескольких ключах провайдер не должен спать внутри себя —
+            # см. _retry_inside: ждать надо не на исчерпанном ключе, а перейти
+            # к следующему.
+            if not self._retry_inside and hasattr(inst, "max_retries"):
+                inst.max_retries = 0
+            self._instances[i] = inst
         return self._instances[i]
+
+    @property
+    def _retry_inside(self) -> bool:
+        """Ждать ли внутри одного ключа. При НЕСКОЛЬКИХ ключах — нет: смысл
+        ротации в том, чтобы при 429 сразу уйти на следующий ключ, а
+        _http_post_json до трёх раз спал по 30 секунд на том же самом, и до
+        ротации дело почти не доходило."""
+        return len(self._creds) < 2
 
     def complete(self, prompt: str, max_tokens: int = 2000,
                  force_json: bool = True, should_stop=None) -> str:
