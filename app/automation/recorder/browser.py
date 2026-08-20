@@ -16,6 +16,7 @@ import re
 import shutil
 import sys
 import tempfile
+import threading
 import time
 import wave
 from pathlib import Path
@@ -848,3 +849,121 @@ def login(cfg: dict, on_log=None) -> None:
                 page.wait_for_timeout(1000)
         except Exception:
             pass
+
+
+# ---------------------------------------------------------------------------
+# Вход в Яндекс с СЕРВЕРА, через интерфейс приложения
+#
+# `login()` выше открывает headed-браузер — на сервере он открывается внутрь
+# Xvfb, и увидеть его удалённо нельзя без VNC. Поэтому вход был недоступен, а
+# без него бот заходит гостем, и Телемост не показывает ему чат (стоп-слово не
+# работает).
+#
+# Здесь браузер живёт headless в СВОЁМ потоке (Playwright sync API не
+# потокобезопасен), наружу отдаётся картинка экрана, внутрь — клики и клавиши.
+# Пароль вводить не обязательно и не рекомендуется: на странице Яндекса есть
+# вход по QR-коду, тогда пароль остаётся на телефоне и через сервер не идёт.
+_LOGIN_URL = "https://passport.yandex.ru/auth"
+
+
+class _LoginSession:
+    """Одна живая сессия входа. Экземпляр — один на процесс (см. `login_session`)."""
+
+    def __init__(self, cfg: dict) -> None:
+        import queue as _queue
+        self.cfg = cfg
+        self.size = (1280, 800)
+        self._cmds: "_queue.Queue[tuple]" = _queue.Queue()
+        self._shot: bytes | None = None
+        self._error: str = ""
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    # -- наружу ------------------------------------------------------------
+    def start(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._error = ""
+        self._thread = threading.Thread(target=self._run, daemon=True,
+                                        name="vtx-login")
+        self._thread.start()
+
+    def alive(self) -> bool:
+        return bool(self._thread and self._thread.is_alive())
+
+    def screenshot(self) -> bytes | None:
+        return self._shot
+
+    def error(self) -> str:
+        return self._error
+
+    def send(self, kind: str, **kw) -> None:
+        """Клик/ввод/навигация. Выполняется в потоке браузера."""
+        self._cmds.put((kind, kw))
+
+    def close(self) -> None:
+        self._stop.set()
+
+    # -- поток браузера ----------------------------------------------------
+    def _run(self) -> None:
+        try:
+            from playwright.sync_api import sync_playwright
+        except Exception as e:      # noqa: BLE001
+            self._error = f"Playwright недоступен: {e}"
+            return
+        w, h = self.size
+        try:
+            with sync_playwright() as pw:
+                ctx = pw.chromium.launch_persistent_context(
+                    str(_profile_dir(self.cfg)), headless=True,
+                    viewport={"width": w, "height": h}, args=_LAUNCH_ARGS)
+                page = ctx.pages[0] if ctx.pages else ctx.new_page()
+                page.goto(_LOGIN_URL, wait_until="domcontentloaded", timeout=45000)
+                last_shot = 0.0
+                while not self._stop.is_set():
+                    # Команды разбираем сразу, картинку обновляем раз в секунду —
+                    # иначе поток занят только съёмкой и клики ждут.
+                    try:
+                        kind, kw = self._cmds.get(timeout=0.2)
+                        self._apply(page, kind, kw)
+                    except Exception:       # noqa: BLE001 — пустая очередь или сбой команды
+                        pass
+                    if time.time() - last_shot > 1.0:
+                        try:
+                            self._shot = page.screenshot(type="png")
+                        except Exception:   # noqa: BLE001
+                            pass
+                        last_shot = time.time()
+                try:
+                    ctx.close()
+                except Exception:
+                    pass
+        except Exception as e:      # noqa: BLE001
+            self._error = str(e)[:400]
+
+    @staticmethod
+    def _apply(page, kind: str, kw: dict) -> None:
+        if kind == "click":
+            page.mouse.click(float(kw.get("x", 0)), float(kw.get("y", 0)))
+        elif kind == "type":
+            page.keyboard.type(str(kw.get("text", "")), delay=25)
+        elif kind == "key":
+            page.keyboard.press(str(kw.get("key", "Enter")))
+        elif kind == "scroll":
+            page.mouse.wheel(0, float(kw.get("dy", 240)))
+        elif kind == "goto":
+            page.goto(str(kw.get("url") or _LOGIN_URL),
+                      wait_until="domcontentloaded", timeout=45000)
+
+
+login_session: _LoginSession | None = None
+
+
+def login_open(cfg: dict) -> "_LoginSession":
+    """Запустить (или вернуть уже идущую) сессию входа."""
+    global login_session
+    if login_session is None or not login_session.alive():
+        login_session = _LoginSession(cfg)
+        login_session.start()
+    return login_session

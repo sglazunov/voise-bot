@@ -1,7 +1,7 @@
-import { useState } from "react";
-import { Bot, Play, MessageSquareOff, Users, Timer } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { Bot, Play, MessageSquareOff, Users, Timer, LogIn } from "lucide-react";
 import { Page } from "../components/Layout";
-import { Card, Switch, useToast } from "../components/ui";
+import { Card, Switch, Select, Modal, useToast } from "../components/ui";
 import { useSettings } from "../lib/useSettings";
 import { api } from "../lib/api";
 
@@ -17,6 +17,54 @@ export default function Recorder() {
   const { s, set, save } = useSettings();
   const toast = useToast();
   const [logs, setLogs] = useState<string[] | null>(null);
+  // Вход в Яндекс прямо из интерфейса: браузер работает на сервере, сюда
+  // приходит его экран, отсюда уходят клики и клавиши. Пароль вводить не
+  // обязательно — на странице Яндекса есть вход по QR, тогда он остаётся на
+  // телефоне и через сервер не проходит.
+  const [loginOpen, setLoginOpen] = useState(false);
+  const [screen, setScreen] = useState("");
+  const [authState, setAuthState] = useState<any>(null);
+  const [authChecking, setAuthChecking] = useState(false);
+  const imgRef = useRef<HTMLImageElement | null>(null);
+
+  async function openLogin() {
+    try {
+      await api.post("/api/automation/recorder/login/open");
+      setLoginOpen(true);
+    } catch (e: any) { toast(e.message, true); }
+  }
+  async function checkLogin() {
+    setAuthChecking(true);
+    try { setAuthState(await api.get("/api/automation/recorder/login-status")); }
+    catch (e: any) { toast(e.message, true); }
+    finally { setAuthChecking(false); }
+  }
+  async function closeLogin() {
+    setLoginOpen(false); setScreen("");
+    try { await api.post("/api/automation/recorder/login/close"); } catch { /* уже закрыт */ }
+    checkLogin();
+  }
+  // Пока окно открыто — тянем картинку экрана. Метка времени в адресе, иначе
+  // браузер отдаёт закэшированный кадр и экран выглядит замершим.
+  useEffect(() => {
+    if (!loginOpen) return;
+    const t = setInterval(() => setScreen(`/api/automation/recorder/login/screen?t=${Date.now()}`), 1200);
+    return () => clearInterval(t);
+  }, [loginOpen]);
+
+  async function act(body: any) {
+    try { await api.post("/api/automation/recorder/login/action", body); }
+    catch (e: any) { toast(e.message, true); }
+  }
+  // Клик по картинке → клик в браузере. Пересчитываем координаты, потому что
+  // картинка на экране масштабируется под ширину модального окна.
+  function clickScreen(e: React.MouseEvent<HTMLImageElement>) {
+    const img = imgRef.current;
+    if (!img) return;
+    const r = img.getBoundingClientRect();
+    act({ kind: "click", x: ((e.clientX - r.left) / r.width) * img.naturalWidth,
+          y: ((e.clientY - r.top) / r.height) * img.naturalHeight });
+  }
   const [testing, setTesting] = useState(false);
 
   async function onSave() {
@@ -72,6 +120,28 @@ export default function Recorder() {
                 <div className="text-[11px]" style={{ color: "var(--muted)" }}>mp4, не только звук</div></div>
               <Switch on={!!s.capture_video} onChange={() => set("capture_video", !s.capture_video)} /></div>
           </div>
+
+          {/* Режим входа. Гостю Телемост не показывает чат, поэтому стоп-слово
+              работает только под аккаунтом. Вход делается тут же: браузер живёт
+              на сервере, а экран отдаётся сюда — раньше он открывался внутрь
+              Xvfb и был недоступен удалённо. */}
+          <label className="lbl mt-3">Как бот заходит на встречу</label>
+          <Select value={s.auth_mode || "guest"} onChange={(v) => set("auth_mode", v)}
+            options={[{ value: "guest", label: "Гость — по ссылке, без аккаунта" },
+                      { value: "profile", label: "Авторизованный — под аккаунтом Яндекса" }]} />
+          <div className="text-[11.5px] mt-1" style={{ color: "var(--muted)" }}>
+            Под аккаунтом бот видит чат встречи — тогда работает стоп-слово.
+            Гостю Телемост чат не показывает.
+          </div>
+          <div className="flex gap-2 mt-2 flex-wrap items-center">
+            <button className="btn btn-ghost" onClick={openLogin}>
+              <LogIn size={15} /> Войти в Яндекс</button>
+            <button className="btn btn-ghost" onClick={checkLogin} disabled={authChecking}>
+              {authChecking ? "Проверяю…" : "Проверить вход"}</button>
+            {authState && <span className="text-[11.5px]" style={{
+              color: authState.logged_in ? "#5eead4" : authState.logged_in === false ? "#fbbf24" : "var(--muted)" }}>
+              {authState.logged_in ? "Вход выполнен ✓" : authState.detail}</span>}
+          </div>
         </Card>
 
         <Card>
@@ -126,6 +196,36 @@ export default function Recorder() {
             style={{ maxHeight: 320, overflow: "auto" }}>{logs.join("\n")}</pre>
         </Card>
       )}
+      <Modal open={loginOpen} onClose={closeLogin}
+        title={<span className="flex items-center gap-2"><LogIn size={16} color="var(--accent)" /> Вход в Яндекс для бота</span>}>
+        <div className="text-[12.5px] mb-2" style={{ color: "var(--muted)" }}>
+          Это браузер на сервере — кликайте прямо по картинке, набирайте текст в
+          поле ниже. <b>Надёжнее войти по QR-коду</b>: выберите его на странице
+          Яндекса и отсканируйте телефоном — тогда пароль останется на телефоне
+          и через сервер не пойдёт.
+        </div>
+        {screen ? (
+          <img ref={imgRef} src={screen} onClick={clickScreen} alt="экран браузера"
+            className="w-full rounded-xl cursor-pointer" style={{ border: "1px solid var(--line)" }} />
+        ) : (
+          <div className="glass2 rounded-xl p-8 text-center text-[12.5px]" style={{ color: "var(--muted)" }}>
+            Браузер запускается…</div>
+        )}
+        <div className="flex gap-2 mt-3 flex-wrap">
+          <input className="field flex-1" placeholder="текст для ввода — Enter отправит"
+            onKeyDown={(e) => {
+              if (e.key !== "Enter") return;
+              const v = (e.target as HTMLInputElement).value;
+              if (v) act({ kind: "type", text: v });
+              act({ kind: "key", key: "Enter" });
+              (e.target as HTMLInputElement).value = "";
+            }} />
+          <button className="btn btn-ghost" onClick={() => act({ kind: "scroll", dy: 300 })}>Ниже</button>
+          <button className="btn btn-ghost" onClick={() => act({ kind: "goto", url: "" })}>Сначала</button>
+          <button className="btn btn-primary" onClick={closeLogin}>Готово</button>
+        </div>
+      </Modal>
+
       <div className="mt-3.5"><button className="btn btn-primary" onClick={onSave}>Сохранить настройки бота</button></div>
     </Page>
   );

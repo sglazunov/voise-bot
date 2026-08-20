@@ -1535,6 +1535,66 @@ def automation_recorder_login(user: str = Depends(current_user)):
             "detail": "Открывается окно браузера — войдите в Яндекс и закройте его."}
 
 
+class LoginAction(BaseModel):
+    kind: str = "click"          # click | type | key | scroll | goto
+    x: float = 0
+    y: float = 0
+    text: str = ""
+    key: str = "Enter"
+    dy: float = 240
+    url: str = ""
+
+
+@app.post("/api/automation/recorder/login/open")
+def automation_login_open(user: str = Depends(current_user)):
+    """Открыть сессию входа в Яндекс: браузер на СЕРВЕРЕ, экран — в интерфейсе.
+
+    Прежняя кнопка входа открывала headed-браузер внутрь Xvfb, и увидеть его
+    удалённо было нельзя. Без входа бот заходит гостем, а гостю Телемост не
+    показывает чат — стоп-слово не работает.
+    """
+    from .automation import settings as auto_settings
+    from .automation.recorder import browser
+    if not browser.playwright_available():
+        raise HTTPException(400, "Playwright не установлен.")
+    ses = browser.login_open(auto_settings.load(user))
+    return {"ok": True, "width": ses.size[0], "height": ses.size[1]}
+
+
+@app.get("/api/automation/recorder/login/screen")
+def automation_login_screen(user: str = Depends(current_user)):
+    """Текущий экран браузера входа (PNG)."""
+    from .automation.recorder import browser
+    ses = browser.login_session
+    if ses is None or not ses.alive():
+        raise HTTPException(409, "Сессия входа не запущена.")
+    shot = ses.screenshot()
+    if not shot:
+        raise HTTPException(202, "Экран ещё не готов.")
+    return Response(content=shot, media_type="image/png",
+                    headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/automation/recorder/login/action")
+def automation_login_action(body: LoginAction, user: str = Depends(current_user)):
+    """Клик, ввод текста, клавиша или переход — внутрь браузера входа."""
+    from .automation.recorder import browser
+    ses = browser.login_session
+    if ses is None or not ses.alive():
+        raise HTTPException(409, "Сессия входа не запущена.")
+    ses.send(body.kind, x=body.x, y=body.y, text=body.text,
+             key=body.key, dy=body.dy, url=body.url)
+    return {"ok": True}
+
+
+@app.post("/api/automation/recorder/login/close")
+def automation_login_close(user: str = Depends(current_user)):
+    from .automation.recorder import browser
+    if browser.login_session is not None:
+        browser.login_session.close()
+    return {"ok": True}
+
+
 class RecorderTest(BaseModel):
     url: str
     seconds: int = 30
