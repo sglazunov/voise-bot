@@ -12,6 +12,11 @@
 import json
 
 from app import config, llm
+# Подсистема NVIDIA живёт в отдельном модуле (llm_nvidia): каталог, права ключа,
+# потоковое чтение — 450 строк, которые незачем держать в llm.py. Подменять
+# внутренности надо ИМЕННО здесь: код читает свои module-globals, и подмена
+# ре-экспортированного имени в llm до него не дойдёт.
+from app import llm_nvidia
 
 
 class _Resp:
@@ -29,7 +34,7 @@ class _Resp:
 
 
 def _fake_catalog(monkeypatch, ids):
-    monkeypatch.setattr(llm.urllib.request, "urlopen",
+    monkeypatch.setattr(llm_nvidia.urllib.request, "urlopen",
                         lambda *a, **k: _Resp(ids))
 
 
@@ -198,7 +203,7 @@ class TestПроверкаКлюча:
     и кэшируем результат."""
 
     def _probe(self, monkeypatch, tmp_path, ok):
-        monkeypatch.setattr(llm.config, "DATA_DIR", tmp_path)
+        monkeypatch.setattr(llm_nvidia.config, "DATA_DIR", tmp_path)
         monkeypatch.setattr(llm.time, "sleep", lambda *_: None)  # без пауз
         _fake_catalog(monkeypatch, ["a/one", "b/two", "c/three"])
 
@@ -211,7 +216,7 @@ class TestПроверкаКлюча:
                     raise RuntimeError("HTTP 404 Not found for account")
                 return "ok"
 
-        monkeypatch.setattr(llm, "NvidiaProvider", _P)
+        monkeypatch.setattr(llm_nvidia, "NvidiaProvider", _P)
         return llm.nvidia_verify_models("nvapi-test")
 
     def test_остаются_только_ответившие(self, monkeypatch, tmp_path):
@@ -225,30 +230,30 @@ class TestПроверкаКлюча:
     def test_до_проверки_отвечаем_none(self, monkeypatch, tmp_path):
         """None — сигнал «ещё не знаем»: интерфейс тогда покажет весь каталог,
         а не пустой список."""
-        monkeypatch.setattr(llm.config, "DATA_DIR", tmp_path)
+        monkeypatch.setattr(llm_nvidia.config, "DATA_DIR", tmp_path)
         assert llm.nvidia_usable_models("nvapi-непроверенный") is None
 
     def test_умолчание_берётся_из_каталога(self, monkeypatch, tmp_path):
         """Прибитое имя модели молча превращается в 404: за неделю
         «deepseek-v4-pro» из каталога NVIDIA исчез, появился
         «deepseek-v4-flash-0731»."""
-        monkeypatch.setattr(llm.config, "DATA_DIR", tmp_path)
-        monkeypatch.setattr(llm.config, "NVIDIA_MODEL", "устаревшая/модель")
+        monkeypatch.setattr(llm_nvidia.config, "DATA_DIR", tmp_path)
+        monkeypatch.setattr(llm_nvidia.config, "NVIDIA_MODEL", "устаревшая/модель")
         _fake_catalog(monkeypatch, ["deepseek-ai/deepseek-v4-flash-0731",
                                     "meta/llama-3.1-8b-instruct"])
         assert llm.nvidia_default_model("nvapi-test") == \
             "deepseek-ai/deepseek-v4-flash-0731"
 
     def test_без_сети_умолчание_из_настроек(self, monkeypatch, tmp_path):
-        monkeypatch.setattr(llm.config, "DATA_DIR", tmp_path)
-        monkeypatch.setattr(llm.config, "NVIDIA_MODEL", "запасная/модель")
-        monkeypatch.setattr(llm, "nvidia_models", lambda *a, **k: [])
+        monkeypatch.setattr(llm_nvidia.config, "DATA_DIR", tmp_path)
+        monkeypatch.setattr(llm_nvidia.config, "NVIDIA_MODEL", "запасная/модель")
+        monkeypatch.setattr(llm_nvidia, "nvidia_models", lambda *a, **k: [])
         assert llm.nvidia_default_model("nvapi-test") == "запасная/модель"
 
     def test_чужая_ошибка_не_выбрасывает_модель(self, monkeypatch, tmp_path):
         """Таймаут или 500 — это про наш запрос, а не про права аккаунта.
         Раньше модель выбрасывалась по ЛЮБОЙ ошибке, и список врал."""
-        monkeypatch.setattr(llm.config, "DATA_DIR", tmp_path)
+        monkeypatch.setattr(llm_nvidia.config, "DATA_DIR", tmp_path)
         monkeypatch.setattr(llm.time, "sleep", lambda *_: None)
         _fake_catalog(monkeypatch, ["a/one", "b/two"])
 
@@ -261,14 +266,14 @@ class TestПроверкаКлюча:
                     raise RuntimeError("HTTP 500: internal server error")
                 raise RuntimeError("404 Not found for account 'X'")
 
-        monkeypatch.setattr(llm, "NvidiaProvider", _P)
+        monkeypatch.setattr(llm_nvidia, "NvidiaProvider", _P)
         # a/one осталась (мы не доказали недоступность), b/two выброшена.
         assert llm.nvidia_verify_models("nvapi-test") == ["a/one"]
 
     def test_лимит_не_считается_недоступностью(self, monkeypatch, tmp_path):
         """429 значит «ключ устал», а не «модель не выдана». Иначе перебор
         выбросил бы половину каталога из-за скорости собственных запросов."""
-        monkeypatch.setattr(llm.config, "DATA_DIR", tmp_path)
+        monkeypatch.setattr(llm_nvidia.config, "DATA_DIR", tmp_path)
         _fake_catalog(monkeypatch, ["a/one"])
         monkeypatch.setattr(llm.time, "sleep", lambda *_: None)
 
@@ -279,7 +284,7 @@ class TestПроверкаКлюча:
             def complete(self, *a, **k):
                 raise RuntimeError("HTTP 429: rate limit exceeded")
 
-        monkeypatch.setattr(llm, "NvidiaProvider", _P)
+        monkeypatch.setattr(llm_nvidia, "NvidiaProvider", _P)
         assert llm.nvidia_verify_models("nvapi-test") == ["a/one"]
 
     def test_ключ_в_кэш_не_попадает(self, monkeypatch, tmp_path):
@@ -302,7 +307,7 @@ def test_каталог_чистится_от_нечатовых(monkeypatch):
 
 def test_без_ключа_не_ходим_в_сеть(monkeypatch):
     monkeypatch.setattr(config, "NVIDIA_API_KEY", "")
-    monkeypatch.setattr(llm.urllib.request, "urlopen",
+    monkeypatch.setattr(llm_nvidia.urllib.request, "urlopen",
                         lambda *a, **k: (_ for _ in ()).throw(
                             AssertionError("сеть не должна дёргаться")))
     assert llm.nvidia_models() == []
@@ -310,7 +315,7 @@ def test_без_ключа_не_ходим_в_сеть(monkeypatch):
 
 def test_сбой_сети_не_ломает_интерфейс(monkeypatch):
     """Список движков строится при каждом открытии страницы — падать нельзя."""
-    monkeypatch.setattr(llm.urllib.request, "urlopen",
+    monkeypatch.setattr(llm_nvidia.urllib.request, "urlopen",
                         lambda *a, **k: (_ for _ in ()).throw(OSError("нет сети")))
     assert llm.nvidia_models("nvapi-test") == []
 
@@ -321,7 +326,7 @@ class TestКнопкаНеДублируетПеребор:
     превращалась в две."""
 
     def test_force_false_возвращает_готовый_результат(self, monkeypatch, tmp_path):
-        monkeypatch.setattr(llm.config, "DATA_DIR", tmp_path)
+        monkeypatch.setattr(llm_nvidia.config, "DATA_DIR", tmp_path)
         monkeypatch.setattr(llm.time, "sleep", lambda *_: None)
         _fake_catalog(monkeypatch, ["a/one"])
 
@@ -332,11 +337,11 @@ class TestКнопкаНеДублируетПеребор:
             def complete(self, *a, **k):
                 return "ok"
 
-        monkeypatch.setattr(llm, "NvidiaProvider", _P)
+        monkeypatch.setattr(llm_nvidia, "NvidiaProvider", _P)
         assert llm.nvidia_verify_models("nvapi-test") == ["a/one"]
 
         # Повторный вызов с force=False не должен ходить в сеть вообще.
-        monkeypatch.setattr(llm, "nvidia_models", lambda *a, **k: (
+        monkeypatch.setattr(llm_nvidia, "nvidia_models", lambda *a, **k: (
             _ for _ in ()).throw(AssertionError("перебор не должен повторяться")))
         assert llm.nvidia_verify_models("nvapi-test", force=False) == ["a/one"]
 
@@ -347,7 +352,7 @@ class TestПереборНеДержитЗапрос:
     Поэтому запуск отвязан от ожидания, а ход отдаётся отдельно."""
 
     def test_состояние_доступно_во_время_перебора(self, monkeypatch, tmp_path):
-        monkeypatch.setattr(llm.config, "DATA_DIR", tmp_path)
+        monkeypatch.setattr(llm_nvidia.config, "DATA_DIR", tmp_path)
         monkeypatch.setattr(llm.time, "sleep", lambda *_: None)
         _fake_catalog(monkeypatch, ["a/one", "b/two"])
         seen = []
@@ -360,16 +365,16 @@ class TestПереборНеДержитЗапрос:
                 seen.append(llm.nvidia_probe_state())   # состояние ВНУТРИ прохода
                 return "ok"
 
-        monkeypatch.setattr(llm, "NvidiaProvider", _P)
+        monkeypatch.setattr(llm_nvidia, "NvidiaProvider", _P)
         llm.nvidia_verify_models("nvapi-test")
         assert seen and seen[0]["running"] is True
         assert seen[0]["total"] == 2
 
     def test_флаг_снимается_после_сбоя(self, monkeypatch, tmp_path):
         """Иначе интерфейс навсегда останется в состоянии «проверяю»."""
-        monkeypatch.setattr(llm.config, "DATA_DIR", tmp_path)
-        monkeypatch.setattr(llm, "nvidia_models", lambda *a, **k: ["a/one"])
-        monkeypatch.setattr(llm, "_nvidia_probe_loop", lambda *a, **k: (
+        monkeypatch.setattr(llm_nvidia.config, "DATA_DIR", tmp_path)
+        monkeypatch.setattr(llm_nvidia, "nvidia_models", lambda *a, **k: ["a/one"])
+        monkeypatch.setattr(llm_nvidia, "_nvidia_probe_loop", lambda *a, **k: (
             _ for _ in ()).throw(RuntimeError("сбой")))
         try:
             llm.nvidia_verify_models("nvapi-test")

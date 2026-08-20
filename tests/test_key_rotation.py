@@ -7,6 +7,7 @@ import time
 import pytest
 
 from app import llm
+from app import llm_nvidia
 from app.llm import _RotatingProvider
 
 
@@ -116,11 +117,11 @@ class TestТаймаутNvidia:
     она просит один токен и отвечает мгновенно."""
 
     def test_проба_не_ждёт_долго(self):
-        assert llm._nvidia_timeout(1) <= 180
+        assert llm_nvidia._nvidia_timeout(1) <= 180
 
     def test_полному_протоколу_дают_больше_прежних_180(self):
-        assert llm._nvidia_timeout(8000) > 180
+        assert llm_nvidia._nvidia_timeout(8000) > 180
 
     def test_потолок_ограничен_из_за_одного_воркера(self):
         """Повисший запрос задерживает всю очередь распознавания."""
-        assert llm._nvidia_timeout(1_000_000) <= 420
+        assert llm_nvidia._nvidia_timeout(1_000_000) <= 420

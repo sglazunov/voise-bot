@@ -15,6 +15,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import pytest
 
 from app import llm
+from app import llm_nvidia
 
 # Что отдаёт сервер: имя случая → (код, тело).
 CASES = {
@@ -61,7 +62,7 @@ def server():
 
 
 def _stream(server, case, **kw):
-    return llm._nvidia_stream(f"{server}/{case}", {"model": "m"}, {}, **kw)
+    return llm_nvidia._nvidia_stream(f"{server}/{case}", {"model": "m"}, {}, **kw)
 
 
 def test_обычный_поток_собирается(server):
@@ -95,10 +96,10 @@ def test_стоп_действует_внутри_потока(server):
 
 
 def test_поток_включён_по_умолчанию():
-    assert llm._NVIDIA_STREAM is True
+    assert llm_nvidia._NVIDIA_STREAM is True
     # Пауза между кусками щедрая: на загруженном бесплатном тарифе они
     # приходят с задержками в десятки секунд.
-    assert llm._NVIDIA_CHUNK_TIMEOUT >= 60
+    assert llm_nvidia._NVIDIA_CHUNK_TIMEOUT >= 60
 
 
 class TestОтменаСквозьОбёртки:
