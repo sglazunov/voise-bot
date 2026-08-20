@@ -61,11 +61,25 @@ class TestSecretRoundTrip:
         assert auto_settings.load("alice")["yandex_disk"]["token"] == "y0_REAL", (
             "круговой рейс стёр OAuth-токен Яндекс Диска")
 
-    def test_ui_does_not_claim_connected_after_the_wipe(self):
-        """Даже если затирание считать неизбежным, интерфейс обязан перестать
-        показывать «подключено»: сейчас он врёт, и причину ищут в Weeek."""
+    def test_ui_indicator_matches_reality(self):
+        """Индикатор «подключено» обязан совпадать с тем, что есть на самом деле.
+
+        Раньше круговой рейс затирал токен, а `redacted` продолжал отдавать
+        True — карточка Weeek показывала «подключено», планировщик ходил в API с
+        «Bearer True», и причину искали на стороне Weeek. Теперь True из
+        `redacted` означает «не меняли» и игнорируется, поэтому проверяем оба
+        конца: после рейса токен цел и индикатор горит честно, а после явной
+        очистки пустой строкой он гаснет.
+        """
         auto_settings.save("alice", {"weeek_token": "wk-REAL-TOKEN"})
         auto_settings.save("alice", {"weeek_token": True})
 
+        assert auto_settings.load("alice")["weeek_token"] == "wk-REAL-TOKEN", (
+            "круговой рейс не должен трогать секрет")
+        assert auto_settings.redacted("alice")["weeek_token"] is True, (
+            "токен на месте — индикатор обязан это показывать")
+
+        auto_settings.save("alice", {"weeek_token": ""})    # осознанная очистка
+        assert auto_settings.load("alice")["weeek_token"] == ""
         assert auto_settings.redacted("alice")["weeek_token"] is False, (
-            "токена нет, а карточка Weeek по-прежнему показывает «подключено»")
+            "токен очищен — карточка не должна показывать «подключено»")

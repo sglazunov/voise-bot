@@ -366,6 +366,20 @@ class JobStore:
         full-prompt for this run.
         """
         job = self._require(job_id)
+        # Пока задача в работе, второй сборки протокола быть не должно. Раньше
+        # проверялось только наличие расшифровки на диске, а она есть и во время
+        # анализа, и от прошлого прогона: воркер и «Пересобрать» шли параллельно,
+        # оба звали доставку — в задачу Weeek уходили ДВЕ ссылки на протокол
+        # одной встречи и два комментария, движок тратил лимит вдвое, а какой из
+        # двух протоколов останется, решал случай. _reanalyze_lock тут не
+        # помогает: он разводит только ручные пересборки между собой и про
+        # воркера ничего не знает.
+        if job.status in (STATUS_QUEUED, STATUS_RUNNING, STATUS_PAUSED,
+                          STATUS_ANALYZING):
+            raise ValueError(
+                "Задача ещё в работе — протокол собирается сам. "
+                "Дождитесь окончания и нажмите «Пересобрать», если результат "
+                "не устроит.")
         txt_path = self.result_path(job_id, "txt")
         if not txt_path.exists():
             raise ValueError("Нет транскрипции для анализа.")
@@ -1141,9 +1155,16 @@ class JobStore:
                 finished_at=time.time(),
             )
         finally:
-            # For meeting recordings already delivered to the UI's cloud, don't
-            # keep an internal copy of the video — drop the source after processing.
-            if getattr(job, "delete_audio_when_done", False):
+            # Исходник удаляем ТОЛЬКО у успешно завершённой задачи. finally
+            # срабатывает и на ветке except, а карточка упавшей задачи прямым
+            # текстом обещает «Запись цела — нажмите «Повторить»»: без исходника
+            # кнопка отвечает отказом, и восстановить можно лишь вручную —
+            # скачать видео из облака и загрузить заново. Планировщик ставит
+            # delete_audio_when_done всем записям, если облако не локальное, то
+            # есть на бою это касалось каждой упавшей встречи. Ровно ту же
+            # ошибку уже чинили в _late_upload; здесь она осталась.
+            if (getattr(job, "delete_audio_when_done", False)
+                    and job.status == STATUS_DONE):
                 self._delete_source(job)
 
     def _delete_source(self, job: Job) -> None:

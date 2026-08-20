@@ -357,8 +357,14 @@ def auth_recover_request(body: RecoverRequestBody, request: Request):
                f"Никому его не сообщайте.")
         sms.send("+" + res["phone"], msg)
     elif res.get("error") == "cooldown":
-        # A live code was just sent — don't resend, and don't penalise as a miss.
-        return {**_RECOVER_SENT, "retry_after": res.get("retry_after")}
+        # Живой код уже отправлен — второй раз не шлём. Ответ при этом обязан
+        # остаться ТЕМ ЖЕ: в cooldown попадают только после верной пары
+        # логин+телефон, поэтому отдельное поле retry_after сообщало бы
+        # проверяющему, что пара угадана. Достаточно двух запросов подряд, чтобы
+        # подтвердить связку «логин ↔ личный телефон» — половина того, что нужно
+        # для социальной инженерии со сбросом пароля. Заявленная в коде цель
+        # «no account enumeration» этого не допускает.
+        pass
     else:
         security.throttle_fail(*keys)   # wrong login/phone counts as an attempt
     return _RECOVER_SENT
@@ -1166,18 +1172,38 @@ def deps_status():
 
 
 # ---- Recognition models (pre-download from the UI, no transcription) -------
+def _known_model(name: str) -> str:
+    """Имя модели из списка, который предлагает интерфейс, — или отказ.
+
+    faster-whisper трактует имя со слэшем как идентификатор репозитория
+    HuggingFace и качает его в кэш контейнера. Маршрут скачивания открыт любому
+    вошедшему, а регистрация в сервисе открыта всем, кто знает адрес: без этой
+    проверки посторонний мог занять весь диск чужими репозиториями, а забитый
+    диск останавливает и запись встреч, и распознавание, и Postgres. Пустое
+    имя означает «модель по умолчанию» и допустимо.
+    """
+    name = (name or "").strip()
+    if not name:
+        return ""
+    if name not in ALLOWED_MODELS:
+        raise HTTPException(400, f"Неизвестная модель: {name[:60]}")
+    return name
+
+
 @app.get("/api/model/status")
-def model_status(name: str = ""):
+def model_status(name: str = "", user: str = Depends(current_user)):
     """Whether a Whisper model is downloaded + download progress."""
     from . import whisper_setup
-    return whisper_setup.status(name)
+    return whisper_setup.status(_known_model(name))
 
 
 @app.post("/api/model/download")
-def model_download(name: str = ""):
-    """Download a Whisper model into the cache (background, no transcription)."""
+def model_download(name: str = "", user: str = Depends(current_user)):
+    """Download a Whisper model into the cache (background, no transcription).
+
+    Операция ОБЩЕСЕРВЕРНАЯ: кэш моделей и диск общие для всех команд."""
     from . import whisper_setup
-    return whisper_setup.download(name)
+    return whisper_setup.download(_known_model(name))
 
 
 

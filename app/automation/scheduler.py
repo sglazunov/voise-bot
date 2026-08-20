@@ -1013,13 +1013,32 @@ class Scheduler:
             snapshots.save(st)
 
     # -- Д10: live transcript during the recording ---------------------------
+    # Порядок предпочтения карточек одной и той же задачи Weeek. У повторяющейся
+    # встречи задача ОДНА (task_id один), а карточек столько, сколько было и
+    # будет её проведений: ключ — «команда:задача:время начала». Возвращать
+    # первую попавшуюся нельзя: это самая ранняя известная, то есть прошлая.
+    # Заметки участника (единственный ручной вклад в протокол) уезжали в
+    # прошлонедельную карточку, а окно живой расшифровки показывало прошлый
+    # разговор — и это выглядело как «бот пишет не ту встречу».
+    _ACTIVE_STATES = ("recording", "uploading", "transcribing", "analyzing")
+
     def _find_state(self, user: str, task_id) -> "MeetingState | None":
         team = security.team_of(user)
         with self._lock:
-            for st in self._states.values():
-                if st.owner == team and str(st.task_id) == str(task_id):
-                    return st
-        return None
+            mine = [st for st in self._states.values()
+                    if st.owner == team and str(st.task_id) == str(task_id)]
+        if not mine:
+            return None
+        # 1) та, что идёт прямо сейчас — заметки пишут во время встречи;
+        for st in mine:
+            if st.state in self._ACTIVE_STATES:
+                return st
+        # 2) иначе самая поздняя по времени начала (сегодняшняя, а не прошлая);
+        dated = [st for st in mine if st.start is not None]
+        if dated:
+            return max(dated, key=lambda st: st.start)
+        # 3) на крайний случай — хоть какая-то (у встреч без времени).
+        return mine[0]
 
     def live_view(self, user: str, task_id) -> dict:
         """What the «живая расшифровка» modal shows: the growing live text while

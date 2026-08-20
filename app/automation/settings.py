@@ -16,12 +16,14 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from .. import db, security
+from .. import db, logs, security
 
 _LOCK = threading.Lock()
 
 # Secret fields are stored ENCRYPTED on disk (per-user key) and decrypted only in
 # memory. Dotted paths reach into the nested cloud sub-dicts.
+_LOG = logs.get("vtx.settings")
+
 _SECRET_PATHS = ("weeek_token", "yandex_disk.token", "yandex_disk.read_token",
                  "gdrive.client_secret", "gdrive.refresh_token",
                  "telegram_bot_token")
@@ -180,10 +182,38 @@ def load(user: str) -> dict[str, Any]:
 _NESTED_KEYS = ("yandex_disk", "gdrive")
 
 
+def _drop_non_string_secrets(values: dict[str, Any]) -> list[str]:
+    """Выбросить из обновления секреты, пришедшие НЕ строкой.
+
+    Наружу секреты отдаются признаком наличия: `redacted()` кладёт в
+    `weeek_token` значение True. Клиент, который честно делает «прочитал →
+    поправил одно поле → сохранил», присылает этот True обратно — и он ложился
+    в хранилище как есть, потому что шифруются только строки. Настоящий токен
+    затирался безвозвратно, а `redacted()` продолжал показывать True, то есть
+    карточка Weeek врала «подключено», пока планировщик ходил в API с заголовком
+    «Bearer True» и встречи просто переставали появляться.
+
+    True здесь означает ровно одно: «секрет не меняли». Значит, его надо
+    игнорировать. Пустая строка — это осознанная очистка, она проходит.
+    """
+    ignored = []
+    for dotted in _SECRET_PATHS:
+        parent, key, val = _get_path(values, dotted)
+        if parent is not None and key in parent and not isinstance(val, str):
+            parent.pop(key, None)
+            ignored.append(dotted)
+    return ignored
+
+
 def save(user: str, values: dict[str, Any]) -> dict[str, Any]:
     """Merge `values` (plaintext) into the TEAM's settings and persist, with
     secrets ENCRYPTED at rest under the team-admin's key. Returns the new state."""
     user = security.team_of(user)
+    values = json.loads(json.dumps(values))     # не портим словарь вызывающего
+    ignored = _drop_non_string_secrets(values)
+    if ignored:
+        _LOG.info("Настройки: секреты %s пришли не строкой — не меняю их",
+                  ", ".join(ignored))
     with _LOCK:
         # Work in plaintext: decrypt current, apply update, then re-encrypt to disk.
         data = _read_raw(user)
