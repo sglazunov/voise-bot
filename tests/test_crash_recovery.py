@@ -4,6 +4,7 @@
 from pathlib import Path
 
 from app.automation import scheduler as sched_mod
+from app.automation import snapshots
 from app.automation.recorder import capture
 from app.automation.scheduler import MeetingState, Scheduler
 from app.jobs import store
@@ -27,8 +28,8 @@ class TestSnapshotRoundTrip:
         st = MeetingState(key="alice:42:2026-07-18T10:00:00+00:00", task_id="42",
                           title="t", url="", start=None, owner="alice",
                           state="recording", out_path="/data/rec/a.mp4")
-        s._save_state(st)
-        snap = s._load_snaps("alice")[st.key]
+        snapshots.save(st)
+        snap = snapshots.load("alice")[st.key]
         assert snap["out_path"] == "/data/rec/a.mp4"
         assert snap["state"] == "recording"
 
@@ -48,13 +49,13 @@ class TestOrphanResume:
         st = MeetingState(key="alice:77:2026-07-18T10:00:00+00:00", task_id="77",
                           title="Планёрка", url="", start=None, owner="alice",
                           state="recording", out_path=str(rec))
-        s._save_state(st)
+        snapshots.save(st)
 
         monkeypatch.setattr(sched_mod.security, "list_teams", lambda: ["alice"])
         monkeypatch.setattr(sched_mod.auto_settings, "load", lambda u: self._cfg())
         # cloud upload succeeds instantly; waiter thread is irrelevant here
-        monkeypatch.setattr(Scheduler, "_upload_with_retry",
-                            lambda self, out, cfg, log, attempts=1:
+        monkeypatch.setattr(sched_mod.delivery, "upload_with_retry",
+                            lambda out, cfg, log, attempts=1:
                             {"ok": True, "url": "https://disk/x"})
         monkeypatch.setattr(Scheduler, "_await_and_upload_protocol",
                             lambda self, *a, **k: None)
@@ -68,7 +69,7 @@ class TestOrphanResume:
         assert j.analyze and j.deliver_weeek_task == "77"
         assert j.deliver_protocol_cloud
         assert j.identify_speakers          # Д7: спикеры безусловно
-        snap = s._load_snaps("alice")[st.key]
+        snap = snapshots.load("alice")[st.key]
         assert snap["state"] == "transcribing"
         assert snap["job_id"] == j.id
 
@@ -77,7 +78,7 @@ class TestOrphanResume:
         st = MeetingState(key="alice:88:2026-07-18T11:00:00+00:00", task_id="88",
                           title="x", url="", start=None, owner="alice",
                           state="recording", out_path="/nonexistent/a.mp4")
-        s._save_state(st)
+        snapshots.save(st)
         monkeypatch.setattr(sched_mod.security, "list_teams", lambda: ["alice"])
         monkeypatch.setattr(sched_mod.auto_settings, "load", lambda u: self._cfg())
         s._resume_pending()
@@ -91,7 +92,7 @@ class TestOrphanResume:
         st = MeetingState(key="alice:99:2026-07-18T12:00:00+00:00", task_id="99",
                           title="x", url="", start=None, owner="alice",
                           state="done", out_path=str(rec))
-        s._save_state(st)
+        snapshots.save(st)
         monkeypatch.setattr(sched_mod.security, "list_teams", lambda: ["alice"])
         monkeypatch.setattr(sched_mod.auto_settings, "load", lambda u: self._cfg())
         s._resume_pending()
@@ -152,7 +153,7 @@ class TestInterruptedRecognitionRetry:
                           title="x", url="", start=None, owner="alice",
                           state="transcribing", job_id=job.id,
                           out_path=str(rec), do_protocol=True)
-        s._save_state(st)
+        snapshots.save(st)
         monkeypatch.setattr(sched_mod.security, "list_teams", lambda: ["alice"])
         monkeypatch.setattr(sched_mod.auto_settings, "load", lambda u: {
             "weeek_token": "tok", "do_transcribe": True, "do_protocol": True,
@@ -174,7 +175,7 @@ class TestInterruptedRecognitionRetry:
         st = MeetingState(key="alice:56:2026-07-20T11:00:00+00:00", task_id="56",
                           title="x", url="", start=None, owner="alice",
                           state="transcribing", job_id=job.id, do_protocol=True)
-        s._save_state(st)
+        snapshots.save(st)
         monkeypatch.setattr(sched_mod.security, "list_teams", lambda: ["alice"])
         monkeypatch.setattr(sched_mod.auto_settings, "load", lambda u: {
             "weeek_token": "tok", "upload_protocol": True})
@@ -198,8 +199,8 @@ class TestЗаписьДоживаетДоПовтора:
                           state="uploading", job_id=job.id, out_path=str(rec))
         monkeypatch.setattr(sched_mod.time, "sleep", lambda *_: None)
         monkeypatch.setattr(
-            Scheduler, "_upload_with_retry",
-            lambda self, out, cfg, log, attempts=1:
+            sched_mod.delivery, "upload_with_retry",
+            lambda out, cfg, log, attempts=1:
             {"ok": True, "url": "https://disk/x", "backend": "yadisk"})
         s._late_upload("alice", st, {"weeek_token": "tok"}, str(rec))
 
@@ -317,7 +318,7 @@ class TestRescheduledSlots:
                           start=datetime(2026, 7, 19, 21, 0, tzinfo=timezone.utc),
                           state="done", job_id="j1", cloud_url="https://disk/x",
                           out_path="/data/rec/onb.mp4")
-        s._save_state(st)          # снапшот записанного слота
+        snapshots.save(st)          # снапшот записанного слота
         new_start = datetime(2026, 7, 20, 11, 0, tzinfo=timezone.utc)
         missed = MeetingState(key="alice:9209:2026-07-20T11:00:00+00:00",
                               task_id="9209", title="x", url="", owner="alice",

@@ -4,6 +4,7 @@
 import threading
 
 from app import security
+from app.automation import snapshots
 from app.automation.scheduler import MeetingState, Scheduler
 from app.jobs import store
 from app.transcribe import _transcribe_lock, transcribe_file
@@ -84,8 +85,8 @@ class TestSnapshotNotes:
     def test_live_notes_survive_save_load(self):
         s = Scheduler()
         st = _mk_state(s, live_notes="важные заметки")
-        s._save_state(st)
-        assert s._load_snaps("alice")[st.key]["live_notes"] == "важные заметки"
+        snapshots.save(st)
+        assert snapshots.load("alice")[st.key]["live_notes"] == "важные заметки"
 
 
 class TestСтадияПослеРасшифровки:

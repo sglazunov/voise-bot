@@ -22,7 +22,8 @@ from pathlib import Path
 from typing import Any
 
 from .. import config, db, logs, security
-from . import clouds, recorder, settings as auto_settings, weeek
+from . import (clouds, delivery, recorder, settings as auto_settings,
+               snapshots, weeek)
 
 log = logs.get("vtx.scheduler")
 
@@ -215,7 +216,7 @@ class Scheduler:
         # Снапшоты (а на Postgres это запрос к базе) читаем ДО лока: под ним
         # стоят status(), обновления состояния из потоков записи и остановка
         # записи. Держать их на время запроса к БД незачем.
-        snaps_for_dedup = self._load_snaps(user)
+        snaps_for_dedup = snapshots.load(user)
         with self._lock:
             for m in meetings:
                 # The Weeek «Запись встречи» checkbox (True=record, False=skip,
@@ -437,8 +438,9 @@ class Scheduler:
             # «Видео встречи»/«Протокол встречи» at recording start, so the task
             # never shows last week's video/protocol as if they were today's;
             # the fresh links are written below as they become ready.
-            threading.Thread(target=self._wipe_stale_links,
-                             args=(st, cfg, st.logs.append), daemon=True).start()
+            threading.Thread(target=delivery.wipe_stale_links,
+                             args=(st.task_id, cfg, st.logs.append),
+                             daemon=True).start()
             # Human-readable file name: «ДД.ММ.ГГГГ, ЧЧ:ММ. - <название задачи>»
             # in the workspace timezone.
             when = (st.start.astimezone(self._tz(cfg)) if st.start
@@ -455,7 +457,7 @@ class Scheduler:
             # mid-meeting, the restart scan (_resume_pending) finds the fMP4 by
             # this path and queues it for processing instead of losing it.
             st.out_path = out
-            self._save_state(st)
+            snapshots.save(st)
 
             # Д10: pseudo-live transcript — the fMP4 is readable while being
             # written, so a side thread transcribes the growing tail every N min.
@@ -493,7 +495,7 @@ class Scheduler:
             # retries here and then keeps retrying in the background until the
             # video lands in the cloud (see _late_upload).
             self._set(st, "uploading", "Выгружаю запись в облако…")
-            up = self._upload_with_retry(out, cfg, log)
+            up = delivery.upload_with_retry(out, cfg, log)
             if up.get("ok"):
                 st.cloud_url = up.get("url")  # public share link (or None)
                 st.upload_error = None
@@ -506,7 +508,7 @@ class Scheduler:
             # Write the recording link into the task's «Видео встречи» custom field.
             field = (cfg.get("weeek_video_field") or "").strip()
             if cfg.get("weeek_set_video_field", True) and st.cloud_url and field:
-                self._write_weeek_field(cfg.get("weeek_token"), st.task_id,
+                delivery.write_weeek_field(cfg.get("weeek_token"), st.task_id,
                                         field, st.cloud_url, log)
 
             # Keep the video ONLY where the UI points. If it was delivered
@@ -514,7 +516,7 @@ class Scheduler:
             # dir), the staging copy in data/recordings is redundant and must not
             # linger inside the server. We delete it after the pipeline is done
             # (transcription still needs to read it first).
-            delivered_elsewhere = self._delivered_elsewhere(up, out)
+            delivered_elsewhere = delivery.delivered_elsewhere(up, out)
 
             # Optionally hand off to the transcription / protocol pipeline.
             # Recording always happens; transcription and protocol are separate
@@ -552,7 +554,7 @@ class Scheduler:
                     delete_audio_when_done=delivered_elsewhere,
                     owner=user)
                 st.job_id = job.id
-                self._save_state(st)  # remember the job across restarts
+                snapshots.save(st)  # remember the job across restarts
                 # Once the protocol (.docx) is built, upload it to the same cloud
                 # and link it in Weeek — in a background waiter so the recording
                 # lock isn't held during transcription.
@@ -603,72 +605,6 @@ class Scheduler:
             recorder.release_slot(slot)
 
     # -- Weeek custom-field writes (retried; stale links wiped) --------------
-    def _wipe_stale_links(self, st: MeetingState, cfg: dict, log) -> None:
-        """Blank the video/protocol link fields of the task when recording
-        starts — a recurring task inherits LAST week's links otherwise."""
-        token = cfg.get("weeek_token")
-        for opt, fname in (("weeek_set_video_field", "weeek_video_field"),
-                           ("weeek_set_protocol_field", "weeek_protocol_field")):
-            fld = (cfg.get(fname) or "").strip()
-            if not (cfg.get(opt, True) and fld and token):
-                continue
-            try:
-                res = weeek.set_custom_field(token, st.task_id, fld, "")
-                if res.get("ok"):
-                    log(f"Поле «{fld}»: очищено от прошлой встречи.")
-            except Exception:  # cosmetic step — never blocks the recording
-                log.info("Не удалось очистить поле «%s» задачи %s",
-                         fld, st.task_id, exc_info=True)
-
-    def _write_weeek_field(self, token, task_id, field: str, value: str,
-                           log, attempts: int = 3) -> bool:
-        """Write a link into a Weeek custom field, retrying — the link for THIS
-        meeting must actually land, not silently stay last week's."""
-        err = None
-        for i in range(attempts):
-            if i:
-                time.sleep(10 * i)
-            try:
-                res = weeek.set_custom_field(token, task_id, field, value)
-            except Exception as e:  # noqa: BLE001
-                res = {"ok": False, "error": str(e)}
-            if res.get("ok"):
-                log(f"Поле «{field}» в Weeek: заполнено ✓")
-                return True
-            err = res.get("error")
-        log(f"Поле «{field}» в Weeek: не удалось — {err}")
-        return False
-
-    # -- recording delivery: the local file is only a staging copy ----------
-    def _upload_with_retry(self, out: str, cfg: dict, log, attempts: int = 3) -> dict:
-        """Upload the recording, retrying a few times with a pause — one network
-        hiccup must not leave a meeting's video stranded on the server."""
-        last: dict = {}
-        for i in range(attempts):
-            if i:
-                log(f"Облако: повтор выгрузки {i + 1}/{attempts}…")
-                time.sleep(20 * i)
-            try:
-                last = clouds.upload(out, Path(out).name, cfg)
-            except Exception as e:  # noqa: BLE001 — an uploader bug isn't fatal
-                last = {"ok": False, "error": str(e)}
-            if last.get("ok"):
-                return last
-            log(f"Облако (попытка {i + 1}/{attempts}): {last.get('error')}")
-        return last or {"ok": False, "error": "облако недоступно"}
-
-    @staticmethod
-    def _delivered_elsewhere(up: dict, out: str) -> bool:
-        """True when the upload put the file somewhere OTHER than the staging
-        path — then the local copy is redundant and must be deleted."""
-        if not up.get("ok"):
-            return False
-        if up.get("backend") != "local":
-            return True
-        try:
-            return Path(up.get("path") or "").resolve() != Path(out).resolve()
-        except OSError:
-            return False
 
     def _late_upload(self, user: str, st: MeetingState, cfg: dict, out: str) -> None:
         """The cloud refused the video at recording time. Keep retrying (every
@@ -680,7 +616,7 @@ class Scheduler:
             time.sleep(300)
             if not Path(out).exists():
                 return  # purged (retention) — nothing left to deliver
-            up = self._upload_with_retry(out, cfg, lambda *_: None, attempts=1)
+            up = delivery.upload_with_retry(out, cfg, lambda *_: None, attempts=1)
             if not up.get("ok"):
                 st.upload_error = up.get("error") or "облако недоступно"
                 continue
@@ -689,13 +625,13 @@ class Scheduler:
             token = cfg.get("weeek_token")
             field = (cfg.get("weeek_video_field") or "").strip()
             if cfg.get("weeek_set_video_field", True) and st.cloud_url and field:
-                self._write_weeek_field(token, st.task_id, field, st.cloud_url,
+                delivery.write_weeek_field(token, st.task_id, field, st.cloud_url,
                                         lambda *_: None)
             if cfg.get("post_back_to_weeek") and st.cloud_url:
                 weeek.add_comment(token, st.task_id,
                                   f"🎥 Запись встречи: {st.cloud_url}")
-            self._save_state(st)  # the late-delivered cloud link survives restarts
-            if self._delivered_elsewhere(up, out):
+            snapshots.save(st)  # the late-delivered cloud link survives restarts
+            if delivery.delivered_elsewhere(up, out):
                 job = store.get(st.job_id) if st.job_id else None
                 if job is not None and job.status != "done":
                     # Recognition still reads the file — it deletes it on finish.
@@ -840,64 +776,6 @@ class Scheduler:
     _PERSIST_STATES = {"recording", "uploading", "transcribing", "analyzing",
                        "done", "error"}
 
-    def _snap_path(self, user: str) -> Path:
-        return security.user_dir(user) / "meetings.json"
-
-    def _load_snaps(self, user: str) -> dict:
-        try:
-            if db.enabled():
-                return db.meetings_load(user)
-            return json.loads(self._snap_path(user).read_text(encoding="utf-8")) or {}
-        except (OSError, ValueError):
-            return {}
-
-    # Файловый режим пишет снапшоты «прочитать всё → изменить одну запись →
-    # записать всё». Это делают одновременно поток записи, поздняя выгрузка в
-    # облако и сохранение заметок из интерфейса — без лока они затирали правки
-    # друг друга. На Postgres лок не нужен: пишется ровно одна строка.
-    _snap_lock = threading.Lock()
-
-    @staticmethod
-    def _snap_of(st: MeetingState) -> dict:
-        return {"state": st.state, "detail": st.detail,
-                "job_id": st.job_id, "cloud_url": st.cloud_url,
-                "out_path": st.out_path,
-                "live_notes": st.live_notes,
-                "do_protocol": st.do_protocol,
-                "saved_at": time.time()}
-
-    def _save_state(self, st: MeetingState) -> None:
-        if db.enabled():
-            # Одна строка по ключу. Раньше здесь читались ВСЕ встречи команды и
-            # записывались обратно целиком, причём meetings_save удаляет ключи,
-            # которых нет в переданном словаре: два потока, сохранявшие разные
-            # встречи, стирали работу друг друга.
-            try:
-                db.meeting_upsert(st.owner, st.key, self._snap_of(st))
-                # Обрезка до 200 последних: в файловом режиме она делается при
-                # каждой записи, здесь — только на завершении встречи, чтобы не
-                # гонять DELETE на каждое обновление статуса.
-                if st.state in ("done", "error"):
-                    db.meetings_trim(st.owner)
-            except Exception:   # noqa: BLE001 — снапшот не должен ронять запись
-                log.warning("Снапшот встречи %s не сохранён", st.key, exc_info=True)
-            return
-        with self._snap_lock:
-            self._save_state_locked(st)
-
-    def _save_state_locked(self, st: MeetingState) -> None:
-        try:
-            snaps = self._load_snaps(st.owner)
-            snaps[st.key] = self._snap_of(st)
-            if len(snaps) > 200:  # keep the newest 200
-                for k in sorted(snaps, key=lambda k: snaps[k].get("saved_at", 0))[:-200]:
-                    snaps.pop(k, None)
-            p = self._snap_path(st.owner)
-            tmp = p.with_suffix(".tmp")
-            tmp.write_text(json.dumps(snaps, ensure_ascii=False), encoding="utf-8")
-            os.replace(tmp, p)
-        except Exception:  # persistence is best-effort, never breaks the loop
-            log.warning("Снапшот встречи %s не записан в файл", st.key, exc_info=True)
 
     def _revive_recorded_slot(self, user: str, task_id: str,
                               near: datetime, snaps: dict) -> None:
@@ -943,7 +821,7 @@ class Scheduler:
                 cfg = auto_settings.load(team)
                 if not cfg.get("weeek_token"):
                     continue
-                snaps = self._load_snaps(team)
+                snaps = snapshots.load(team)
             except Exception:  # noqa: BLE001 — one broken team must not stop the rest
                 continue
             for key, snap in snaps.items():
@@ -1034,12 +912,12 @@ class Scheduler:
 
         log("Запись прервана перезапуском сервиса — файл цел, дообрабатываю.")
         if not st.cloud_url:
-            up = self._upload_with_retry(out, cfg, log, attempts=1)
+            up = delivery.upload_with_retry(out, cfg, log, attempts=1)
             if up.get("ok"):
                 st.cloud_url = up.get("url")
                 field = (cfg.get("weeek_video_field") or "").strip()
                 if cfg.get("weeek_set_video_field", True) and st.cloud_url and field:
-                    self._write_weeek_field(cfg.get("weeek_token"), st.task_id,
+                    delivery.write_weeek_field(cfg.get("weeek_token"), st.task_id,
                                             field, st.cloud_url, log)
             else:
                 st.upload_error = up.get("error") or "облако недоступно"
@@ -1075,7 +953,7 @@ class Scheduler:
 
     def _restore_snapshot(self, st: MeetingState) -> None:
         """Fill a freshly discovered MeetingState from its saved outcome."""
-        snap = self._load_snaps(st.owner).get(st.key)
+        snap = snapshots.load(st.owner).get(st.key)
         if not snap:
             return
         st.job_id = snap.get("job_id")
@@ -1096,7 +974,7 @@ class Scheduler:
         with self._lock:
             st.state, st.detail = state, detail
         if state in self._PERSIST_STATES:
-            self._save_state(st)
+            snapshots.save(st)
 
     # -- Д10: live transcript during the recording ---------------------------
     def _find_state(self, user: str, task_id) -> "MeetingState | None":
@@ -1143,7 +1021,7 @@ class Scheduler:
                 store.set_notes(st.job_id, st.live_notes)
             except KeyError:
                 pass
-        self._save_state(st)
+        snapshots.save(st)
         return {"ok": True, "has_notes": bool(st.live_notes)}
 
     def get_meeting_notes(self, user: str, task_id) -> dict:
