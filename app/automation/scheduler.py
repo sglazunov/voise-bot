@@ -203,6 +203,10 @@ class Scheduler:
         meetings = weeek.upcoming_meetings(
             cfg.get("weeek_token"), cfg.get("weeek_project_id"), self._tz(cfg))
         rec_field = cfg.get("weeek_record_field") or "Запись встречи"
+        # Снапшоты (а на Postgres это запрос к базе) читаем ДО лока: под ним
+        # стоят status(), обновления состояния из потоков записи и остановка
+        # записи. Держать их на время запроса к БД незачем.
+        snaps_for_dedup = self._load_snaps(user)
         with self._lock:
             for m in meetings:
                 # The Weeek «Запись встречи» checkbox (True=record, False=skip,
@@ -250,7 +254,6 @@ class Scheduler:
                     "recording", "uploading", "transcribing", "analyzing", "done")]
             # После рестарта записанный слот живёт только в СНАПШОТЕ (его ключа
             # нет в выдаче Weeek) — без этого «пропущена»-дубль не распознался бы.
-            snaps_for_dedup = self._load_snaps(user)
             for sk, sv in snaps_for_dedup.items():
                 parts = sk.split(":", 2)
                 if (len(parts) == 3 and sv.get("state") in (
