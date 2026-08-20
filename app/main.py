@@ -246,6 +246,7 @@ def register_page(request: Request):
 
 @app.post("/api/auth/register")
 def auth_register(body: Credentials, request: Request):
+    """Регистрация: создаёт учётку и сразу открывает сессию."""
     ip = _client_ip(request)
     wait = security.throttle_check(f"reg:{ip}")
     if wait:
@@ -262,6 +263,7 @@ def auth_register(body: Credentials, request: Request):
 
 @app.post("/api/auth/login")
 def auth_login(body: Credentials, request: Request):
+    """Вход по логину и паролю; ставит cookie сессии."""
     ip = _client_ip(request)
     uname = security.normalize_username(body.username)
     keys = (f"login:{ip}", f"login:{ip}:{uname}")
@@ -280,6 +282,7 @@ def auth_login(body: Credentials, request: Request):
 
 @app.post("/api/auth/logout")
 def auth_logout(request: Request):
+    """Выход: гасит сессию и снимает cookie."""
     security.destroy_session(request.cookies.get(security.SESSION_COOKIE))
     resp = JSONResponse({"ok": True})
     resp.delete_cookie(security.SESSION_COOKIE, path="/")
@@ -289,6 +292,7 @@ def auth_logout(request: Request):
 # ---- AI context (standing knowledge base for the protocol AI) --------------
 @app.get("/api/context")
 def get_context(user: str = Depends(current_user)):
+    """Постоянный контекст команды для ИИ: общий текст и проекты."""
     from . import ai_context
     return ai_context.load(user)
 
@@ -302,6 +306,7 @@ class ContextBody(BaseModel):
 
 @app.post("/api/context")
 def save_context(body: ContextBody, user: str = Depends(current_user)):
+    """Сохранить постоянный контекст команды."""
     from . import ai_context
     return ai_context.save(user, {"global": body.global_, "projects": body.projects})
 
@@ -378,6 +383,7 @@ def auth_recover_verify(body: RecoverVerifyBody, request: Request):
 # ---- Profile (phone + password management) ---------------------------------
 @app.get("/api/profile")
 def profile_info(user: str = Depends(current_user)):
+    """Профиль: логин, маска телефона, роль, команда, код приглашения."""
     is_admin = security.is_admin(user)
     team = security.team_of(user)
     return {"username": user, "phone_masked": security.masked_phone(user),
@@ -518,6 +524,7 @@ async def create_job(
     preset: str = Form(""),
     user: str = Depends(current_user),
 ):
+    """Создать задачу распознавания: файл плюс опции обработки."""
     ext = Path(file.filename or "").suffix.lower()
     if ext not in ALLOWED_EXT:
         raise HTTPException(400, f"Неподдерживаемый формат: {ext or '?'}")
@@ -556,6 +563,7 @@ async def create_job(
 
 @app.get("/api/jobs")
 def list_jobs(user: str = Depends(current_user)):
+    """Список задач команды."""
     return [j.to_public() for j in store.list(owner=user)]
 
 
@@ -792,6 +800,7 @@ def _require_owned(job_id: str, user: str):
 
 @app.get("/api/jobs/{job_id}")
 def get_job(job_id: str, user: str = Depends(current_user)):
+    """Одна задача: статус, прогресс, результаты."""
     job = _require_owned(job_id, user)
     # `stage` — чем задача занята ПОСЛЕ расшифровки: полоса прогресса к тому
     # моменту уже на 100%, а работы ещё на десятки минут.
@@ -800,16 +809,19 @@ def get_job(job_id: str, user: str = Depends(current_user)):
 
 @app.post("/api/jobs/{job_id}/pause")
 def pause_job(job_id: str, user: str = Depends(current_user)):
+    """Пауза: воркер замирает между сегментами, сделанное сохраняется."""
     return _control(job_id, "pause", user)
 
 
 @app.post("/api/jobs/{job_id}/resume")
 def resume_job(job_id: str, user: str = Depends(current_user)):
+    """Продолжить приостановленную задачу."""
     return _control(job_id, "resume", user)
 
 
 @app.post("/api/jobs/{job_id}/cancel")
 def cancel_job(job_id: str, user: str = Depends(current_user)):
+    """Остановить задачу; уже распознанная часть сохраняется."""
     return _control(job_id, "cancel", user)
 
 
@@ -836,6 +848,7 @@ class ReanalyzeBody(BaseModel):
 
 @app.post("/api/jobs/{job_id}/reanalyze")
 def reanalyze_job(job_id: str, body: ReanalyzeBody, user: str = Depends(current_user)):
+    """Пересобрать протокол по той же расшифровке — без повторного распознавания."""
     _require_owned(job_id, user)
     try:
         job = store.reanalyze(job_id, provider=body.provider,
@@ -1060,6 +1073,7 @@ def get_partial(job_id: str, user: str = Depends(current_user)):
 @app.get("/api/jobs/{job_id}/result")
 def get_result(job_id: str, format: str = "txt", provider: str = "",
                user: str = Depends(current_user)):
+    """Результат задачи в выбранном формате: txt, plain, srt, json, docx, screen."""
     job = _require_owned(job_id, user)
     if format not in {"txt", "plain", "srt", "json", "docx", "screen"}:
         raise HTTPException(400, "format должен быть txt | plain | srt | json | docx | screen")
@@ -1385,6 +1399,7 @@ def meeting_live(task_id: str, user: str = Depends(current_user)):
 
 @app.get("/api/automation/meetings/{task_id}/notes")
 def meeting_notes_get(task_id: str, user: str = Depends(current_user)):
+    """Заметки участника по встрече."""
     from .automation.scheduler import scheduler
     res = scheduler.get_meeting_notes(user, task_id)
     if not res.get("ok"):
@@ -1508,6 +1523,7 @@ def automation_login_action(body: LoginAction, user: str = Depends(current_user)
 
 @app.post("/api/automation/recorder/login/close")
 def automation_login_close(user: str = Depends(current_user)):
+    """Закрыть окно входа в Яндекс на сервере."""
     from .automation.recorder import browser
     if browser.login_session is not None:
         browser.login_session.close()
