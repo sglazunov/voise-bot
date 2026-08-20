@@ -188,7 +188,13 @@ def _client_ip(request: Request) -> str:
     if os.getenv("VTX_TRUST_PROXY", "0") == "1":
         xff = request.headers.get("x-forwarded-for", "")
         if xff:
-            return xff.split(",")[0].strip()
+            # ПОСЛЕДНИЙ элемент — тот, который дописал ближайший прокси, то есть
+            # единственный, которому можно верить. Первый элемент подставляет
+            # сам клиент: за nginx (он ДОПИСЫВАЕТ, а не перезаписывает заголовок)
+            # это позволяло назваться чужим адресом и обойти защиту от перебора
+            # паролей. Caddy заголовок перезаписывает, но опираться на выбор
+            # прокси в коде нельзя.
+            return xff.split(",")[-1].strip()
     return request.client.host if request.client else "?"
 
 

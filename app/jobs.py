@@ -1095,11 +1095,17 @@ class JobStore:
             )
         except JobCancelled:
             self._finalise_cancel(job)
-        except Exception:
+        except Exception as e:      # noqa: BLE001
+            # В карточку — человеческое объяснение, трейсбек в журнал
+            # контейнера. Раньше пользователь видел сырой стек Python и не мог
+            # понять ни причины, ни что делать дальше.
+            traceback.print_exc()
             self._set(
                 job,
                 status=STATUS_ERROR,
-                error=traceback.format_exc(limit=3),
+                error=(f"Сбой обработки: {e}. Запись цела — нажмите «Повторить». "
+                       "Подробности в журнале сервиса "
+                       "(docker compose logs app)."),
                 finished_at=time.time(),
             )
         finally:

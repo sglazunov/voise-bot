@@ -938,6 +938,27 @@ class _RotatingProvider:
         # смотрит на тип, а тип здесь — обёртка, а не сам провайдер.
         self.accepts_should_stop = getattr(cls, "accepts_should_stop", False)
 
+    @property
+    def model(self) -> str:
+        """Модель, которой сейчас работаем.
+
+        Обёртка обязана отдавать её наравне с именем: при ДВУХ ключах в шапке
+        протокола оставалось голое «nvidia», и было не понять, DeepSeek его
+        собрал или Kimi. Свойство ЛЕНИВОЕ: у NVIDIA создание провайдера без
+        явной модели лезет в каталог по сети, и делать это при построении
+        цепочки не нужно.
+        """
+        if self._model:
+            return self._model
+        # Берём у ЛЮБОГО уже созданного ключа: курсор _i после успешного вызова
+        # сдвигается на следующий ключ, который может быть ещё не создан.
+        # Модель у всех ключей одна и та же.
+        for inst in self._instances.values():
+            m = getattr(inst, "model", "")
+            if m:
+                return str(m)
+        return ""
+
     def _inst(self, i: int):
         if i not in self._instances:
             k, ex = self._creds[i]

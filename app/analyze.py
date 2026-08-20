@@ -955,7 +955,10 @@ def analyze_transcript(transcript_text: str, provider: str | None = None,
         val = result.get(list_key, [])
         if isinstance(val, str):
             val = [val] if val.strip() else []
-        result[list_key] = [str(x).strip() for x in val if str(x).strip()]
+        # Отсеиваем None ДО str(): модель иногда присылает null в списке, и
+        # str(None) давал в протоколе строку «None».
+        result[list_key] = [str(x).strip() for x in val
+                            if x is not None and str(x).strip()]
     # Task lists carry an owner.
     for list_key in ("done_tasks", "tasks", "minor_tasks"):
         result[list_key] = _normalise_tasks(result.get(list_key, []))
