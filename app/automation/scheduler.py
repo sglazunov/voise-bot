@@ -471,7 +471,7 @@ class Scheduler:
             if not res.get("ok"):
                 self._set(st, "error", res.get("error") or "Запись не удалась.")
                 return
-            out = res.get("path") or out  # telemost mode may save .webm, not .mp4
+            out = res.get("path") or out
             st.out_path = out
             if res.get("audio_warning"):
                 log("⚠ Во время встречи были периоды без звука — проверьте запись.")
@@ -1131,7 +1131,7 @@ class Scheduler:
         interval = max(60, int(cfg.get("live_interval_min", 5)) * 60)
         lang = config.DEFAULT_LANGUAGE
         processed = 0.0
-        ffmpeg = cfg.get("ffmpeg_path") or "ffmpeg"
+        ffmpeg = "ffmpeg"
 
         def fmt(sec: float) -> str:
             m, s = divmod(int(sec), 60)

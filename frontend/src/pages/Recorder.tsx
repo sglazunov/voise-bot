@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Bot, Play, MessageSquareOff, Users, Timer, LogIn } from "lucide-react";
+import { Bot, Play, MessageSquareOff, Users, Timer, LogIn, Volume2 } from "lucide-react";
 import { Page } from "../components/Layout";
 import { Card, Switch, Select, Modal, useToast } from "../components/ui";
 import { useSettings } from "../lib/useSettings";
@@ -66,15 +66,23 @@ export default function Recorder() {
           y: ((e.clientY - r.top) / r.height) * img.naturalHeight });
   }
   const [testing, setTesting] = useState(false);
+  // Проверка звука: эндпоинт был, но кнопки к нему не существовало.
+  const [audio, setAudio] = useState<any>(null);
+  const [audioBusy, setAudioBusy] = useState(false);
+  async function audioTest() {
+    setAudioBusy(true);
+    try { setAudio(await api.get("/api/automation/recorder/audio-test")); }
+    catch (e: any) { toast(e.message, true); }
+    finally { setAudioBusy(false); }
+  }
 
   async function onSave() {
     try {
       await save({
-        bot_join_name: s.bot_join_name, headless: !!s.headless, auth_mode: s.auth_mode,
+        bot_join_name: s.bot_join_name, auth_mode: s.auth_mode,
         join_timeout_sec: s.join_timeout_sec, end_when_alone_sec: s.end_when_alone_sec,
         min_participants: s.min_participants, max_meeting_min: s.max_meeting_min,
         chat_stop_word: s.chat_stop_word, capture_video: !!s.capture_video,
-        audio_device: s.audio_device ?? "", ffmpeg_path: s.ffmpeg_path ?? "",
       });
       toast("Настройки бота сохранены");
     } catch (e: any) { toast(e.message, true); }
@@ -110,11 +118,10 @@ export default function Recorder() {
           </div>
           <label className="lbl">Имя бота на встрече</label>
           <input className="field" value={s.bot_join_name || ""} onChange={(e) => set("bot_join_name", e.target.value)} placeholder="Ассистент (запись)" />
-          <div className="grid grid-cols-2 gap-3 mt-3">
-            <div className="glass2 rounded-2xl px-3.5 py-3 flex items-center justify-between">
-              <div><div className="text-[13px] font-semibold">Headless</div>
-                <div className="text-[11px]" style={{ color: "var(--muted)" }}>Без окна (Xvfb)</div></div>
-              <Switch on={!!s.headless} onChange={() => set("headless", !s.headless)} /></div>
+          {/* Переключателя «Headless» здесь больше нет: записывающий браузер
+              всегда запускается с окном внутри Xvfb (иначе нечего захватывать),
+              настройка не читалась никем и вводила в заблуждение. */}
+          <div className="mt-3">
             <div className="glass2 rounded-2xl px-3.5 py-3 flex items-center justify-between">
               <div><div className="text-[13px] font-semibold">Захват видео</div>
                 <div className="text-[11px]" style={{ color: "var(--muted)" }}>mp4, не только звук</div></div>
@@ -176,13 +183,26 @@ export default function Recorder() {
           </div>
         </Card>
 
+        {/* Полей «аудио-устройство» и «путь к ffmpeg» здесь больше нет: запись
+            всегда идёт из монитора своего слота (meet0…meet3.monitor), а ffmpeg
+            берётся из образа. Вместо настроек — проверка, что звук доходит. */}
         <Card>
           <div className="flex items-center gap-2 mb-3"><Users size={17} color="var(--accent)" />
-            <div className="font-bold text-[15px]">Захват звука (Linux)</div></div>
-          <label className="lbl">Аудио-устройство (PulseAudio)</label>
-          <input className="field" value={s.audio_device || ""} onChange={(e) => set("audio_device", e.target.value)} placeholder="default.monitor" />
-          <label className="lbl mt-3">Путь к ffmpeg</label>
-          <input className="field" value={s.ffmpeg_path || ""} onChange={(e) => set("ffmpeg_path", e.target.value)} placeholder="/usr/bin/ffmpeg" />
+            <div className="font-bold text-[15px]">Захват звука</div></div>
+          <div className="text-[12px] mb-3" style={{ color: "var(--muted)" }}>
+            Звук встречи пишется из PulseAudio-монитора слота записи. Проверка
+            слушает его несколько секунд и показывает уровень — так видно, что
+            запись не выйдет немой.
+          </div>
+          <div className="flex gap-2.5 items-center flex-wrap">
+            <button className="btn btn-ghost" onClick={audioTest} disabled={audioBusy}>
+              <Volume2 size={15} /> {audioBusy ? "Слушаю…" : "Проверить звук"}</button>
+            {audio && <span className="text-[11.5px]" style={{
+              color: audio.ok === false ? "#fbbf24" : audio.has_sound ? "#5eead4" : "#fbbf24" }}>
+              {audio.ok === false ? (audio.error || "Проверка не удалась")
+                : audio.has_sound ? `Звук есть ✓ (${audio.mean_db} дБ, ${audio.device})`
+                : `Тишина (${audio.mean_db ?? "—"} дБ, ${audio.device}) — на встрече сейчас никто не говорит либо звук не доходит`}</span>}
+          </div>
         </Card>
       </div>
       {logs && (

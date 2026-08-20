@@ -1491,7 +1491,7 @@ def automation_recorder_audio_devices(user: str = Depends(current_user)):
     from .automation import settings as auto_settings
     from .automation.recorder import capture
     cfg = auto_settings.load(user)
-    return {"devices": capture.list_audio_devices(cfg.get("ffmpeg_path") or "ffmpeg")}
+    return {"devices": capture.list_audio_devices("ffmpeg")}
 
 
 @app.get("/api/automation/recorder/login-status")
@@ -1509,8 +1509,7 @@ def automation_recorder_audio_test(user: str = Depends(current_user)):
     from .automation import settings as auto_settings
     from .automation.recorder import capture
     cfg = auto_settings.load(user)
-    return capture.test_audio_level(cfg.get("ffmpeg_path") or "ffmpeg",
-                                    (cfg.get("audio_device") or "").strip())
+    return capture.test_audio_level("ffmpeg")
 
 
 @app.post("/api/automation/recorder/login")

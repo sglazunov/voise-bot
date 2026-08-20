@@ -66,7 +66,7 @@ export default function Scheduler() {
         rec_time_from: s.rec_time_from ?? "", rec_time_to: s.rec_time_to ?? "", rec_days: days,
         rec_default_on: !!s.rec_default_on, rec_include: s.rec_include ?? "", rec_exclude: s.rec_exclude ?? "",
         do_transcribe: !!s.do_transcribe, do_protocol: !!s.do_protocol, ocr_screen: !!s.ocr_screen,
-        identify_speakers: !!s.identify_speakers, post_back_to_weeek: !!s.post_back_to_weeek,
+        post_back_to_weeek: !!s.post_back_to_weeek,
         weeek_set_video_field: !!s.weeek_set_video_field, upload_protocol: !!s.upload_protocol,
         weeek_set_protocol_field: !!s.weeek_set_protocol_field,
         strict_verify: s.strict_verify !== false,
@@ -160,7 +160,8 @@ export default function Scheduler() {
           <Toggle title="Распознавание речи" sub="faster-whisper → текст" on={s.do_transcribe} onChange={() => set("do_transcribe", !s.do_transcribe)} />
           <Toggle title="Формировать протокол" sub="LLM → структурный протокол Word" on={s.do_protocol} onChange={() => set("do_protocol", !s.do_protocol)} />
           <Toggle title="OCR экрана" sub="распознавать текст со слайдов" on={s.ocr_screen} onChange={() => set("ocr_screen", !s.ocr_screen)} />
-          <Toggle title="Определять спикеров" sub="кто что говорил" on={s.identify_speakers} onChange={() => set("identify_speakers", !s.identify_speakers)} />
+          {/* Переключателя «Определять спикеров» здесь нет: для записей бота
+              имена с видео читаются всегда (Д7), настройка не читалась никем. */}
           <Toggle title="Строгая проверка" sub="пункт без дословной цитаты помечается «⚠ проверьте»"
             on={s.strict_verify !== false} onChange={() => set("strict_verify", s.strict_verify === false)} />
           <Toggle title="Live-расшифровка" sub="текст встречи появляется каждые ~5 минут прямо во время записи"

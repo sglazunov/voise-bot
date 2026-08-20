@@ -26,10 +26,12 @@ def _screen_size() -> str:
     return "x".join(res.split("x")[:2]) or "1920x1080"
 
 
-def _pulse_source(cfg: dict) -> str:
-    """The PulseAudio source to record the meeting from (the null-sink monitor)."""
-    return ((cfg.get("audio_device") or "").strip()
-            or os.environ.get("VTX_PULSE_MONITOR", "meet0.monitor"))
+def _pulse_source() -> str:
+    """The PulseAudio source to record the meeting from (the null-sink monitor).
+
+    Реальная запись всегда идёт из монитора СЛОТА (`source=`); это значение —
+    только запасное, для проб звука вне слота."""
+    return os.environ.get("VTX_PULSE_MONITOR", "meet0.monitor")
 
 
 def ffmpeg_available(ffmpeg: str = "ffmpeg") -> bool:
@@ -54,7 +56,7 @@ def list_audio_devices(ffmpeg: str = "ffmpeg") -> list[str]:
     return names
 
 
-def test_audio_level(ffmpeg: str, device: str, seconds: int = 3) -> dict:
+def test_audio_level(ffmpeg: str = "ffmpeg", device: str = "", seconds: int = 3) -> dict:
     """Record `seconds` from `device` and measure its volume (silence detector).
 
     Lets the UI tell the user whether the meeting's sound actually reaches the
@@ -80,21 +82,23 @@ def test_audio_level(ffmpeg: str, device: str, seconds: int = 3) -> dict:
         return {"ok": False, "error": "Не удалось открыть устройство: "
                 + " ".join(err.strip().splitlines()[-2:])[:200]}
     has_sound = max_db > -80.0
-    return {"ok": True, "has_sound": has_sound, "max_db": max_db, "mean_db": mean_db}
+    # device возвращаем, чтобы в интерфейсе было видно, ЧТО именно слушали:
+    # источник по умолчанию берётся из окружения, а не из настроек.
+    return {"ok": True, "has_sound": has_sound, "max_db": max_db,
+            "mean_db": mean_db, "device": device}
 
 
-def build_ffmpeg_cmd(out_path: str, cfg: dict, window_title: str | None = None,
+def build_ffmpeg_cmd(out_path: str, cfg: dict,
                      display: str | None = None, source: str | None = None) -> list[str]:
     """Build the ffmpeg capture command from settings.
 
     `display`/`source` pin capture to a specific Xvfb display and PulseAudio
     monitor (the parallel-recording slot); they default to the single-slot values.
-    Records into one mp4. `window_title` is irrelevant on a headless display.
+    Records into one mp4.
     """
-    ffmpeg = cfg.get("ffmpeg_path") or "ffmpeg"
     capture_video = bool(cfg.get("capture_video", True))
     disp = display or _display()
-    src = source or _pulse_source(cfg)
+    src = source or _pulse_source()
 
     cmd = [ffmpeg, "-y", "-hide_banner"]
     if capture_video:
@@ -118,11 +122,10 @@ def build_ffmpeg_cmd(out_path: str, cfg: dict, window_title: str | None = None,
 
 
 def readiness(cfg: dict) -> dict:
-    ffmpeg = cfg.get("ffmpeg_path") or "ffmpeg"
-    if not ffmpeg_available(ffmpeg):
+    if not ffmpeg_available():
         return {"ready": False,
                 "detail": "ffmpeg не найден. Установите: sudo apt install ffmpeg."}
-    sources = list_audio_devices(ffmpeg)
+    sources = list_audio_devices()
     monitors = [s for s in sources if s.startswith("meet") and s.endswith(".monitor")]
     if not monitors:
         return {"ready": False, "devices": sources,
@@ -138,20 +141,19 @@ def readiness(cfg: dict) -> dict:
 class FFmpegRecorder:
     """Start/stop an ffmpeg capture, finalising the file cleanly on stop."""
 
-    def __init__(self, out_path: str, cfg: dict, on_log=None, window_title=None,
+    def __init__(self, out_path: str, cfg: dict, on_log=None,
                  display=None, source=None):
         self.out_path = out_path
         self.cfg = cfg
         self._on_log = on_log or (lambda *_: None)
         self._proc: subprocess.Popen | None = None
-        self.window_title = window_title
         self._display = display
         self._source = source
         self._log_path = out_path + ".ffmpeg.log"
         self._log_file = None
 
     def start(self) -> None:
-        cmd = build_ffmpeg_cmd(self.out_path, self.cfg, self.window_title,
+        cmd = build_ffmpeg_cmd(self.out_path, self.cfg,
                                display=self._display, source=self._source)
         self._on_log("ffmpeg: " + " ".join(cmd))
         # Keep ffmpeg's stderr in a log so an immediate failure (window not

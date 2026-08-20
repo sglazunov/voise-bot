@@ -75,33 +75,6 @@ _IN_CALL = [
     'button[aria-label*="hang" i]', '[data-testid*="hangup"]',
     'button:has-text("Завершить")', 'button:has-text("Покинуть")',
 ]
-# --- Telemost native recording controls -------------------------------------
-# Confirmed from the live UI: the bottom "•••" (More) button opens a menu whose
-# first item is «Записать на компьютер»; while recording it becomes «Остановить
-# запись».
-_REC_MORE = [  # the bottom-bar "•••" (More) button that holds the record item
-    'button[aria-label="Ещё"]', 'button[aria-label*="Ещё"]',
-    'button[aria-label*="ещё"]', 'button[aria-label*="Дополнит"]',
-    'button[aria-label*="More" i]', 'button[aria-label*="menu" i]',
-    'button[aria-haspopup="menu"]', '[data-testid*="more"]',
-    '[data-testid*="menu-button"]', 'button:has-text("•••")', 'button:has-text("…")',
-]
-_REC_START = [  # the «Записать на компьютер» menu item
-    '[role="menuitem"]:has-text("Записать на компьютер")',
-    'text="Записать на компьютер"', 'text=Записать на компьютер',
-    'button:has-text("Записать на компьютер")',
-    'text=Запись на компьютер', 'text=Сохранить на компьютер',
-]
-_REC_CONFIRM = [  # an optional confirmation dialog
-    'button:has-text("Начать запись")', 'button:has-text("Записать")',
-    'button:has-text("Начать")', 'button:has-text("Продолжить")',
-    'button:has-text("Понятно")',
-]
-_REC_STOP = [
-    '[role="menuitem"]:has-text("Остановить запись")',
-    'text="Остановить запись"', 'text=Остановить запись',
-    'button:has-text("Остановить запись")', 'text=Завершить запись',
-]
 # Launch args: auto-accept mic/cam prompts; fake mic so we never send real audio;
 # suppress the noisy first-run/default-browser/translate popups that otherwise
 # show up in the recording.
@@ -272,15 +245,11 @@ class TelemostBot:
         args.append(f"--use-file-for-fake-audio-capture={_silent_wav()}")
         if not headless:
             args.append("--window-position=0,0")
-            if sys.platform.startswith("linux"):
-                # No window manager under Xvfb, so --start-maximized / the CDP
-                # maximise don't fill the screen. Size the window to the whole
-                # display and go fullscreen (also hides the toolbar/tabs from
-                # the recording).
-                w, h = _screen_wh()
-                args += [f"--window-size={w},{h}", "--start-fullscreen"]
-            else:
-                args.append("--start-maximized")
+            # Под Xvfb нет оконного менеджера, поэтому --start-maximized ничего
+            # не разворачивает: задаём размер окна во весь экран и включаем
+            # полноэкранный режим (заодно панель вкладок не попадает в запись).
+            w, h = _screen_wh()
+            args += [f"--window-size={w},{h}", "--start-fullscreen"]
         # Pin the browser process to this slot's display + audio sink, so its
         # window renders on the slot's Xvfb and its sound plays into the slot's
         # PulseAudio sink (which ffmpeg records) — full isolation between parallel
@@ -295,43 +264,9 @@ class TelemostBot:
         self._ctx = self._pw.chromium.launch_persistent_context(
             user_dir, headless=headless, args=args, env=launch_env,
             permissions=["microphone", "camera"],
-            accept_downloads=True,   # Telemost "Запись на компьютер" → a download
             no_viewport=not headless,  # use the actual window size when headed
             viewport=None if not headless else {"width": 1280, "height": 720})
         self._page = self._ctx.pages[0] if self._ctx.pages else self._ctx.new_page()
-        self._download_path = None
-        self._ctx.on("download", self._on_download)
-        # CDP maximise fills the Xvfb screen. We
-        # already forced --window-size + --start-fullscreen (no WM to maximise).
-        if not headless and not sys.platform.startswith("linux"):
-            self._maximize_window()
-
-    def _maximize_window(self) -> None:
-        """Maximise to full screen width via CDP (reliable across DPI, unlike
-        --start-maximized which Playwright often overrides)."""
-        try:
-            cdp = self._ctx.new_cdp_session(self._page)
-            win = cdp.send("Browser.getWindowForTarget")
-            cdp.send("Browser.setWindowBounds", {
-                "windowId": win["windowId"],
-                "bounds": {"windowState": "maximized"}})
-        except Exception as e:  # noqa: BLE001
-            self._on_log(f"Не удалось развернуть окно: {e}")
-
-    # -- Telemost native recording -----------------------------------------
-    def _on_download(self, dl) -> None:
-        """Capture the file Telemost produces when recording stops."""
-        try:
-            suggested = dl.suggested_filename or "recording.webm"
-            ext = Path(suggested).suffix or ".webm"
-            target = str(Path(self._out_path).with_suffix(ext)) if getattr(
-                self, "_out_path", None) else suggested
-            dl.save_as(target)
-            self._download_path = target
-            self._on_log(f"Файл записи получен от Телемоста: {target}")
-        except Exception as e:  # noqa: BLE001
-            self._on_log(f"Не удалось сохранить запись: {e}")
-
     def _aborted(self) -> bool:
         sc = getattr(self, "_should_stop", None)
         try:
@@ -410,21 +345,6 @@ class TelemostBot:
                      else "Не вижу элементов звонка — проверяю ещё раз…")
         return in_call or joined
 
-    def window_title(self) -> str | None:
-        """The browser window's title — used by ffmpeg to grab just this window.
-
-        Brings the window to the foreground first so x11grab captures it cleanly
-        (a fully occluded window can grab black)."""
-        try:
-            self._page.bring_to_front()
-        except Exception:
-            pass
-        try:
-            t = (self._page.title() or "").strip()
-            return t or None
-        except Exception:
-            return None
-
     def ensure_muted(self) -> None:
         """Turn the bot's mic and camera OFF (only if currently ON, so we never
         un-mute). Prevents the bot from sending any audio/video into the call."""
@@ -447,75 +367,6 @@ class TelemostBot:
             except Exception:
                 continue
         return False
-
-    def _open_more_and_click(self, item_selectors, overall_ms: int = 12000) -> bool:
-        """Open the bottom «•••» menu and click one of `item_selectors`.
-
-        Polls so it works whether the menu is already open or needs opening, and
-        whether the «•••» button has an aria-label we recognise."""
-        deadline = time.time() + overall_ms / 1000
-        while time.time() < deadline and not self._aborted():
-            # menu already open?
-            for sel in item_selectors:
-                try:
-                    el = self._page.query_selector(sel)
-                    if el and el.is_visible():
-                        el.click()
-                        return True
-                except Exception:
-                    pass
-            # open a "•••" candidate, then look for the item
-            for msel in _REC_MORE:
-                try:
-                    mb = self._page.query_selector(msel)
-                    if mb and mb.is_visible():
-                        mb.click()
-                        self._page.wait_for_timeout(600)
-                        for sel in item_selectors:
-                            it = self._page.query_selector(sel)
-                            if it and it.is_visible():
-                                it.click()
-                                return True
-                        # close the menu (Esc) so the next candidate is clean
-                        try:
-                            self._page.keyboard.press("Escape")
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-            self._page.wait_for_timeout(500)
-        return False
-
-    def start_recording(self, out_path: str) -> bool:
-        """Open «•••» → «Записать на компьютер». Returns True if it started."""
-        self._out_path = out_path
-        self._download_path = None
-        started = self._open_more_and_click(_REC_START, overall_ms=15000)
-        if started:
-            self._page.wait_for_timeout(1200)
-            self._click_any(_REC_CONFIRM, overall_ms=2500)  # optional dialog
-            self._on_log("Запись Телемоста запущена.")
-        else:
-            self._on_log("Не нашёл пункт «Записать на компьютер».")
-        return started
-
-    def stop_recording(self) -> None:
-        """Open «•••» → «Остановить запись» so Telemost finalises & saves."""
-        try:
-            stopped = self._open_more_and_click(_REC_STOP, overall_ms=8000)
-            self._click_any(_REC_CONFIRM, overall_ms=2000)  # confirm "завершить"
-            self._on_log(f"Остановка записи Телемоста: {stopped}")
-        except Exception as e:  # noqa: BLE001
-            self._on_log(f"Стоп записи: {e}")
-
-    def wait_for_download(self, timeout: int = 240) -> str | None:
-        """Wait until Telemost's recording file has been saved locally."""
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            if self._download_path:
-                return self._download_path
-            self._page.wait_for_timeout(1000)
-        return self._download_path
 
     def participant_count(self) -> int | None:
         """Best-effort count of participants (None if it can't be read).

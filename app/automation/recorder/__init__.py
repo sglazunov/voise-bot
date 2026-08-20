@@ -172,11 +172,10 @@ def record_meeting(url: str, out_path: str, cfg: dict,
         end_silence = int(os.getenv("VTX_END_ON_SILENCE_SEC", "600"))
 
         def _audio_watchdog() -> None:
-            ffmpeg = cfg.get("ffmpeg_path") or "ffmpeg"
             while not wd_stop.wait(30):
                 if not rec.running:
                     break
-                lvl = capture.test_audio_level(ffmpeg, slot.source, seconds=2)
+                lvl = capture.test_audio_level("ffmpeg", slot.source, seconds=2)
                 if not lvl.get("ok"):
                     continue    # probe hiccup — not evidence of silence
                 if lvl.get("has_sound"):

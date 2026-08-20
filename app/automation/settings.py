@@ -67,15 +67,11 @@ _DEFAULTS: dict[str, Any] = {
     "lookahead_min": 2,               # join the meeting this many min early
     "max_meeting_min": 240,           # hard cap on a single recording
     "bot_join_name": "Протокол-бот",  # display name shown in Telemost
-    "headless": True,
     # --- recorder (bot joins Telemost and records) ---
-    # Recording = ffmpeg screen capture (full length; no Yandex 30-min browser
-    # limit and no host-only restriction). The "telemost" native path was dropped.
-    "record_mode": "screen",
+    # Запись — всегда захват экрана через ffmpeg: полная длина, без 30-минутного
+    # ограничения браузерного Телемоста и без привязки к организатору.
     "auth_mode": "guest",             # "guest" (link only) | "profile" (logged in)
     "browser_profile_dir": "",        # profile dir for auth_mode=profile; "" -> DATA_DIR/browser-profile
-    "ffmpeg_path": "ffmpeg",          # ffmpeg binary (PATH or absolute)
-    "audio_device": "",               # PulseAudio source to record (default: meet<slot>.monitor)
     "capture_video": True,            # record the screen too (slides/screen-share)
     "join_timeout_sec": 60,           # how long to wait to get into the call
     "end_when_alone_sec": 90,         # stop after the room sits at/below the threshold this long
@@ -98,7 +94,6 @@ _DEFAULTS: dict[str, Any] = {
     "do_transcribe": True,            # run speech recognition on the recording
     "do_protocol": True,              # build the Word protocol (needs do_transcribe)
     "ocr_screen": True,               # recognise on-screen text (slides/code) too
-    "identify_speakers": True,        # read WHO spoke from the video (active-tile name)
     "analyze_provider": "auto",       # which LLM builds the protocol
     "strict_verify": True,            # grounding pass: every task/decision needs a
                                       # verbatim quote; unverified ones get flagged (Д5)
