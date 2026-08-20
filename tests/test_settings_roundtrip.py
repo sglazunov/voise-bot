@@ -44,7 +44,8 @@ def test_каждая_настройка_доходит_до_хранилища(
 
 def test_ключи_из_умолчаний_не_отброшены_моделью(client):
     """Прямая проверка того, что сломалось: модель обязана знать ВСЕ ключи."""
-    from app.main import AutomationSettings
+    # Модель настроек переехала вместе с маршрутами автоматизации.
+    from app.api_automation import AutomationSettings
     body = AutomationSettings(**{k: _sample(v) for k, v in _keys().items()})
     known = body.known()
     missing = [k for k in _keys() if k not in known]
