@@ -67,8 +67,11 @@ export function Card({ children, className = "" }: { children: ReactNode; classN
 }
 
 /* ---- Modal (centered dialog with backdrop) ---- */
-export function Modal({ open, onClose, title, children }:
-  { open: boolean; onClose: () => void; title?: ReactNode; children: ReactNode }) {
+export function Modal({ open, onClose, title, children, wide }:
+  { open: boolean; onClose: () => void; title?: ReactNode; children: ReactNode;
+    /** Почти во весь экран — для окна с экраном браузера, где мелкая
+     *  картинка бесполезна: по ней надо попадать кликами. */
+    wide?: boolean }) {
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
@@ -81,9 +84,11 @@ export function Modal({ open, onClose, title, children }:
   return createPortal(
     <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 2000,
       background: "rgba(4,12,16,.62)", backdropFilter: "blur(2px)",
-      display: "grid", placeItems: "center", padding: 16 }}>
+      display: "grid", placeItems: "center", padding: wide ? 8 : 16 }}>
       <div onClick={(e) => e.stopPropagation()} className="glass"
-        style={{ width: "min(94vw, 440px)", padding: 22 }}>
+        style={wide
+          ? { width: "min(98vw, 1720px)", maxHeight: "96vh", overflow: "auto", padding: 18 }
+          : { width: "min(94vw, 440px)", padding: 22 }}>
         {title && <div className="font-bold text-[16px] mb-2">{title}</div>}
         {children}
       </div>

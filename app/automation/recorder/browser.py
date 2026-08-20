@@ -872,7 +872,10 @@ class _LoginSession:
     def __init__(self, cfg: dict) -> None:
         import queue as _queue
         self.cfg = cfg
-        self.size = (1280, 800)
+        # Окно почти во весь экран: страница входа Яндекса раскладывается
+        # по-десктопному, а в интерфейсе картинка растягивается на всю модалку —
+        # мелкий кадр там неудобно кликать.
+        self.size = (1600, 900)
         self._cmds: "_queue.Queue[tuple]" = _queue.Queue()
         self._shot: bytes | None = None
         self._error: str = ""

@@ -196,7 +196,7 @@ export default function Recorder() {
             style={{ maxHeight: 320, overflow: "auto" }}>{logs.join("\n")}</pre>
         </Card>
       )}
-      <Modal open={loginOpen} onClose={closeLogin}
+      <Modal open={loginOpen} onClose={closeLogin} wide
         title={<span className="flex items-center gap-2"><LogIn size={16} color="var(--accent)" /> Вход в Яндекс для бота</span>}>
         <div className="text-[12.5px] mb-2" style={{ color: "var(--muted)" }}>
           Это браузер на сервере — кликайте прямо по картинке, набирайте текст в
@@ -205,10 +205,17 @@ export default function Recorder() {
           и через сервер не пойдёт.
         </div>
         {screen ? (
+          // Картинку тянем на всю доступную высоту: по ней надо попадать
+          // кликами, а координаты пересчитываются по фактическому размеру,
+          // так что масштаб на точность не влияет.
           <img ref={imgRef} src={screen} onClick={clickScreen} alt="экран браузера"
-            className="w-full rounded-xl cursor-pointer" style={{ border: "1px solid var(--line)" }} />
+            className="rounded-xl cursor-pointer block mx-auto"
+            style={{ border: "1px solid var(--line)", maxWidth: "100%",
+                     maxHeight: "calc(96vh - 210px)" }} />
         ) : (
-          <div className="glass2 rounded-xl p-8 text-center text-[12.5px]" style={{ color: "var(--muted)" }}>
+          <div className="glass2 rounded-xl p-8 text-center text-[12.5px]"
+            style={{ color: "var(--muted)", minHeight: "calc(96vh - 210px)",
+                     display: "grid", placeItems: "center" }}>
             Браузер запускается…</div>
         )}
         <div className="flex gap-2 mt-3 flex-wrap">
