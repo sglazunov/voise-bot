@@ -2,9 +2,29 @@
 // same ones the old vanilla-JS pages used, so no backend changes are required.
 const json = { "Content-Type": "application/json" };
 
+// FastAPI отдаёт detail либо строкой, либо СПИСКОМ (ошибки валидации, 422) —
+// в этом случае строка «[object Object]» и попадала в тост вместо причины.
+function message(data: any, status: number): string {
+  const d = data?.detail ?? data?.error;
+  if (typeof d === "string") return d;
+  if (Array.isArray(d)) {
+    return d.map((e) => {
+      const field = Array.isArray(e?.loc) ? e.loc[e.loc.length - 1] : "";
+      return field ? `${field}: ${e?.msg || "неверное значение"}` : (e?.msg || "");
+    }).filter(Boolean).join("; ") || `HTTP ${status}`;
+  }
+  return `HTTP ${status}`;
+}
+
 async function handle(r: Response) {
   const data = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error((data && (data.detail || data.error)) || `HTTP ${r.status}`);
+  if (r.status === 401) {
+    // Сессия истекла. Без этого поллинги страниц крутились вечно и молча:
+    // ошибки в консоль, экран прежний, входа никто не предлагает.
+    if (!location.pathname.startsWith("/login")) location.href = "/login";
+    throw new Error("Сессия истекла — войдите заново.");
+  }
+  if (!r.ok) throw new Error(message(data, r.status));
   return data;
 }
 

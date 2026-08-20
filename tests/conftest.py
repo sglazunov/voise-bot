@@ -26,7 +26,33 @@ os.environ["VTX_HTTPS"] = "0"
 os.environ["VTX_TRUST_PROXY"] = "0"
 
 import shutil  # noqa: E402
+import sys  # noqa: E402
+import types  # noqa: E402
 from pathlib import Path  # noqa: E402
+
+# Заглушка faster_whisper. Без неё не собирался НИ ОДИН тест: conftest тянет
+# app.jobs → app.transcribe, а тот импортирует WhisperModel на уровне модуля.
+# Из-за этого даже чистые тесты имён и Weeek требовали установленный движок
+# распознавания (~1 ГБ зависимостей). Настоящая модель тестам не нужна: те, что
+# реально распознают, помечены отдельно и в обычном прогоне не участвуют.
+if "faster_whisper" not in sys.modules:
+    try:
+        import faster_whisper  # noqa: F401
+    except ImportError:
+        stub = types.ModuleType("faster_whisper")
+
+        class _StubModel:                     # pragma: no cover — только импорт
+            def __init__(self, *a, **k):
+                raise RuntimeError(
+                    "faster-whisper не установлен: это заглушка для тестов, "
+                    "распознавание в этом окружении недоступно.")
+
+        stub.WhisperModel = _StubModel
+        utils = types.ModuleType("faster_whisper.utils")
+        utils._MODELS = {}
+        stub.utils = utils
+        sys.modules["faster_whisper"] = stub
+        sys.modules["faster_whisper.utils"] = utils
 
 import pytest  # noqa: E402
 from starlette.testclient import TestClient  # noqa: E402

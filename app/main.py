@@ -14,7 +14,7 @@ from fastapi.responses import (HTMLResponse, PlainTextResponse, FileResponse,
                                JSONResponse, RedirectResponse)
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from . import config, db, llm, analyze, security, sms, user_creds
 from .jobs import store, STATUS_DONE, STATUS_ANALYZING, STATUS_CANCELLED
@@ -732,8 +732,15 @@ def nvidia_verify_state(user: str = Depends(current_user)):
             "engines": _engine_list(user_creds.load(user))}
 
 
+class ProviderRef(BaseModel):
+    """Только имя провайдера. Отдельно от ProviderKey, где api_key обязателен:
+    «Отключить» шлёт один provider и всегда получало 422, а в тосте — «[object
+    Object]» (детали ошибки FastAPI приходят списком)."""
+    provider: str
+
+
 @app.post("/api/providers/disconnect")
-def disconnect_provider(body: ProviderKey, user: str = Depends(current_user)):
+def disconnect_provider(body: ProviderRef, user: str = Depends(current_user)):
     """Remove ALL of this user's saved keys for a provider."""
     user_creds.clear(user, body.provider.strip().lower())
     return {"ok": True, "providers": _provider_list(user_creds.load(user))}
@@ -1231,55 +1238,36 @@ def automation_settings(user: str = Depends(current_user)):
 
 
 class AutomationSettings(BaseModel):
-    weeek_token: str | None = None
-    weeek_project_id: str | int | None = None
-    timezone: str | None = None
-    cloud: str | None = None
-    local_dir: str | None = None
-    yandex_disk: dict | None = None
-    gdrive: dict | None = None
-    enabled: bool | None = None
-    do_transcribe: bool | None = None
-    do_protocol: bool | None = None
-    ocr_screen: bool | None = None
-    analyze_provider: str | None = None
-    poll_interval_sec: int | None = None
-    lookahead_min: int | None = None
-    bot_join_name: str | None = None
-    post_back_to_weeek: bool | None = None
-    weeek_set_video_field: bool | None = None
-    weeek_video_field: str | None = None
-    upload_protocol: bool | None = None
-    protocol_folder: str | None = None
-    weeek_set_protocol_field: bool | None = None
-    weeek_protocol_field: str | None = None
-    # recorder
-    record_mode: str | None = None
-    auth_mode: str | None = None
-    browser_profile_dir: str | None = None
-    ffmpeg_path: str | None = None
-    audio_device: str | None = None
-    capture_video: bool | None = None
-    headless: bool | None = None
-    join_timeout_sec: int | None = None
-    end_when_alone_sec: int | None = None
-    min_participants: int | None = None
-    max_meeting_min: int | None = None
-    # which meetings to auto-record (empty = all)
-    rec_time_from: str | None = None
-    rec_time_to: str | None = None
-    rec_days: list | None = None
-    rec_include: str | None = None
-    rec_exclude: str | None = None
-    rec_default_on: bool | None = None
-    rec_decisions: dict | None = None
+    """Настройки автоматизации. Список ключей — из settings._DEFAULTS.
+
+    Раньше здесь был РУЧНОЙ список полей, и он отстал от умолчаний на
+    одиннадцать ключей: telegram_bot_token/telegram_chat_id, strict_verify,
+    live_transcribe/live_interval_min, analyze_preset, identify_speakers,
+    chat_stop_word, weeek_use_record_field/weeek_record_field,
+    end_if_nobody_joins_sec. Pydantic молча отбрасывал лишние поля — фронт их
+    слал, `model_dump()` не содержал, и настройки НЕ СОХРАНЯЛИСЬ вообще:
+    Telegram-уведомления нельзя было включить, стоп-слово — сменить, пресет и
+    строгая проверка навсегда оставались умолчанием.
+
+    Теперь модель принимает любые ключи, но сохраняются только известные — так
+    список не может снова разойтись с _DEFAULTS.
+    """
+    model_config = ConfigDict(extra="allow")
+
+    def known(self) -> dict:
+        """Присланные значения, оставив только существующие настройки."""
+        from .automation import settings as auto_settings
+        allowed = set(auto_settings._DEFAULTS)
+        return {k: v for k, v in self.model_dump().items() if k in allowed}
 
 
 @app.post("/api/automation/settings")
 def automation_save(body: AutomationSettings, user: str = Depends(current_user)):
     """Persist automation settings. Only non-null fields are updated."""
     from .automation import settings as auto_settings
-    values = {k: v for k, v in body.model_dump().items() if v is not None}
+    # None отбрасываем — так фронт помечает «поле не трогали». Пустая строка
+    # при этом ЗНАЧИМА: ею очищают поле (проект Weeek, фильтры, папка).
+    values = {k: v for k, v in body.known().items() if v is not None}
     auto_settings.save(user, values)
     return auto_settings.redacted(user)
 

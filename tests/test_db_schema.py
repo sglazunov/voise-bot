@@ -56,5 +56,5 @@ def test_чистое_время_распознавания_хранится():
     from app import db
     from app.jobs import Job
     assert "transcribe_sec" in db.JOB_SCALAR_COLS
-    assert hasattr(Job(filename="x", audio_path="y", language="ru",
+    assert hasattr(Job(id="x", filename="x", audio_path="y", language="ru",
                        diarize=False), "transcribe_sec")

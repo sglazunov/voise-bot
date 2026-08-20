@@ -20,6 +20,7 @@ import ssl
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path
@@ -65,6 +66,21 @@ def _retry_after(e: urllib.error.HTTPError, body: str, default: float) -> float:
     return default
 
 
+def _safe_url(url: str) -> str:
+    """Адрес без query — в query у некоторых провайдеров лежит API-ключ.
+
+    Текст ошибки уходит далеко: в причину отката, в карточку задачи и в шапку
+    Word-протокола, который потом попадает в облако и в Weeek. Секрету там не
+    место.
+    """
+    try:
+        parts = urllib.parse.urlsplit(url)
+        return urllib.parse.urlunsplit(
+            (parts.scheme, parts.netloc, parts.path, "", ""))
+    except Exception:      # noqa: BLE001 — диагностика не должна падать
+        return url.split("?")[0]
+
+
 def _http_post_json(url: str, payload: dict, headers: dict, timeout: int = 180,
                     max_retries: int = 3) -> dict:
     """POST a JSON body and return the parsed JSON response.
@@ -97,9 +113,10 @@ def _http_post_json(url: str, payload: dict, headers: dict, timeout: int = 180,
                 time.sleep(wait + 0.5)
                 attempt += 1
                 continue
-            raise RuntimeError(f"HTTP {e.code} от {url}: {body[:300]}") from e
+            raise RuntimeError(f"HTTP {e.code} от {_safe_url(url)}: {body[:300]}") from e
         except urllib.error.URLError as e:
-            raise RuntimeError(f"Не удалось подключиться к {url}: {e.reason}") from e
+            raise RuntimeError(
+                f"Не удалось подключиться к {_safe_url(url)}: {e.reason}") from e
 
 
 # ---------------------------------------------------------------------------
@@ -720,13 +737,18 @@ class GeminiProvider:
 
     def complete(self, prompt: str, max_tokens: int = 2000, force_json: bool = True) -> str:
         model = self.model
+        # Ключ — ЗАГОЛОВКОМ, а не в адресе. В адресе он попадал в текст ошибки
+        # (_http_post_json печатает url), оттуда — в причину отката, в карточку
+        # задачи и в шапку Word-протокола. То есть секрет уезжал в документ,
+        # который потом кладут в облако и Weeek.
         url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
-               f"{model}:generateContent?key={self.api_key}")
+               f"{model}:generateContent")
         gen = {"temperature": 0.1, "maxOutputTokens": max_tokens}
         if force_json:
             gen["responseMimeType"] = "application/json"
         payload = {"contents": [{"parts": [{"text": prompt}]}], "generationConfig": gen}
-        out = _http_post_json(url, payload, headers={})
+        out = _http_post_json(url, payload,
+                              headers={"x-goog-api-key": self.api_key})
         try:
             return out["candidates"][0]["content"]["parts"][0]["text"].strip()
         except (KeyError, IndexError) as e:
