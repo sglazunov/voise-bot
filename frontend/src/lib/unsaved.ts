@@ -12,10 +12,6 @@ export function setUnsaved(v: boolean, msg?: string): void {
   if (msg) message = msg;
 }
 
-export function hasUnsaved(): boolean {
-  return dirty;
-}
-
 /** True = it's ok to navigate. Shows a confirm only when there are edits. */
 export function confirmLeave(): boolean {
   if (!dirty) return true;

@@ -120,6 +120,9 @@
     const showErr = (m) => { err.textContent = m; err.style.display = 'block'; };
 
     // Live-format the phone as a Russian +7 number: "8…"→"+7…", "923…"→"+7923…".
+    // ДУБЛЬ formatRuPhone из frontend/src/lib/phone.ts — эта страница вне
+    // сборки SPA и импортировать модуль не может. Менять правило нужно в
+    // обоих местах сразу.
     const phoneEl = $('phone');
     if (phoneEl) {
       const fmtPhone = (raw) => {

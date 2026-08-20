@@ -20,3 +20,12 @@ export function fmtDateTime(iso: string | null): string {
     return new Date(iso).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
   } catch { return iso; }
 }
+
+/** Русское склонение по числу: plural(2, "ключ", "ключа", "ключей") -> "ключа".
+ *  Было написано дважды — в Overview и вручную тернарниками в Providers. */
+export function plural(n: number, one: string, few: string, many: string): string {
+  const m10 = n % 10, m100 = n % 100;
+  if (m10 === 1 && m100 !== 11) return one;
+  if (m10 >= 2 && m10 <= 4 && (m100 < 10 || m100 >= 20)) return few;
+  return many;
+}

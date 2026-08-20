@@ -3,6 +3,9 @@
 //   "923..."        -> "+7923..." (bare local number gets +7)
 //   "+7 923..."     -> "+7923..." (kept)
 // Digits only, capped at +7 plus 10 digits.
+// ВНИМАНИЕ: то же правило продублировано в app/templates/login.html — та
+// страница отдаётся отдельно, вне сборки SPA, и импортировать этот модуль
+// не может. Меняете здесь — поменяйте и там.
 export function formatRuPhone(raw: string): string {
   let d = (raw || "").replace(/\D/g, "");
   if (!d) return "";

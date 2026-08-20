@@ -2,20 +2,14 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   CalendarClock, Clock3, ListChecks, Timer, Users2, Gavel, FileText,
-  Radio, ShieldCheck, ArrowRight, Info,
+  Radio, ShieldCheck, ArrowRight, Info, CheckCircle2, AlertTriangle,
 } from "lucide-react";
 import { Page } from "../components/Layout";
 import { Card, StatusBadge } from "../components/ui";
 import { api } from "../lib/api";
-import { Status, isToday, fmtDateTime } from "../lib/format";
+import { Status, isToday, fmtDateTime, plural } from "../lib/format";
 
 const PERIODS = [{ d: 7, l: "7 дней" }, { d: 30, l: "30 дней" }, { d: 90, l: "90 дней" }];
-const plural = (n: number, a: string, b: string, c: string) => {
-  const m10 = n % 10, m100 = n % 100;
-  if (m10 === 1 && m100 !== 11) return a;
-  if (m10 >= 2 && m10 <= 4 && (m100 < 10 || m100 >= 20)) return b;
-  return c;
-};
 
 /* Hero stat tile — for a single headline number a figure IS the right form, not a chart. */
 function Stat({ icon: Icon, n, label, hint }: { icon: any; n: React.ReactNode; label: string; hint?: string }) {
@@ -74,15 +68,40 @@ function TrendBars({ data }: { data: { date: string; count: number }[] }) {
   );
 }
 
+/* Одна строка готовности: зелёная галка либо жёлтый знак с объяснением. */
+function Ready({ label, ok, detail }: { label: string; ok: boolean; detail?: string }) {
+  return (
+    <div className="flex items-start gap-2.5 py-1.5">
+      {ok ? <CheckCircle2 size={15} color="#5eead4" className="flex-none mt-0.5" />
+          : <AlertTriangle size={15} color="#fbbf24" className="flex-none mt-0.5" />}
+      <div className="min-w-0">
+        <div className="text-[12.5px] font-semibold">{label}</div>
+        {detail && <div className="text-[11.5px] leading-snug" style={{ color: "var(--muted)" }}>{detail}</div>}
+      </div>
+    </div>
+  );
+}
+
 export default function Overview() {
   const [s, setS] = useState<Status | null>(null);
   const [st, setSt] = useState<any>(null);
   const [days, setDays] = useState(30);
+  // Готовность окружения. Эти проверки существовали на сервере, но показать их
+  // было негде: «почему бот не зашёл» приходилось выяснять по логам.
+  const [deps, setDeps] = useState<any>(null);
+  const [rec, setRec] = useState<any>(null);
+  const [cloud, setCloud] = useState<any>(null);
 
   const load = () => api.get("/api/automation/scheduler/status").then(setS).catch(() => {});
   const loadStats = (d: number) => api.get(`/api/stats?days=${d}`).then(setSt).catch(() => {});
+  const loadReady = () => {
+    api.get("/api/setup/deps").then(setDeps).catch(() => {});
+    api.get("/api/automation/recorder/status").then(setRec).catch(() => {});
+    api.get("/api/automation/clouds/status").then(setCloud).catch(() => {});
+  };
   useEffect(() => { load(); const t = setInterval(load, 5000); return () => clearInterval(t); }, []);
   useEffect(() => { loadStats(days); }, [days]);
+  useEffect(() => { loadReady(); }, []);
 
   const all = s?.meetings ?? [];
   const today = all.filter((m) => isToday(m.start));
@@ -92,7 +111,7 @@ export default function Overview() {
 
   return (
     <Page title="Обзор" subtitle="Что автоматизация дала бизнесу и что происходит прямо сейчас"
-      onRefresh={() => { load(); loadStats(days); }}>
+      onRefresh={() => { load(); loadStats(days); loadReady(); }}>
 
       {/* Filters live in one row above the metrics */}
       <div className="glass p-2.5 flex items-center gap-2 mb-3.5 flex-wrap">
@@ -194,6 +213,29 @@ export default function Overview() {
           </div>
         </Card>
       </div>
+
+      <Card className="mt-3.5">
+        <div className="flex items-center gap-2 mb-2"><ShieldCheck size={17} color="var(--accent)" />
+          <div className="font-bold text-[14px]">Готовность к записи</div></div>
+        <div className="text-[12px] mb-1" style={{ color: "var(--muted)" }}>
+          Что нужно боту, чтобы встреча записалась и превратилась в протокол.
+          Жёлтое здесь — причина, по которой запись может не состояться.
+        </div>
+        <div className="grid md:grid-cols-2 gap-x-6">
+          {rec && <Ready label="Бот-рекордер" ok={!!rec.ready}
+            detail={rec.ready ? `режим входа: ${rec.auth_mode === "profile" ? "под аккаунтом" : "гость"}`
+              : (rec.detail || rec.browser?.detail || rec.capture?.detail)} />}
+          {deps && Object.entries(deps).map(([k, v]: any) => (
+            <Ready key={k} label={v.label} ok={!!v.ready}
+              detail={v.ready ? undefined : "не установлено в этом образе"} />
+          ))}
+          {cloud && (() => {
+            const sel = cloud.selected || "local";
+            const b = (cloud.backends || {})[sel] || {};
+            return <Ready label={`Облако: ${b.label || sel}`} ok={!!b.ready} detail={b.detail} />;
+          })()}
+        </div>
+      </Card>
 
       <div className="flex items-start gap-2 mt-3.5 text-[11.5px] px-1" style={{ color: "var(--muted)" }}>
         <Info size={13} className="flex-none mt-0.5" />

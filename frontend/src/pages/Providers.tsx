@@ -5,8 +5,9 @@ import {
 import { Page } from "../components/Layout";
 import { Card, useToast } from "../components/ui";
 import { api } from "../lib/api";
+import { plural } from "../lib/format";
 
-type Provider = { id: string; label: string; available: boolean; needs_key: boolean; keys: number };
+type Provider = { id: string; label: string; available: boolean; keys: number };
 type Engine = { value: string; label: string };
 
 // Extra field hints for providers that need a second value beyond the key.
@@ -139,7 +140,7 @@ function ProviderCard({ p, models, onChange, toast }:
         </div>
         {p.available
           ? <span className="chip" style={{ color: "#5eead4", background: "rgba(52,211,153,.16)" }}>
-              <CheckCircle2 size={12} /> {p.keys} ключ{p.keys === 1 ? "" : p.keys < 5 ? "а" : "ей"}</span>
+              <CheckCircle2 size={12} /> {p.keys} {plural(p.keys, "ключ", "ключа", "ключей")}</span>
           : <span className="chip" style={{ color: "var(--muted)" }}>не подключён</span>}
       </div>
 

@@ -98,8 +98,9 @@ export function Modal({ open, onClose, title, children, wide }:
 /* ---- Select (themed dropdown; replaces native <select> app-wide) ----
    Always opens downward, matches the trigger width, and is styled like the rest
    of the UI (rounded, glass, teal accent). Supports flat options and groups. */
-export type SelOpt = { value: string; label: string };
-export type SelGroup = { label: string; options: SelOpt[] };
+// Внутренние типы Select — наружу их никто не импортирует.
+type SelOpt = { value: string; label: string };
+type SelGroup = { label: string; options: SelOpt[] };
 type SelItem = SelOpt | SelGroup;
 const isGroup = (i: SelItem): i is SelGroup => Array.isArray((i as SelGroup).options);
 

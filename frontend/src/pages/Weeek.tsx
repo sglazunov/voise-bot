@@ -10,7 +10,16 @@ export default function Weeek() {
   const { s, set, save, reload , ready } = useSettings();
   const [token, setToken] = useState("");
   const [projects, setProjects] = useState<any[] | null>(null);
+  const [probeId, setProbeId] = useState("");
+  const [probeRes, setProbeRes] = useState<any>(null);
+  const [probing, setProbing] = useState(false);
   const toast = useToast();
+  async function probe() {
+    setProbing(true); setProbeRes(null);
+    try { setProbeRes(await api.get(`/api/automation/weeek/probe?task_id=${encodeURIComponent(probeId.trim())}`)); }
+    catch (e: any) { toast(e.message, true); }
+    finally { setProbing(false); }
+  }
   const connected = !!s.weeek_token;
 
   async function onSave() {
@@ -63,6 +72,28 @@ export default function Weeek() {
             <button className="btn btn-ghost" onClick={loadProjects}><RefreshCw size={15} /> Мои проекты</button>
             <button className="btn btn-danger" onClick={resetToken}><Trash2 size={14} /> Сбросить токен</button>
           </div>
+        </Card>
+
+        {/* Диагностика: показать сырой ответ Weeek по одной задаче. Маршрут был,
+            но обратиться к нему можно было только curl'ом. Нужен, когда встреча
+            «не подхватилась»: сразу видно, как называются поля даты и ссылки. */}
+        <Card>
+          <div className="flex items-center gap-2 mb-3"><FolderTree size={17} color="var(--accent)" />
+            <div className="font-bold text-[15px]">Диагностика задачи</div></div>
+          <div className="text-[12px] mb-2" style={{ color: "var(--muted)" }}>
+            Если встреча не попала в план — посмотрите, что по ней отдаёт Weeek:
+            как называются поля с датой, ссылкой и галочкой записи.
+          </div>
+          <div className="flex gap-2.5 flex-wrap">
+            <input className="field flex-1" value={probeId} onChange={(e) => setProbeId(e.target.value)}
+              placeholder="ID задачи в Weeek" />
+            <button className="btn btn-ghost" onClick={probe} disabled={!probeId.trim() || probing}>
+              {probing ? "Смотрю…" : "Показать"}</button>
+          </div>
+          {probeRes && (
+            <pre className="glass2 rounded-2xl p-3 mt-3 text-[11.5px] whitespace-pre-wrap"
+              style={{ maxHeight: 320, overflow: "auto" }}>{JSON.stringify(probeRes, null, 2)}</pre>
+          )}
         </Card>
 
         <Card>

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { UserCircle, Phone, KeyRound, ShieldCheck, Trash2, AlertTriangle, Users, Copy, Check, UserMinus, User, ChevronDown } from "lucide-react";
 import { Page } from "../components/Layout";
 import { Card, Modal, Popover, useToast } from "../components/ui";
-import { api, logout } from "../lib/api";
+import { api } from "../lib/api";
 import { formatRuPhone } from "../lib/phone";
 
 export default function Profile() {

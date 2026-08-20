@@ -32,8 +32,6 @@ export const api = {
   get: (p: string) => fetch(p).then(handle),
   post: (p: string, body?: unknown) =>
     fetch(p, { method: "POST", headers: json, body: body == null ? undefined : JSON.stringify(body) }).then(handle),
-  del: (p: string, body?: unknown) =>
-    fetch(p, { method: "DELETE", headers: json, body: body == null ? undefined : JSON.stringify(body) }).then(handle),
   patch: (p: string, body?: unknown) =>
     fetch(p, { method: "PATCH", headers: json, body: body == null ? undefined : JSON.stringify(body) }).then(handle),
   // raw text (transcript downloads)

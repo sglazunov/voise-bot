@@ -234,12 +234,6 @@ def available_providers(user_keys: dict | None = None) -> list[str]:
     return [p for p in PROVIDER_ORDER if p in out]
 
 
-def set_hf_token(token: str) -> None:
-    """Set the HuggingFace token at runtime (for diarization). In-memory only."""
-    global HF_TOKEN
-    HF_TOKEN = token.strip()
-
-
 
 def resolve_provider(name: str | None, user_keys: dict | None = None) -> str:
     """Turn a requested provider (or 'auto'/None) into a concrete one."""

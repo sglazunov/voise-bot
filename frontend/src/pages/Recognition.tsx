@@ -392,6 +392,19 @@ export default function Recognition() {
   useEffect(() => { api.get("/api/presets").then((d) => setPresets(d.presets || [])).catch(() => {}); }, []);
   const [recommend, setRecommend] = useState("");
   useEffect(() => { api.get("/api/system/recommend").then((d) => setRecommend(d.detail || "")).catch(() => {}); }, []);
+  // Скачана ли выбранная модель. Спрашиваем один раз при смене модели, а
+  // переспрашиваем только пока идёт загрузка — ради процентов.
+  const [model, setModel] = useState<any>(null);
+  const downloading = model?.download?.state === "running";
+  useEffect(() => {
+    let stop = false;
+    const ask = () => api.get(`/api/model/status?name=${encodeURIComponent(opts.model || "")}`)
+      .then((d) => { if (!stop) setModel(d); }).catch(() => {});
+    ask();
+    if (!downloading) return () => { stop = true; };
+    const t = setInterval(ask, 3000);
+    return () => { stop = true; clearInterval(t); };
+  }, [opts.model, downloading]);
   // Д14: поиск по всем встречам (debounce 350 мс)
   const [searchQ, setSearchQ] = useState("");
   const [searchRes, setSearchRes] = useState<any[]>([]);
@@ -551,6 +564,20 @@ export default function Recognition() {
     } finally { setBusy(false); setProg(0); }
   }
   async function retry(id: string) { try { await api.post(`/api/jobs/${id}/retry`); loadJobs(); } catch (e: any) { toast(e.message, true); } }
+  async function downloadModel() {
+    try { setModel(await api.post(`/api/model/download?name=${encodeURIComponent(opts.model)}`)); toast("Скачиваю модель…"); }
+    catch (e: any) { toast(e.message, true); }
+  }
+  // Пауза/продолжение. Воркер проверяет флаг между сегментами, так что счёт
+  // замирает и уже распознанное не теряется — можно освободить процессор под
+  // срочную задачу и вернуться. Маршруты были, кнопки к ним не существовало.
+  async function pauseJob(id: string, resume: boolean) {
+    try {
+      await api.post(`/api/jobs/${id}/${resume ? "resume" : "pause"}`);
+      toast(resume ? "Продолжаю" : "Пауза");
+      loadJobs();
+    } catch (e: any) { toast(e.message, true); }
+  }
   // Остановка идущей работы. Спрашиваем подтверждение: у длинной записи позади
   // могут быть десятки минут счёта, и случайный клик обидно дорог.
   async function stopJob(id: string) {
@@ -647,6 +674,21 @@ export default function Recognition() {
                 <Select value={opts.model} onChange={(v) => setOpts({ ...opts, model: v })}
                   options={MODELS.map((m) => ({ value: m.v, label: m.l }))} /></div>
             </div>
+            {/* Не скачанная модель тянется прямо посреди задачи: у large это
+                несколько гигабайт, и человек видит «распознаётся» без движения.
+                Проверка и загрузка заранее были на сервере, кнопки — не было. */}
+            {model && model.downloaded === false && (
+              <div className="glass2 rounded-2xl p-3 mt-2 flex items-center gap-3 flex-wrap text-[12px]">
+                <span className="min-w-0 flex-1" style={{ color: "var(--warn)" }}>
+                  {model.download?.state === "running"
+                    ? `Скачиваю «${model.name}»… ${model.download.percent ?? 0}%`
+                    : `Модель «${model.name}» ещё не скачана${model.size_hint ? ` (${model.size_hint})` : ""} — иначе загрузка пойдёт во время распознавания.`}
+                </span>
+                {model.download?.state !== "running" && (
+                  <button className="btn btn-ghost flex-none" onClick={downloadModel}>Скачать заранее</button>
+                )}
+              </div>
+            )}
             {recommend && <div className="text-[11px] mt-1" style={{ color: "var(--muted)" }}>💡 {recommend}</div>}
             <label className="lbl mt-3">Движок протокола</label>
             <Select value={opts.provider} onChange={(v) => setOpts({ ...opts, provider: v })}
@@ -801,8 +843,12 @@ export default function Recognition() {
                   {/* Остановить долгую работу, не дожидаясь конца: часовая запись
                       на medium считается ~40 минут, и ошибочно запущенная задача
                       иначе занимала бы процессор и очередь всё это время. */}
-                  <button className="btn-ghost flex-none self-start" onClick={() => stopJob(detail.id)}>
-                    ■ Стоп</button>
+                  <div className="flex flex-col gap-1.5 flex-none self-start">
+                    <button className="btn-ghost" onClick={() => pauseJob(detail.id, detail.status === "paused")}>
+                      {detail.status === "paused" ? "▶ Продолжить" : "⏸ Пауза"}</button>
+                    <button className="btn-ghost" onClick={() => stopJob(detail.id)}>
+                      ■ Стоп</button>
+                  </div>
                 </div>
               )}
               {detail.error && <div className="glass2 rounded-2xl p-3 mb-3 text-[12.5px]" style={{ color: "#fca5a5" }}>{detail.error}</div>}

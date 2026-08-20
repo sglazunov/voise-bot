@@ -289,11 +289,6 @@ def auth_logout(request: Request):
     return resp
 
 
-@app.get("/api/auth/me")
-def auth_me(user: str = Depends(current_user)):
-    return {"username": user}
-
-
 # ---- AI context (standing knowledge base for the protocol AI) --------------
 @app.get("/api/context")
 def get_context(user: str = Depends(current_user)):
@@ -480,24 +475,16 @@ def _start_scheduler() -> None:
     import threading as _th
     _th.Thread(target=store.backfill_search, daemon=True,
                name="vtx-search-backfill").start()
-    # First-run auto-setup: install whatever this machine is missing (OCR engine,
-    # ffmpeg, Chromium for the bot) and pre-download all speech models — in the
-    # background, no clicks. Disable with VTX_AUTO_SETUP=0.
+    # Подготовка при старте: модель распознавания скачивается заранее, в фоне —
+    # иначе первая же встреча ждёт полтора гигабайта загрузки. Объём задаёт
+    # VTX_PRELOAD_MODELS, выключается целиком через VTX_AUTO_SETUP=0.
+    # (Ветка «иначе» здесь раньше качала модель СИНХРОННО, блокируя старт.)
     if os.getenv("VTX_AUTO_SETUP", "1") == "1":
         try:
             from . import autosetup
             autosetup.ensure_all()
         except Exception:
             pass
-    else:
-        scope = os.getenv("VTX_PRELOAD_MODELS", "1").strip().lower()
-        if scope not in ("0", "none", "false", "no"):
-            try:
-                from . import whisper_setup
-                models = whisper_setup.PRELOAD_MODELS if scope in ("all", "*") else None
-                whisper_setup.preload_all(models)
-            except Exception:
-                pass
 
 ALLOWED_EXT = {".mp3", ".wav", ".m4a", ".ogg", ".oga", ".opus", ".flac", ".aac",
                ".mp4", ".mkv", ".webm", ".mov", ".wma", ".amr"}
@@ -1117,40 +1104,10 @@ def _safe_stem(name: str | None) -> str:
     return (keep or "audio")[:80]
 
 
-@app.get("/api/diarization/status")
-def diarization_status():
-    """What's needed for speaker diarization (for the UI toggle hints)."""
-    from .diarize import readiness
-    return readiness()
-
-
-class HfToken(BaseModel):
-    token: str
-
-
-@app.post("/api/diarization/token")
-def diarization_token(body: HfToken, user: str = Depends(require_admin)):
-    """Set the HuggingFace token (for diarization) at runtime; report readiness."""
-    from .diarize import readiness
-    token = body.token.strip()
-    if not token:
-        raise HTTPException(400, "Введите токен")
-    config.set_hf_token(token)
-    return readiness()
-
-
-@app.get("/api/screen/status")
-def screen_status():
-    """What's needed for on-screen text capture (OCR) — for the UI toggle hints."""
-    from .screen_ocr import readiness
-    return readiness()
-
-
-@app.get("/api/speakers/status")
-def speakers_status():
-    """What's needed to read WHO spoke from the video — for the UI toggle hints."""
-    from .speaker_id import readiness
-    return readiness()
+# Отдельные маршруты готовности (diarization/screen/speakers) убраны: то же
+# самое отдаёт /api/setup/deps, и именно его показывает блок «Готовность к
+# записи» на «Обзоре». Задание токена HuggingFace жило только в памяти процесса
+# и терялось при перезапуске — токен задаётся переменной окружения HF_TOKEN.
 
 
 @app.get("/api/protocol-delivery/status")
@@ -1173,48 +1130,28 @@ def protocol_delivery_status(user: str = Depends(current_user)):
 
 @app.get("/api/ollama/status")
 def ollama_status():
-    """Whether the local engine (Ollama) is installed/ready + install progress."""
+    """Поднят ли локальный движок (Ollama) и есть ли на нём нужная модель."""
     from . import ollama_setup
     return ollama_setup.status()
 
 
-@app.post("/api/ollama/install")
-def ollama_install(user: str = Depends(require_admin)):
-    """Download & install Ollama + the protocol model on demand (background)."""
-    from . import ollama_setup
-    return ollama_setup.install()
-
-
-@app.post("/api/ollama/install/cancel")
-def ollama_install_cancel(user: str = Depends(require_admin)):
-    """Request cancellation of an in-progress Ollama install."""
-    from . import ollama_setup
-    return ollama_setup.cancel()
-
-
-# ---- Optional dependencies (install into the app's venv from the UI) -------
+# ---- Готовность необязательных компонентов --------------------------------
+# Установку отсюда убрали: в контейнере она была невозможна (нет root и sudo,
+# pip без root кладёт пакеты вне тома), а кнопок к этим маршрутам не было ни в
+# одном экране. Всё нужное собрано в образе — осталась только проверка.
 @app.get("/api/setup/auto")
 def autosetup_status():
-    """Progress of the automatic first-run setup (OCR engine, ffmpeg, bot browser,
-    speech models) + per-component readiness."""
+    """Ход подготовки при старте (предзагрузка модели речи) + готовность
+    компонентов."""
     from . import autosetup
     return autosetup.status()
 
 
 @app.get("/api/setup/deps")
 def deps_status():
-    """Readiness + install progress of optional deps (playwright/diariz/ffmpeg)."""
+    """Готовность необязательных компонентов (playwright/диаризация/ffmpeg/OCR)."""
     from . import deps_setup
     return deps_setup.status()
-
-
-@app.post("/api/setup/deps/{component}/install")
-def deps_install(component: str, user: str = Depends(require_admin)):
-    """Install one optional dependency into the app's venv (background)."""
-    from . import deps_setup
-    if component not in deps_setup.COMPONENTS:
-        raise HTTPException(404, "Неизвестный компонент")
-    return deps_setup.install(component)
 
 
 # ---- Recognition models (pre-download from the UI, no transcription) -------
@@ -1483,15 +1420,6 @@ def automation_recorder_status(user: str = Depends(current_user)):
     """What the Telemost recorder needs (Playwright/ffmpeg/audio) — for the UI."""
     from .automation import settings as auto_settings, recorder
     return recorder.readiness(auto_settings.load(user))
-
-
-@app.get("/api/automation/recorder/audio-devices")
-def automation_recorder_audio_devices(user: str = Depends(current_user)):
-    """List the PulseAudio sources ffmpeg can capture the meeting sound from."""
-    from .automation import settings as auto_settings
-    from .automation.recorder import capture
-    cfg = auto_settings.load(user)
-    return {"devices": capture.list_audio_devices("ffmpeg")}
 
 
 @app.get("/api/automation/recorder/login-status")
