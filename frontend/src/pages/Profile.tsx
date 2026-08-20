@@ -105,7 +105,7 @@ export default function Profile() {
                   {copied ? <><Check size={14} /> Готово</> : <><Copy size={14} /> Копировать</>}</button>
               </div>
               <div className="text-[12px] mt-2" style={{ color: "var(--muted)" }}>
-                Код обновляется раз в сутки — действует до <b style={{ color: "var(--txt)" }}>{fmtExpiry(info?.invite_expires_at)}</b>.
+                Код действует месяц — до <b style={{ color: "var(--txt)" }}>{fmtExpiry(info?.invite_expires_at)}</b>.
                 По одному коду может войти сколько угодно людей.
               </div>
 

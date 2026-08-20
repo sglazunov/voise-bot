@@ -361,10 +361,16 @@ def confirm_recovery_code(username: str, phone: str, code: str,
 # creates a new team (you become its admin, with a personal invite code);
 # registering WITH a valid code joins that admin's team.
 # --------------------------------------------------------------------------- #
-# The invite code ROTATES DAILY: a code older than this no longer admits anyone,
-# and the admin's profile hands out a fresh one. It is NOT single-use — any
-# number of people may join with the same code while it's still valid.
-INVITE_CODE_TTL = int(os.getenv("VTX_INVITE_CODE_TTL_SEC", str(24 * 3600)))
+# Код приглашения живёт МЕСЯЦ, потом протухает и профиль админа выдаёт новый.
+# Код НЕ одноразовый: пока он жив, по нему может войти сколько угодно людей.
+#
+# Месяц — осознанный компромисс в пользу удобства: код раздают новым сотрудникам
+# не каждый день, а суточный приходилось выпрашивать заново при каждом найме.
+# Цена: утёкший код открывает доступ к настройкам, токенам и API-ключам команды
+# на месяц вперёд. Если код ушёл не туда — сократить срок можно переменной
+# VTX_INVITE_CODE_TTL_SEC, но погасить уже выданный код нечем, кроме как
+# дождаться протухания.
+INVITE_CODE_TTL = int(os.getenv("VTX_INVITE_CODE_TTL_SEC", str(30 * 24 * 3600)))
 
 
 def _gen_invite_code(users: dict) -> str:
@@ -412,8 +418,8 @@ def list_teams() -> list[str]:
 
 
 def invite_code_of(username: str) -> str | None:
-    """The team's invite code — only admins have one. Rotates daily: a fresh code
-    is minted on demand once the previous one is older than INVITE_CODE_TTL."""
+    """The team's invite code — only admins have one. Новый выдаётся по запросу,
+    когда прежний стал старше INVITE_CODE_TTL (по умолчанию месяц)."""
     username = normalize_username(username)
     with _LOCK:
         users = _load_users()

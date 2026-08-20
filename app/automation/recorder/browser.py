@@ -12,6 +12,7 @@ Playwright is imported lazily so the rest of the app runs without it.
 from __future__ import annotations
 
 import os
+import queue
 import re
 import shutil
 import sys
@@ -21,11 +22,13 @@ import time
 import wave
 from pathlib import Path
 
-from ... import config
+from ... import config, logs
 
 # Max letter-word tokens on a chat line for it to count as a deliberate stop
 # COMMAND, not a sentence that merely mentions the word. Override via env.
 BROWSER_STOP_MAX_TOKENS = int(os.getenv("VTX_CHAT_STOP_MAX_TOKENS", "6"))
+
+log = logs.get("vtx.login")
 
 # Candidate selectors (first match wins). Tune against the live site if needed.
 _NAME_INPUTS = [
@@ -721,17 +724,28 @@ class _LoginSession:
     """Одна живая сессия входа. Экземпляр — один на процесс (см. `login_session`)."""
 
     def __init__(self, cfg: dict) -> None:
-        import queue as _queue
         self.cfg = cfg
         # Окно почти во весь экран: страница входа Яндекса раскладывается
         # по-десктопному, а в интерфейсе картинка растягивается на всю модалку —
         # мелкий кадр там неудобно кликать.
         self.size = (1600, 900)
-        self._cmds: "_queue.Queue[tuple]" = _queue.Queue()
+        self._cmds: "queue.Queue[tuple]" = queue.Queue()
         self._shot: bytes | None = None
         self._error: str = ""
+        # Журнал последних команд. Раньше сбой команды глотался молча, и когда
+        # клики «не доходили», понять было нечего: ни в логе, ни в интерфейсе
+        # не оставалось ни следа.
+        self._events: list[str] = []
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+
+    def _note(self, msg: str) -> None:
+        self._events.append(f"{time.strftime('%H:%M:%S')} {msg}")
+        del self._events[:-40]
+        log.info("вход в Яндекс: %s", msg)
+
+    def events(self) -> list[str]:
+        return list(self._events)
 
     # -- наружу ------------------------------------------------------------
     def start(self) -> None:
@@ -774,21 +788,32 @@ class _LoginSession:
                     viewport={"width": w, "height": h}, args=_LAUNCH_ARGS)
                 page = ctx.pages[0] if ctx.pages else ctx.new_page()
                 page.goto(_LOGIN_URL, wait_until="domcontentloaded", timeout=45000)
+                self._note(f"окно открыто {w}x{h}, страница {_LOGIN_URL}")
                 last_shot = 0.0
                 while not self._stop.is_set():
-                    # Команды разбираем сразу, картинку обновляем раз в секунду —
-                    # иначе поток занят только съёмкой и клики ждут.
-                    try:
-                        kind, kw = self._cmds.get(timeout=0.2)
-                        self._apply(page, kind, kw)
-                    except Exception:       # noqa: BLE001 — пустая очередь или сбой команды
-                        pass
+                    # Разгребаем ВСЮ очередь: за круг могло накопиться несколько
+                    # кликов, а по одному за итерацию каждый ждал бы своей
+                    # съёмки экрана — до секунды задержки на клик.
+                    while True:
+                        try:
+                            kind, kw = self._cmds.get_nowait()
+                        except queue.Empty:
+                            break
+                        try:
+                            self._apply(page, kind, kw, self.size)
+                            self._note(f"{kind} выполнено {kw}")
+                        except Exception as e:      # noqa: BLE001
+                            # Молчать здесь нельзя: именно из-за этого «клики не
+                            # работают» превращалось в гадание.
+                            self._error = f"{kind}: {e}"
+                            self._note(f"{kind} ОШИБКА: {e}")
                     if time.time() - last_shot > 1.0:
                         try:
                             self._shot = page.screenshot(type="png")
-                        except Exception:   # noqa: BLE001
-                            pass
+                        except Exception as e:   # noqa: BLE001
+                            self._note(f"снимок экрана не удался: {e}")
                         last_shot = time.time()
+                    self._stop.wait(0.15)
                 try:
                     ctx.close()
                 except Exception:
@@ -797,9 +822,18 @@ class _LoginSession:
             self._error = str(e)[:400]
 
     @staticmethod
-    def _apply(page, kind: str, kw: dict) -> None:
+    def _apply(page, kind: str, kw: dict, size: tuple[int, int]) -> None:
         if kind == "click":
-            page.mouse.click(float(kw.get("x", 0)), float(kw.get("y", 0)))
+            x, y = float(kw.get("x", 0)), float(kw.get("y", 0))
+            w, h = size
+            if not (0 <= x <= w and 0 <= y <= h):
+                # Промах мимо окна означает, что фронт посчитал координаты не от
+                # того размера. Молча кликать в угол — хуже, чем сказать вслух.
+                raise ValueError(f"координаты вне окна {w}x{h}: {x:.0f},{y:.0f}")
+            # move перед click: странице входа Яндекса нужны события наведения,
+            # без них часть кнопок не считает клик своим.
+            page.mouse.move(x, y)
+            page.mouse.click(x, y)
         elif kind == "type":
             page.keyboard.type(str(kw.get("text", "")), delay=25)
         elif kind == "key":

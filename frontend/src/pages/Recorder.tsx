@@ -23,13 +23,18 @@ export default function Recorder() {
   // телефоне и через сервер не проходит.
   const [loginOpen, setLoginOpen] = useState(false);
   const [screen, setScreen] = useState("");
+  // Размер окна браузера НА СЕРВЕРЕ. Считать координаты клика от naturalWidth
+  // ненадёжно: кадр подменяется раз в секунду, и в момент подгрузки нового
+  // naturalWidth равен нулю — клик уходил бы в угол экрана.
+  const [screenWH, setScreenWH] = useState<[number, number]>([1600, 900]);
   const [authState, setAuthState] = useState<any>(null);
   const [authChecking, setAuthChecking] = useState(false);
   const imgRef = useRef<HTMLImageElement | null>(null);
 
   async function openLogin() {
     try {
-      await api.post("/api/automation/recorder/login/open");
+      const r = await api.post("/api/automation/recorder/login/open");
+      if (r?.width && r?.height) setScreenWH([r.width, r.height]);
       setLoginOpen(true);
     } catch (e: any) { toast(e.message, true); }
   }
@@ -62,8 +67,10 @@ export default function Recorder() {
     const img = imgRef.current;
     if (!img) return;
     const r = img.getBoundingClientRect();
-    act({ kind: "click", x: ((e.clientX - r.left) / r.width) * img.naturalWidth,
-          y: ((e.clientY - r.top) / r.height) * img.naturalHeight });
+    if (!r.width || !r.height) return;
+    const [w, h] = screenWH;
+    act({ kind: "click", x: ((e.clientX - r.left) / r.width) * w,
+          y: ((e.clientY - r.top) / r.height) * h });
   }
   const [testing, setTesting] = useState(false);
   // Проверка звука: эндпоинт был, но кнопки к нему не существовало.
