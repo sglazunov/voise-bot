@@ -1,3 +1,14 @@
+# Зависимости приложения. У КАЖДОЙ строки есть верхняя граница: без неё сборка
+# невоспроизводима — образ, собранный завтра, тянет мажорную версию, которой
+# никто не проверял, и ломается уже на бою. Границы стоят на следующем мажоре
+# (там, где проект соблюдает semver) — переход через неё делается осознанно.
+#
+# Это НЕ lock-файл: транзитивные зависимости здесь не зафиксированы. Полный lock
+# должен собираться под целевую платформу (образ Linux/amd64, Python 3.12), а не
+# на машине разработчика: колёса у ctranslate2, psycopg[binary] и playwright
+# платформенные. Собрать его на сервере:
+#   docker compose exec app pip freeze > requirements.lock.txt
+
 # Core web service
 fastapi==0.115.*
 uvicorn[standard]==0.32.*
@@ -13,34 +24,34 @@ setuptools<80
 # Requires Python 3.12 (3.13/3.14 not yet supported by the native deps).
 
 # Word document generation (protocol export)
-python-docx>=1.1
+python-docx>=1.1,<2
 
 # Timezone database for zoneinfo (so Weeek meeting times read correctly).
-tzdata>=2024.1
+tzdata>=2024.1,<2027
 
 # Screen-text capture from video (OCR of slides/code/docs shown on screen).
 # Python side; the external Tesseract binary + 'rus' language data are installed
 # in the Docker image (apt: tesseract-ocr tesseract-ocr-rus).
-Pillow>=10
-pytesseract>=0.3.10
+Pillow>=10,<12
+pytesseract>=0.3.10,<0.4
 
 # AI analysis via Claude API (requires ANTHROPIC_API_KEY env var)
-anthropic>=0.40
+anthropic>=0.40,<1
 
 # Authentication & per-user secret encryption (Fernet/HKDF, PBKDF2 via stdlib).
-cryptography>=42
+cryptography>=42,<47
 
 # PostgreSQL backend (used when DATABASE_URL is set; otherwise the app keeps its
 # JSON-file storage). psycopg 3 + connection pool.
-psycopg[binary]>=3.2
-psycopg_pool>=3.2
+psycopg[binary]>=3.2,<4
+psycopg_pool>=3.2,<4
 
 # --- Meeting recorder bot (Telemost): headed Chromium via Playwright ---
 # The browser itself is installed in the Docker image with
 #   playwright install --with-deps chromium
 # and runs inside Xvfb + PulseAudio (see docker/run.sh). Enable at runtime with
 # VTX_RECORDER_ENABLED=1.
-playwright>=1.44
+playwright>=1.44,<2
 
 # --- Тесты ---
 # pytest намеренно здесь, а не в отдельном dev-файле: разработки «на стороне» у
@@ -50,7 +61,7 @@ playwright>=1.44
 # импортируется. Тесты изолированы: conftest.py принудительно уводит
 # VTX_DATA_DIR во временный каталог и убирает DATABASE_URL, поэтому прогон на
 # бою не трогает боевые данные.
-pytest>=8.0
+pytest>=8.0,<10
 
 # --- Optional: speaker diarization (heavy: needs >4 GB RAM + HF token) ---
 # Enable with VTX_DIARIZATION=1 after installing these in the image:

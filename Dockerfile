@@ -54,8 +54,8 @@ RUN pip install --upgrade pip wheel && pip install -r requirements.txt
 # Needs RAM >= 8 GB at runtime; leave 0 on small hosts.
 ARG DIARIZATION=0
 RUN if [ "$DIARIZATION" = "1" ]; then \
-      pip install --no-cache-dir torch torchaudio --index-url https://download.pytorch.org/whl/cpu \
-      && pip install --no-cache-dir pyannote.audio; \
+      pip install --no-cache-dir "torch>=2.2,<3" "torchaudio>=2.2,<3" --index-url https://download.pytorch.org/whl/cpu \
+      && pip install --no-cache-dir "pyannote.audio>=3.3,<4"; \
     fi
 
 # Chromium for the bot, installed to a world-readable path so the non-root app
