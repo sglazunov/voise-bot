@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import Optional
 
 
 def _task_parts(item) -> tuple[str, str]:
@@ -66,8 +66,6 @@ def generate_report(
         from docx import Document
         from docx.shared import Pt, RGBColor, Inches
         from docx.enum.text import WD_ALIGN_PARAGRAPH
-        from docx.oxml.ns import qn
-        from docx.oxml import OxmlElement
     except ImportError:
         raise RuntimeError(
             "Пакет python-docx не установлен. Выполните: pip install python-docx"

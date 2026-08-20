@@ -512,17 +512,3 @@ def identify_speakers(video_path: str, segments: List[Segment],
             seg.speaker = best_name
     return segments
 
-
-def debug_report(video_path: str, limit: int = 20) -> List[dict]:
-    """Calibration helper: return the first `limit` frames where an active tile
-    was detected, with its bbox and the OCR'd name. Use this on a real recording
-    to verify detection / tune the VTX_SPEAKER_* thresholds."""
-    out: List[dict] = []
-    for t, arr, img in _sample_frames(video_path, _SAMPLE_SEC, _MAX_FRAMES):
-        bbox = _active_bbox(arr)
-        if bbox is None:
-            continue
-        out.append({"time": round(t, 1), "bbox": bbox, "name": _read_name(img, bbox)})
-        if len(out) >= limit:
-            break
-    return out

@@ -16,7 +16,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from .. import config, db, security
+from .. import db, security
 
 _LOCK = threading.Lock()
 

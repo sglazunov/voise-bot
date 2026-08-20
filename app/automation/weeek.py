@@ -33,9 +33,6 @@ _TELEMOST_RE = re.compile(
 # Candidate fields that may hold the meeting moment, richest first.
 # Confirmed against a real Weeek task: dueDate is ISO "YYYY-MM-DD", `date` is
 # localized "DD.MM.YYYY", and the time (when set) lives in `time`/`timeStart`.
-_DATETIME_FIELDS = ("dueDateTime", "startDateTime", "dateTime", "datetime")
-_DATE_FIELDS = ("dueDate", "startDate", "date", "dateStart", "day")
-_TIME_FIELDS = ("time", "timeStart", "startTime", "dueTime")
 
 
 class WeeekError(RuntimeError):

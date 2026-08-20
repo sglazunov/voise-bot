@@ -12,7 +12,6 @@ from pathlib import Path
 from ... import config
 
 from . import gdrive, local, yandex_disk
-from ._http import CloudError
 
 # backend key -> (module, settings sub-key, human label)
 BACKENDS = {

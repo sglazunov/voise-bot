@@ -18,7 +18,6 @@ so it's as atomic as the old temp-file replace.
 from __future__ import annotations
 
 import threading
-from typing import Any
 
 from . import config
 

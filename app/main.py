@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
 import time
 import threading
 from pathlib import Path
@@ -17,7 +16,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, ConfigDict, Field
 
 from . import config, db, llm, analyze, security, sms, user_creds
-from .jobs import store, STATUS_DONE, STATUS_ANALYZING, STATUS_CANCELLED
+from .jobs import store, STATUS_DONE, STATUS_CANCELLED
 
 
 def _provider_list(user_keys: dict | None = None) -> list[dict]:

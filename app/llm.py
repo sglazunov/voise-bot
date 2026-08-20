@@ -598,7 +598,6 @@ def nvidia_verify_models(api_key: str, on_log=None, force: bool = True) -> list[
             if done is not None:
                 return done
         catalog = nvidia_models(api_key)[:_NVIDIA_PROBE_MAX]
-        ok: list[str] = []
         _nvidia_progress.update(running=True, done=0, total=len(catalog))
         try:
             return _nvidia_probe_loop(catalog, api_key, on_log)
@@ -1118,10 +1117,6 @@ class _FallbackChain:
                 self._i = i
                 return True
         return False
-
-    @property
-    def cloud_available(self) -> bool:
-        return any(not isinstance(b, OllamaProvider) for b in self._backends)
 
     def complete(self, prompt: str, max_tokens: int = 2000, force_json: bool = True,
                  on_token=None, should_stop=None, json_schema: dict | None = None) -> str:

@@ -69,10 +69,6 @@ HF_TOKEN = os.getenv("HF_TOKEN", "")
 #   FREE  — Ollama (fully local/offline) and Groq (free cloud tier)
 #   PAID  — Anthropic Claude (billed per token, highest quality)
 
-# "auto" = use whichever is available, preferring free providers so you never
-# get billed unexpectedly. Override per-job from the UI or globally here.
-LLM_PROVIDER = os.getenv("VTX_LLM_PROVIDER", "auto")
-
 # --- Paid: Anthropic Claude (per-token billing) ---
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 ANALYSIS_MODEL = os.getenv("VTX_ANALYSIS_MODEL", "claude-sonnet-4-6")
@@ -244,33 +240,6 @@ def set_hf_token(token: str) -> None:
     HF_TOKEN = token.strip()
 
 
-def set_provider_key(provider: str, key: str, extra: str = "") -> None:
-    """Set an API key at runtime (from the UI). Kept in memory only — not
-    written to disk, so it's gone on restart. Put it in .env to persist.
-
-    `extra` carries the provider's second credential where needed:
-    YandexGPT → folder id; GigaChat → scope (optional)."""
-    global ANTHROPIC_API_KEY, GROQ_API_KEY, NVIDIA_API_KEY, GEMINI_API_KEY
-    global YANDEX_API_KEY, YANDEX_FOLDER_ID, GIGACHAT_AUTH_KEY, GIGACHAT_SCOPE
-    if provider == "anthropic":
-        ANTHROPIC_API_KEY = key
-    elif provider == "groq":
-        GROQ_API_KEY = key
-    elif provider == "nvidia":
-        NVIDIA_API_KEY = key
-    elif provider == "gemini":
-        GEMINI_API_KEY = key
-    elif provider == "yandex":
-        YANDEX_API_KEY = key
-        if extra:
-            YANDEX_FOLDER_ID = extra
-    elif provider == "gigachat":
-        GIGACHAT_AUTH_KEY = key
-        if extra:
-            GIGACHAT_SCOPE = extra
-    else:
-        raise RuntimeError(f"Ключ для провайдера '{provider}' не поддерживается.")
-
 
 def resolve_provider(name: str | None, user_keys: dict | None = None) -> str:
     """Turn a requested provider (or 'auto'/None) into a concrete one."""
@@ -286,8 +255,6 @@ def resolve_provider(name: str | None, user_keys: dict | None = None) -> str:
         return name
     return avail[0]  # PROVIDER_ORDER puts free providers first
 
-
-ANALYSIS_ENABLED = bool(available_providers())
 
 for _d in (DATA_DIR, UPLOAD_DIR, RESULT_DIR):
     _d.mkdir(parents=True, exist_ok=True)

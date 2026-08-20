@@ -15,7 +15,7 @@ import json
 import time
 from typing import Any
 
-from . import config, db, security
+from . import db, security
 
 # How long writing minutes by hand takes, as a share of the meeting itself
 # (listening back + typing). Deliberately conservative; shown in the UI as an

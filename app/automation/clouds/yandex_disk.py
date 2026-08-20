@@ -7,7 +7,6 @@ PUT the file → publish to get a shareable link.
 """
 from __future__ import annotations
 
-import urllib.parse
 from pathlib import Path
 
 from ._http import CloudError, request, request_json

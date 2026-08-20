@@ -550,7 +550,7 @@ class Scheduler:
                 if do_protocol and cfg.get("upload_protocol", True):
                     threading.Thread(
                         target=self._await_and_upload_protocol,
-                        args=(st, job.id, cfg, Path(out).stem),
+                        args=(st, job.id, cfg),
                         daemon=True).start()
             elif delivered_elsewhere:
                 # No transcription — nothing else needs the file; drop it now.
@@ -704,7 +704,7 @@ class Scheduler:
             return
 
     def _await_and_upload_protocol(self, st: MeetingState, job_id: str,
-                                   cfg: dict, base_name: str) -> None:
+                                   cfg: dict) -> None:
         """Wait for the job to finish and REPORT the protocol outcome. The
         upload + Weeek attach itself is done by the job (deliver_* flags), so it
         survives restarts and re-runs on «Пересобрать»; this waiter only makes
@@ -987,7 +987,7 @@ class Scheduler:
                     pass
                 threading.Thread(
                     target=self._await_and_upload_protocol,
-                    args=(st, jid, cfg, Path(job.filename).stem),
+                    args=(st, jid, cfg),
                     daemon=True).start()
 
     def _finalize_orphan(self, st: MeetingState, cfg: dict, out: str) -> None:
@@ -1042,7 +1042,7 @@ class Scheduler:
         if deliver:
             threading.Thread(
                 target=self._await_and_upload_protocol,
-                args=(st, job.id, cfg, Path(out).stem),
+                args=(st, job.id, cfg),
                 daemon=True).start()
 
     def _restore_snapshot(self, st: MeetingState) -> None:
