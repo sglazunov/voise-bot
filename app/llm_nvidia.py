@@ -20,11 +20,13 @@ import urllib.request
 import uuid
 from pathlib import Path
 
-from . import config
+from . import config, logs
 from .llm_base import (
     GenerationCancelled, _KeyProviderMixin, _http_post_json, _is_rate_limit,
     _safe_url,
 )
+
+log = logs.get("vtx.nvidia")
 
 
 # ---------------------------------------------------------------------------
@@ -472,6 +474,13 @@ class NvidiaProvider(_KeyProviderMixin):
             except Exception as e:      # noqa: BLE001
                 if _nvidia_not_entitled(e) or _is_rate_limit(e):
                     raise
+                # Молчать здесь нельзя. Дальше идёт обычный запрос, и на длинной
+                # генерации он ловит от шлюза NVIDIA 504 — именно эта 504 и
+                # попадала в шапку протокола, а настоящая причина (почему
+                # оборвался ПОТОК) не оставляла следа нигде.
+                log.warning("NVIDIA: поток не удался (%s), пробую обычным "
+                            "запросом — на длинном ответе шлюз, скорее всего, "
+                            "ответит 504", e)
 
         if force_json:
             try:

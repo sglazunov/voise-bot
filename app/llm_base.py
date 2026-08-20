@@ -73,7 +73,7 @@ def _http_post_json(url: str, payload: dict, headers: dict, timeout: int = 180,
                     max_retries: int = 3) -> dict:
     """POST a JSON body and return the parsed JSON response.
 
-    Retries on 429 (rate limit) / 503, honouring Retry-After — free cloud tiers
+    Retries on 429 (rate limit) / 503 / 529 (overloaded), honouring Retry-After — free cloud tiers
     (e.g. Groq) rate-limit easily when a long transcript is analysed in chunks.
     """
     data = json.dumps(payload).encode("utf-8")
@@ -96,7 +96,12 @@ def _http_post_json(url: str, payload: dict, headers: dict, timeout: int = 180,
                 return json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
             body = e.read().decode("utf-8", "replace")
-            if e.code in (429, 503) and attempt < max_retries:
+            # 529 — «Service temporarily overloaded» у NVIDIA: это временная
+            # перегрузка, ровно как 503. Без неё запрос сразу считался
+            # провалом движка и встреча уходила запасному — по журналу
+            # протоколов за август так потерялись четыре встречи из
+            # двадцати одной.
+            if e.code in (429, 503, 529) and attempt < max_retries:
                 wait = min(_retry_after(e, body, default=8 * (attempt + 1)), 30)
                 time.sleep(wait + 0.5)
                 attempt += 1
