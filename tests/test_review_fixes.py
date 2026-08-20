@@ -120,3 +120,47 @@ class TestK4V6ВыборкаПоВсейЗаписи:
         from app import speaker_id
         src = pathlib.Path(speaker_id.__file__).read_text(encoding="utf-8")
         assert src.count('getenv("VTX_SPEAKER_MIN_TILE"') == 1
+
+
+class TestK3ТесныйДвижокНеТеряется:
+    """Движок с малым бюджетом ответа пропускался НАВСЕГДА. Если остальные
+    падали, вызов заканчивался «Ни один движок не ответил» — хотя рабочий
+    движок был, просто с урезанным ответом. После часа распознавания это
+    означало протокол в никуда."""
+
+    def test_отложенный_движок_пробуется_последним(self, monkeypatch):
+        from app import config
+
+        class Tight:                     # маленький лимит → бюджет «тесный»
+            name = "groq"
+
+            def complete(self, prompt, max_tokens=2000, force_json=True):
+                return "урезанный, но протокол"
+
+        class Broken:
+            name = "gemini"
+
+            def complete(self, *a, **k):
+                raise RuntimeError("HTTP 500")
+
+        monkeypatch.setitem(config.PROVIDER_TPM, "groq", 6000)
+        chain = llm._FallbackChain([Tight(), Broken()])
+        # Просим большой ответ: у Tight бюджет окажется меньше 4000.
+        assert chain.complete("текст" * 500, max_tokens=8000) == "урезанный, но протокол"
+
+    def test_цепочка_объявляет_поддержку_прерывания(self):
+        class WithStop:
+            name = "nvidia"
+            accepts_should_stop = True
+
+            def complete(self, *a, **k):
+                return "ok"
+
+        class Plain:
+            name = "groq"
+
+            def complete(self, *a, **k):
+                return "ok"
+
+        assert llm._FallbackChain([Plain(), WithStop()]).accepts_should_stop
+        assert not llm._FallbackChain([Plain()]).accepts_should_stop

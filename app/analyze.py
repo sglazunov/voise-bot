@@ -746,6 +746,16 @@ def _stream_complete(backend, prompt, max_tokens, on_progress, stage,
                 should_stop=cancel_check, json_schema=json_schema)
         except llm.GenerationCancelled:
             raise AnalysisCancelled()
+    # NVIDIA тоже прерывается ВНУТРИ вызова (потоковый режим), но токенов
+    # наружу не отдаёт, поэтому под условие выше не попадала: «Стоп» не
+    # действовал, если в цепочке не было Ollama. Признак accepts_should_stop
+    # есть и у самого провайдера, и у обёртки ротации ключей.
+    if getattr(backend, "accepts_should_stop", False) and cancel_check:
+        try:
+            return backend.complete(prompt, max_tokens, force_json,
+                                    should_stop=cancel_check)
+        except llm.GenerationCancelled:
+            raise AnalysisCancelled()
     return backend.complete(prompt, max_tokens=max_tokens, force_json=force_json)
 
 

@@ -1004,6 +1004,18 @@ class _FallbackChain:
         return str(getattr(self._backends[self._i], "model", "") or "")
 
     @property
+    def accepts_should_stop(self) -> bool:
+        """Умеет ли ХОТЬ ОДИН движок цепочки прерываться внутри вызова.
+
+        Без этого признака у самой цепочки «Стоп» не доходил до NVIDIA, если в
+        цепочке не было Ollama: вызывающий код смотрел только на supports_stream
+        (то есть на выдачу токенов наружу), а потоковый режим NVIDIA токенов не
+        отдаёт — прерывание у него есть, а признака не было.
+        """
+        return any(getattr(b, "accepts_should_stop", False)
+                   for b in self._backends)
+
+    @property
     def supports_stream(self) -> bool:
         return any(isinstance(b, OllamaProvider) for b in self._backends)
 
@@ -1026,6 +1038,7 @@ class _FallbackChain:
                  on_token=None, should_stop=None, json_schema: dict | None = None) -> str:
         errors = []
         n = len(self._backends)
+        tight: list = []          # движки, отложенные из-за тесного бюджета
         for k in range(n):
             i = (self._i + k) % n
             b = self._backends[i]
@@ -1040,6 +1053,12 @@ class _FallbackChain:
                 # TRUNCATED — broken JSON, lost detail. Prefer a provider that
                 # fits; fall back to the tight one only when it's all we have.
                 if max_tokens >= 8000 and mt < 4000 and k < n - 1:
+                    # Откладываем, но НЕ выбрасываем. Раньше здесь стоял
+                    # continue, и «тесный» движок терялся навсегда: если
+                    # остальные падали, вызов заканчивался «Ни один движок не
+                    # ответил», хотя рабочий движок был — просто с урезанным
+                    # ответом. Он лучше, чем ничего: попробуем его в конце.
+                    tight.append((i, b, mt))
                     errors.append(f"{getattr(b, 'name', '?')}: бюджет ответа "
                                   f"~{mt} ток. слишком мал для полного протокола")
                     continue
@@ -1069,6 +1088,22 @@ class _FallbackChain:
                 raise               # user cancellation is not a provider failure
             except Exception as e:  # noqa: BLE001
                 errors.append(f"{getattr(b, 'name', '?')}: {e}")
+        # Никто не ответил — пробуем отложенных. Урезанный протокол лучше, чем
+        # полное отсутствие протокола после часа распознавания.
+        for i, b, mt in tight:
+            try:
+                out = (b.complete(prompt, mt, force_json, should_stop=should_stop)
+                       if getattr(b, "accepts_should_stop", False)
+                       else b.complete(prompt, mt, force_json))
+                self._i = i
+                for msg in errors:
+                    if msg not in self.skipped and len(self.skipped) < 3:
+                        self.skipped.append(msg)
+                return out
+            except GenerationCancelled:
+                raise
+            except Exception as e:      # noqa: BLE001
+                errors.append(f"{getattr(b, 'name', '?')} (тесный бюджет): {e}")
         raise RuntimeError("Ни один движок ИИ не ответил. " + " | ".join(errors[:3]))
 
 
