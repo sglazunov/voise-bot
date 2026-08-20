@@ -71,7 +71,14 @@ def upload(file_path: str, name: str, settings: dict,
                     (settings.get("local_dir") or "").strip()
                     or (config.DATA_DIR / "recordings")) / "protocols")
         elif key == "gdrive":
-            bcfg["folder_id"] = folder
+            # Та же беда, что и с локальным диском: папка протоколов может быть
+            # записана в форме Яндекс.Диска («disk:/…») — так стоит В
+            # УМОЛЧАНИЯХ. Для Google это не идентификатор папки, запрос ушёл бы
+            # с мусорным parents и вернул 404. Идентификатор — непрозрачный
+            # токен без слэшей и двоеточий; всё остальное игнорируем, тогда
+            # протокол ляжет туда же, куда запись.
+            if "/" not in folder and ":" not in folder:
+                bcfg["folder_id"] = folder
         else:  # yandex_disk
             bcfg["folder"] = folder
     return mod.upload(file_path, name, bcfg)

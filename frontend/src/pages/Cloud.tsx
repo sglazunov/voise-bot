@@ -14,8 +14,12 @@ const DEST = [
 export default function CloudPage() {
   const { s, set, save , ready } = useSettings();
   const [ytoken, setYtoken] = useState("");
+  // Учётка Google: сервер отдаёт эти три поля как «есть/нет», а не значением,
+  // поэтому вводим их отдельным состоянием и шлём только заполненные.
+  const [gsec, setGsec] = useState({ client_id: "", client_secret: "", refresh_token: "" });
   const toast = useToast();
   const yd = s.yandex_disk || {};
+  const gd = s.gdrive || {};
   const cloud = s.cloud || "local";
 
   async function onSave() {
@@ -23,9 +27,14 @@ export default function CloudPage() {
       // Пустая строка = «очистить». null бэкенд трактует как «поле не меняли»,
       // из-за чего папку протоколов нельзя было стереть.
       const patch: any = { cloud, protocol_folder: s.protocol_folder ?? "",
-        yandex_disk: { folder: yd.folder ?? "" } };
+        yandex_disk: { folder: yd.folder ?? "" },
+        gdrive: { folder_id: gd.folder_id ?? "" } };
       if (ytoken.trim()) patch.yandex_disk.token = ytoken.trim();
-      await save(patch); setYtoken(""); toast("Облако сохранено");
+      for (const k of ["client_id", "client_secret", "refresh_token"] as const)
+        if (gsec[k].trim()) patch.gdrive[k] = gsec[k].trim();
+      await save(patch);
+      setYtoken(""); setGsec({ client_id: "", client_secret: "", refresh_token: "" });
+      toast("Облако сохранено");
     } catch (e: any) { toast(e.message, true); }
   }
   async function test() {
@@ -74,7 +83,45 @@ export default function CloudPage() {
           </div>
         </Card>
       )}
-      {cloud !== "yandex_disk" && (
+      {cloud === "gdrive" && (
+        <Card>
+          <div className="font-bold text-[15px]">Учётная запись Google</div>
+          <div className="text-[12px] mb-3" style={{ color: "var(--muted)" }}>
+            OAuth-клиент из Google Cloud Console (тип «Desktop app») и refresh token,
+            полученный для scope <span className="font-mono">drive.file</span>.
+            Заполненные поля хранятся на сервере в зашифрованном виде и обратно не отдаются.
+          </div>
+          <div className="grid md:grid-cols-2 gap-3">
+            <div><label className="lbl">client_id</label>
+              <input className="field" value={gsec.client_id}
+                onChange={(e) => setGsec({ ...gsec, client_id: e.target.value })}
+                placeholder={gd.client_id ? "•••••••• сохранён" : "…apps.googleusercontent.com"} /></div>
+            <div><label className="lbl">client_secret</label>
+              <input className="field" type="password" value={gsec.client_secret}
+                onChange={(e) => setGsec({ ...gsec, client_secret: e.target.value })}
+                placeholder={gd.client_secret ? "•••••••• сохранён" : "вставьте секрет"} /></div>
+            <div><label className="lbl">refresh_token</label>
+              <input className="field" type="password" value={gsec.refresh_token}
+                onChange={(e) => setGsec({ ...gsec, refresh_token: e.target.value })}
+                placeholder={gd.refresh_token ? "•••••••• сохранён" : "1//0…"} /></div>
+            <div><label className="lbl">ID папки для записи</label>
+              <input className="field" value={gd.folder_id || ""}
+                onChange={(e) => set("gdrive", { ...gd, folder_id: e.target.value })}
+                placeholder="пусто = корень My Drive" /></div>
+          </div>
+          <div className="mt-3">
+            <label className="lbl">Папка для протокола</label>
+            <input className="field" value={s.protocol_folder || ""}
+              onChange={(e) => set("protocol_folder", e.target.value)}
+              placeholder="ID папки; пусто = туда же, куда запись" />
+          </div>
+          <div className="flex gap-2.5 mt-3">
+            <button className="btn btn-primary" onClick={onSave} disabled={!ready}>Сохранить</button>
+            <button className="btn btn-ghost" onClick={test}><UploadCloud size={15} /> Тест загрузки</button>
+          </div>
+        </Card>
+      )}
+      {cloud !== "yandex_disk" && cloud !== "gdrive" && (
         <Card><div className="flex gap-2.5"><button className="btn btn-primary" onClick={onSave} disabled={!ready}>Сохранить</button></div></Card>
       )}
     </Page>
