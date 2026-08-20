@@ -14,7 +14,7 @@ from __future__ import annotations
 import time
 
 from app import config
-from app.jobs import (STATUS_ANALYZING, STATUS_QUEUED, STATUS_RUNNING, Job,
+from app.jobs import (STATUS_ANALYZING, STATUS_QUEUED, STATUS_RUNNING, STATUS_DONE, Job,
                       store)
 
 
@@ -53,11 +53,16 @@ class TestRetentionVsActiveJobs:
     def test_purged_job_is_not_resurrected_in_the_database(self, monkeypatch):
         """Второй виток той же гонки, но уже на Postgres.
 
-        `_save(job)` теперь пишет ОДНУ задачу (`db.job_upsert`). Воркер держит
-        свою ссылку на `Job` и после очистки продолжает работать: его следующий
-        `_set(...)` заново ВСТАВЛЯЕТ строку задачи, которой в памяти уже нет, а
-        файлы которой стёрты. После перезапуска `jobs_load()` поднимет её в
-        список: карточка «Готово», а скачивание любого формата — 404.
+        `_save(job)` пишет ОДНУ задачу (`db.job_upsert`). Ссылку на `Job`
+        держат не только воркер, но и поток доставки протокола и «Пересобрать»:
+        любой из них своим следующим `_set(...)` заново ВСТАВЛЯЕТ строку задачи,
+        которой в памяти уже нет, а файлы которой стёрты. После перезапуска
+        `jobs_load()` поднимет её в список: карточка «Готово», а скачивание
+        любого формата — 404.
+
+        Сценарий взят на ЗАВЕРШЁННОЙ задаче: незавершённые ретеншн больше не
+        трогает (см. тесты выше), но завершённую он удаляет штатно — а поток
+        доставки в этот момент вполне может быть ещё жив.
         """
         from app import db
 
@@ -70,7 +75,8 @@ class TestRetentionVsActiveJobs:
         monkeypatch.setattr(db, "search_save", lambda *a, **k: None)
         monkeypatch.setattr(db, "stats_add", lambda r: None)
 
-        job = _make_job(STATUS_RUNNING, age_hours=25)
+        job = _make_job(STATUS_DONE, age_hours=25)
+        job.finished_at = time.time() - 25 * 3600
         job.id = "advzombie1"
         store._jobs = {job.id: job}
         store._save(job)
@@ -79,8 +85,8 @@ class TestRetentionVsActiveJobs:
         store._purge_old()
         assert job.id not in rows and job.id not in store._jobs   # чистка отработала
 
-        # …а воркер всё ещё жив и «дописывает» свою задачу.
-        store._set(job, status="done", finished_at=time.time())
+        # …а поток доставки всё ещё жив и «дописывает» свою задачу.
+        store._set(job, delivery_error="")
 
         assert job.id not in rows, (
             "удалённая ретеншном задача воскресла в базе без единого файла — "

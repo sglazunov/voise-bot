@@ -201,6 +201,15 @@ class JobStore:
         ещё и затирало параллельные изменения соседних задач."""
         if db.enabled():
             if job is not None:
+                # Задачи, которой больше нет в памяти, в базе быть не должно.
+                # Иначе поток, держащий свою ссылку на Job (воркер, ожидатель
+                # протокола, «Пересобрать»), своим следующим _set ВСТАВИТ строку
+                # обратно — уже после того, как ретеншн удалил и её, и все её
+                # файлы. После перезапуска такая задача поднимается из базы как
+                # «Готово», а скачивание любого формата отдаёт 404.
+                if job.id not in self._jobs:
+                    log.info("Задача %s уже удалена — состояние не сохраняю", job.id)
+                    return
                 db.job_upsert(asdict(job))
             else:
                 db.jobs_save([asdict(j) for j in self._jobs.values()])
@@ -733,12 +742,24 @@ class JobStore:
         return job.delivery_error or "delivered"
 
     # ---- retention / cleanup -----------------------------------------------
+    # Незавершённые задачи ретеншн НЕ трогает. Отбор шёл по возрасту
+    # (finished_at или created_at) и не смотрел на статус, а воркер
+    # распознавания один на всех: очередь из нескольких многочасовых встреч
+    # спокойно уезжает за сутки (окно по умолчанию), и особенно после простоя
+    # сервиса. Задача, до которой ещё не дошли руки, удалялась вместе с mp4
+    # записью встречи — а если выгрузка в облако не прошла, записи не
+    # оставалось нигде. Ждать нужно, пока задача не закончится: у done/error/
+    # cancelled есть finished_at, от него срок и считается.
+    _UNFINISHED = (STATUS_QUEUED, STATUS_RUNNING, STATUS_PAUSED, STATUS_ANALYZING)
+
     def _purge_old(self) -> None:
         """Delete jobs (and their files) older than the retention window."""
         max_age = config.RESULT_RETENTION_HOURS * 3600
         now = time.time()
         removed = False
         for job in list(self._jobs.values()):
+            if job.status in self._UNFINISHED:
+                continue
             ref = job.finished_at or job.created_at or now
             if now - ref > max_age:
                 self._delete_job_files(job)

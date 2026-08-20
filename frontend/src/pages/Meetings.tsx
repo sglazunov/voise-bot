@@ -11,6 +11,9 @@ const FILTERS = [
 ];
 const WORK = ["recording", "uploading", "transcribing", "analyzing"];
 // States where the bot isn't running but the user can still launch it manually.
+// Состояния, из которых бота ещё можно запустить руками. Для "error" это
+// верно ТОЛЬКО пока записи нет: если запись уже лежит на диске, повторный заход
+// открыл бы тот же файл на запись (имя детерминировано) и затёр её.
 const JOINABLE = ["missed", "skipped", "no_time", "error"];
 
 export default function Meetings() {
@@ -190,11 +193,19 @@ export default function Meetings() {
                   <button className="btn btn-ghost" onClick={() => runNow(m)}>Сейчас</button>
                   <span>Пишем</span><Switch size="sm" on={willRecord} onChange={() => setDecision(m, !willRecord)} />
                 </div>
-              ) : JOINABLE.includes(m.state) ? (
+              ) : JOINABLE.includes(m.state) && !m.has_recording ? (
                 <div className="w-full lg:w-auto flex justify-end">
                   <button className="btn btn-primary" onClick={() => runNow(m)}
                     title="Запустить бота на эту встречу вручную">
                     <Video size={14} /> Подключиться</button>
+                </div>
+              ) : m.state === "error" && m.has_recording ? (
+                // Красная карточка при ЦЕЛОЙ записи означает, что упало
+                // распознавание или сборка протокола. Предлагать здесь
+                // «Подключиться» — значит звать перезаписать готовую встречу.
+                <div className="w-full lg:w-auto flex justify-end text-[11.5px]"
+                  style={{ color: "var(--muted)" }}>
+                  Запись цела — нажмите «Пересобрать» на странице распознавания.
                 </div>
               ) : null}
             </div>

@@ -20,7 +20,11 @@ from pathlib import Path
 from ... import logs
 from . import browser, capture
 
-log = logs.get("vtx.recorder")
+# Модульный логгер назван _LOG, а не log, ОСОЗНАННО: в этом модуле `log` —
+# локальная функция журнала карточки встречи, и она перекрывала логгер.
+# Обработчик ошибки, звавший log.warning, падал с AttributeError изнутри
+# except — и уносил управление мимо спасательного кода.
+_LOG = logs.get("vtx.recorder")
 
 # --------------------------------------------------------------------------- #
 # Parallel recording slots.
@@ -255,7 +259,7 @@ def record_meeting(url: str, out_path: str, cfg: dict,
             if rec:
                 rec.stop()
         except Exception:
-            log.warning("ffmpeg не остановился штатно после сбоя", exc_info=True)
+            _LOG.warning("ffmpeg не остановился штатно после сбоя", exc_info=True)
         # Сбой ПОСРЕДИ встречи (сеть, база, вёрстка) не должен стоить записи.
         # Раньше здесь всегда возвращалось ok:False, карточка уходила в «error»,
         # а уже записанный файл никто не выгружал и не распознавал: состояние
@@ -271,7 +275,7 @@ def record_meeting(url: str, out_path: str, cfg: dict,
                         "audio_warning": audio_state["had_silence"],
                         "warning": f"Запись прервана ошибкой: {e}"}
         except Exception:      # noqa: BLE001 — спасение файла не обязано работать
-            log.warning("Не удалось спасти уже записанный файл %s", out_path,
+            _LOG.warning("Не удалось спасти уже записанный файл %s", out_path,
                         exc_info=True)
         # Отсутствие виртуального экрана Playwright сообщает стектрейсом на
         # английском, и в карточке встречи вместо причины оказывалась простыня

@@ -30,6 +30,7 @@ from datetime import datetime, timezone
 import pytest
 
 from app import security
+from app.automation import scheduler as sched_mod
 from app.automation.scheduler import MeetingState, scheduler
 
 
@@ -65,17 +66,25 @@ def test_run_now_refuses_a_meeting_that_already_has_a_recording(recorded_but_fai
         f"«{out.name}» будет перезаписан ffmpeg-ом ({res})")
 
 
-def test_second_run_targets_a_different_file(recorded_but_failed):
-    """Даже если считать повторный запуск допустимым, писать он обязан в НОВЫЙ
-    файл: старая запись — единственный исходник для «Повторить»."""
-    st, out = recorded_but_failed
+def test_recording_path_never_reuses_an_existing_file(recorded_but_failed):
+    """Вторая линия защиты: даже если запись всё же началась, писать она обязана
+    в НОВЫЙ файл.
 
-    scheduler.run_now("alice", TASK)
-    for _ in range(50):                    # ждём, пока поток запишет путь
-        if st.out_path != str(out):
-            break
-        time.sleep(0.02)
+    Отказ `run_now` закрывает путь через кнопку, но имя записи складывается из
+    даты, времени и названия задачи — оно строго определено. Значит, совпасть
+    может и по другим причинам: две встречи с одинаковым названием и временем,
+    восстановление после перезапуска. Старая запись — единственный исходник и
+    для выгрузки, и для «Повторить», поэтому переписывать её нельзя никогда.
+    """
+    _st, out = recorded_but_failed
 
-    assert st.out_path != str(out), (
-        f"повторная запись нацелена в тот же файл «{out.name}» — ffmpeg "
-        "откроет его на запись и затрёт готовую запись встречи")
+    free = sched_mod._free_path(out)
+    assert free != out, (
+        f"для занятого пути «{out.name}» выдан он же — ffmpeg открыл бы его на "
+        "запись и затёр готовую запись встречи")
+    assert not free.exists() and free.parent == out.parent
+    assert free.suffix == out.suffix, "расширение обязано сохраниться"
+
+    # …и свободный путь остаётся собой: лишних суффиксов не появляется.
+    fresh = out.parent / "нет такого файла.mp4"
+    assert sched_mod._free_path(fresh) == fresh

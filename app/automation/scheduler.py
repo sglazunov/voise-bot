@@ -25,7 +25,11 @@ from .. import config, db, logs, security
 from . import (clouds, delivery, recorder, settings as auto_settings,
                snapshots, weeek)
 
-log = logs.get("vtx.scheduler")
+# Модульный логгер назван _LOG, а не log, ОСОЗНАННО: в этом модуле `log` —
+# локальная функция журнала карточки встречи, и она перекрывала логгер.
+# Обработчик ошибки, звавший log.warning, падал с AttributeError изнутри
+# except — и уносил управление мимо спасательного кода.
+_LOG = logs.get("vtx.scheduler")
 
 # How late after start we'll still auto-join (avoids joining long-finished
 # meetings on the first poll after startup).
@@ -60,6 +64,15 @@ class MeetingState:
     live_updated_at: float = 0.0
     live_notes: str = ""
 
+    def recording_exists(self) -> bool:
+        """Лежит ли на диске непустая запись этой встречи."""
+        if not self.out_path:
+            return False
+        try:
+            return Path(self.out_path).stat().st_size > 0
+        except OSError:
+            return False
+
     def public(self) -> dict:
         return {"task_id": self.task_id, "title": self.title, "url": self.url,
                 "start": self.start.isoformat() if self.start else None,
@@ -68,11 +81,34 @@ class MeetingState:
                 "upload_error": self.upload_error,
                 "has_live": bool(self.live_text), "has_notes": bool(self.live_notes),
                 "do_protocol": self.do_protocol, "record_flag": self.record_flag,
+                # Есть ли уже записанный файл. Нужно интерфейсу: у красной
+                # карточки он предлагал «Подключиться», и повторный заход
+                # затирал готовую запись — имя файла детерминировано.
+                "has_recording": self.recording_exists(),
                 # Лог рекордера копился в памяти, но наружу отдавалась только
                 # ПОСЛЕДНЯЯ строка (как detail). Из-за этого любую проблему бота
                 # — не сработавшее стоп-слово, не найденную кнопку чата, запись
                 # пустой комнаты — приходилось разбирать вслепую. Отдаём хвост.
                 "logs": list(self.logs)[-80:]}
+
+
+def _free_path(path: Path) -> Path:
+    """Путь, по которому ещё нет файла: «имя.mp4» → «имя (2).mp4» и так далее.
+
+    Имя записи складывается из даты, времени и названия задачи, то есть строго
+    определено. Значит, повторный заход на ту же встречу открыл бы ffmpeg-ом ТОТ
+    ЖЕ файл и затёр готовую запись. Так же совпадают имена у двух встреч с
+    одинаковым названием и временем. Файл записи — единственный исходник и для
+    выгрузки, и для «Повторить», поэтому переписывать его нельзя никогда.
+    """
+    if not path.exists():
+        return path
+    stem, suffix, parent = path.stem, path.suffix, path.parent
+    for n in range(2, 100):
+        cand = parent / f"{stem} ({n}){suffix}"
+        if not cand.exists():
+            return cand
+    return parent / f"{stem} ({int(time.time())}){suffix}"
 
 
 _ROOM_RE = re.compile(r"/j/([a-z0-9_-]+)", re.I)
@@ -196,10 +232,10 @@ class Scheduler:
                         self._maybe_trigger(user, cfg)
                         self._last_error.pop(user, None)
                     except Exception as e:  # сбой одной команды не валит другие
-                        log.warning("Опрос команды %s сорвался", user, exc_info=True)
+                        _LOG.warning("Опрос команды %s сорвался", user, exc_info=True)
                         self._last_error[user] = f"{type(e).__name__}: {e}"[:300]
             except Exception:  # never let the loop die
-                log.error("Сбой в цикле планировщика", exc_info=True)
+                _LOG.error("Сбой в цикле планировщика", exc_info=True)
             self._stop.wait(_TICK_SEC)
 
     def _tz(self, cfg: dict):
@@ -452,7 +488,7 @@ class Scheduler:
             fname = f"{stamp}. - {title}.mp4" if title else f"{stamp}.mp4"
             rec_dir = security.user_dir(user) / "recordings"  # private per-user
             rec_dir.mkdir(parents=True, exist_ok=True)
-            out = str(rec_dir / fname)
+            out = str(_free_path(rec_dir / fname))
             # Persist the file path BEFORE recording starts: if the process dies
             # mid-meeting, the restart scan (_resume_pending) finds the fMP4 by
             # this path and queues it for processing instead of losing it.
@@ -671,7 +707,7 @@ class Scheduler:
                 try:
                     weeek.add_comment(token, task_id, msg)
                 except Exception:
-                    log.warning("Комментарий в задачу %s не ушёл: %s",
+                    _LOG.warning("Комментарий в задачу %s не ушёл: %s",
                                 task_id, msg, exc_info=True)
 
         # Ждём, пока задача ЖИВА. Двухчасовой срок объявлял провал даже тогда,
@@ -871,7 +907,7 @@ class Scheduler:
                     try:
                         store.retry(jid)
                     except Exception:  # noqa: BLE001
-                        log.warning("Не удалось перезапустить задачу %s после "
+                        _LOG.warning("Не удалось перезапустить задачу %s после "
                                     "рестарта", jid, exc_info=True)
                 st = MeetingState(
                     key=key, task_id=task_id, title=Path(job.filename).stem,
@@ -889,7 +925,7 @@ class Scheduler:
                 try:
                     store.redeliver(jid, weeek_task=task_id, cloud=True)
                 except Exception:  # noqa: BLE001
-                    log.warning("Повторная доставка задачи %s не удалась", jid,
+                    _LOG.warning("Повторная доставка задачи %s не удалась", jid,
                                 exc_info=True)
                 threading.Thread(
                     target=self._await_and_upload_protocol,
@@ -1134,6 +1170,16 @@ class Scheduler:
                        if s.owner == user and str(s.task_id) == str(task_id)), None)
         if not st:
             return {"ok": False, "error": "Встреча не найдена (сначала опрос Weeek)."}
+        # Имя файла записи детерминировано (дата, время и название задачи),
+        # поэтому повторный заход открыл бы ffmpeg-ом ТОТ ЖЕ файл и затёр
+        # готовую запись. У красной карточки интерфейс предлагал «Подключиться»
+        # даже тогда, когда упало распознавание или сборка протокола, а запись
+        # была цела — один клик уничтожал единственную локальную копию.
+        if st.recording_exists():
+            return {"ok": False, "error":
+                    "У этой встречи уже есть запись — повторный заход затёр бы "
+                    "её. Нужен протокол — нажмите «Пересобрать». Нужна новая "
+                    "запись — сначала удалите старую с сервера."}
         # Слот берём ДО проверки, чтобы проверка-и-захват состояния прошли под
         # одним локом. Раньше проверка «уже записывается» и присвоение
         # state="recording" стояли в РАЗНЫХ блоках лока: между ними успевал

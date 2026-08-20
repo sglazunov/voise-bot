@@ -16,7 +16,11 @@ from pathlib import Path
 from .. import logs
 from . import clouds, weeek
 
-log = logs.get("vtx.delivery")
+# Модульный логгер назван _LOG, а не log, ОСОЗНАННО: в этом модуле `log` —
+# локальная функция журнала карточки встречи, и она перекрывала логгер.
+# Обработчик ошибки, звавший log.warning, падал с AttributeError изнутри
+# except — и уносил управление мимо спасательного кода.
+_LOG = logs.get("vtx.delivery")
 
 
 def wipe_stale_links(task_id, cfg: dict, log) -> None:
@@ -33,7 +37,7 @@ def wipe_stale_links(task_id, cfg: dict, log) -> None:
             if res.get("ok"):
                 log(f"Поле «{fld}»: очищено от прошлой встречи.")
         except Exception:  # cosmetic step — never blocks the recording
-            log.info("Не удалось очистить поле «%s» задачи %s",
+            _LOG.info("Не удалось очистить поле «%s» задачи %s",
                      fld, task_id, exc_info=True)
 
 

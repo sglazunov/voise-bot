@@ -2,6 +2,7 @@ export type Meeting = {
   task_id: string | number; title: string; url?: string; start: string | null;
   state: string; detail?: string; job_id?: string | null; cloud_url?: string | null;
   do_protocol?: boolean; record_flag?: boolean | null;
+  has_recording?: boolean; // лежит ли на диске готовая запись этой встречи
   logs?: string[];        // хвост лога рекордера — что бот видел на встрече
 };
 export type Status = {
