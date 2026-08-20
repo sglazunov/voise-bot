@@ -184,8 +184,13 @@ CREATE TABLE IF NOT EXISTS user_creds (
     idx         INTEGER,
     enc_key     TEXT,
     enc_extra   TEXT,
+    added_at    DOUBLE PRECISION,
     PRIMARY KEY (username, provider, idx)
 );
+-- Когда ключ добавили. Нужно для срока жизни: бесплатный ключ NVIDIA живёт
+-- полгода, и по истечении протоколы начинают молча собираться запасным
+-- движком. Установки, созданные до появления колонки, добирают её здесь.
+ALTER TABLE user_creds ADD COLUMN IF NOT EXISTS added_at DOUBLE PRECISION;
 CREATE TABLE IF NOT EXISTS meetings (
     username     TEXT,
     meeting_key  TEXT,
@@ -405,12 +410,14 @@ def settings_save(user: str, data: dict) -> None:
 # --------------------------------------------------------------------------- #
 def creds_load(user: str) -> dict:
     with _conn() as conn, _cur(conn) as cur:
-        cur.execute("SELECT provider, idx, enc_key, enc_extra FROM user_creds "
-                    "WHERE username=%s ORDER BY provider, idx", (user,))
+        cur.execute("SELECT provider, idx, enc_key, enc_extra, added_at "
+                    "FROM user_creds WHERE username=%s ORDER BY provider, idx",
+                    (user,))
         out: dict[str, list] = {}
         for r in cur.fetchall():
             out.setdefault(r["provider"], []).append(
-                {"key": r.get("enc_key") or "", "extra": r.get("enc_extra") or ""})
+                {"key": r.get("enc_key") or "", "extra": r.get("enc_extra") or "",
+                 "at": float(r.get("added_at") or 0)})
         return out
 
 
@@ -420,9 +427,10 @@ def creds_save(user: str, raw: dict) -> None:
         for provider, entries in raw.items():
             for i, e in enumerate(entries or []):
                 cur.execute(
-                    "INSERT INTO user_creds (username, provider, idx, enc_key, enc_extra) "
-                    "VALUES (%s,%s,%s,%s,%s)",
-                    (user, provider, i, e.get("key") or "", e.get("extra") or ""))
+                    "INSERT INTO user_creds (username, provider, idx, enc_key, "
+                    "enc_extra, added_at) VALUES (%s,%s,%s,%s,%s,%s)",
+                    (user, provider, i, e.get("key") or "", e.get("extra") or "",
+                     float(e.get("at") or 0) or None))
 
 
 # --------------------------------------------------------------------------- #

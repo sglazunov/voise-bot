@@ -1218,7 +1218,12 @@ def verify_protocol(result: dict, transcript_text: str, user_notes: str = "",
     sources: list[tuple[str, str]] = []
     if (user_notes or "").strip():
         sources.append(("notes", user_notes.strip()[:budget_chars]))
-    text = (transcript_text or "").strip()
+    # ТОЛЬКО речь. В тексте, который уходит в анализ, к расшифровке дописаны
+    # блоки «УЧАСТНИКИ ЗВОНКА», «ПОСТОЯННЫЙ КОНТЕКСТ» и «ТЕКСТ С ЭКРАНА».
+    # Если искать цитаты и в них, задача, выдуманная по контексту проекта,
+    # получала «дословное подтверждение» из этого же контекста и помечалась
+    # проверенной — то есть проверка подтверждала сама себя.
+    text = _INJECTED_BLOCK_RE.sub(" ", transcript_text or "").strip()
     for i in range(0, len(text), budget_chars):
         sources.append(("transcript", text[i:i + budget_chars]))
 
@@ -1262,6 +1267,18 @@ def verify_protocol(result: dict, transcript_text: str, user_notes: str = "",
 
     # Acceptance rule: no owner without verbatim grounds. Unverified point →
     # flagged; verified point whose quote doesn't support the owner → owner «—».
+    #
+    # НО: если проверка сорвалась (движок недоступен, отмена, лимит), она ничего
+    # не сказала о пунктах — снимать ответственных нельзя. Раньше сбой на первом
+    # же фрагменте оставлял все пункты ok=False, и протокол выходил вообще без
+    # ответственных, хотя они были определены корректно.
+    if not ver.get("error"):
+        _strip_unfounded_owners(result, ver)
+    result["verification"] = ver
+    return result
+
+
+def _strip_unfounded_owners(result: dict, ver: dict) -> None:
     for key in ("tasks", "minor_tasks", "done_tasks"):
         for idx, item in enumerate(result.get(key) or []):
             if not isinstance(item, dict) or not item.get("owner"):
@@ -1269,8 +1286,6 @@ def verify_protocol(result: dict, transcript_text: str, user_notes: str = "",
             v = ver[key][idx]
             if not (v["ok"] and v["owner_ok"]):
                 item["owner"] = ""
-    result["verification"] = ver
-    return result
 
 
 # --------------------------------------------------------------------------- #
