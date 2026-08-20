@@ -117,6 +117,15 @@ def _sample_frames(path: str, every_sec: float, max_frames: int):
     elif container.duration:
         duration = float(container.duration) / 1_000_000.0
 
+    # Шаг растягиваем на ВСЮ длительность. Раньше он был фиксированным, и
+    # покрытие упиралось в «шаг × максимум кадров»: участники читались только с
+    # первых 8 минут, спикеры — с первых 75, текст с экрана — с первых 30. На
+    # боевых четырёхчасовых записях вторая половина встречи оставалась без имён
+    # и без содержимого экрана. Чаще заданного шага не берём — только реже.
+    step = every_sec
+    if duration and max_frames > 0:
+        step = max(every_sec, duration / max_frames)
+
     t = 0.0
     count = 0
     while count < max_frames:
@@ -130,7 +139,7 @@ def _sample_frames(path: str, every_sec: float, max_frames: int):
         except (StopIteration, Exception):
             break
         count += 1
-        t += every_sec
+        t += step
         if not duration:
             break
     container.close()

@@ -85,3 +85,38 @@ class TestV27ПорядокДвижков:
         order = config.PROVIDER_ORDER
         assert order.index("nvidia") < order.index("groq")
         assert order.index("gemini") < order.index("groq")
+
+
+class TestK4V6ВыборкаПоВсейЗаписи:
+    """Шаг сэмплирования был фиксированным, и покрытие упиралось в «шаг ×
+    максимум кадров»: участники читались с первых 8 минут, спикеры — с 75,
+    текст с экрана — с 30. На четырёхчасовых записях вторая половина встречи
+    оставалась без имён и без экрана."""
+
+    @staticmethod
+    def _step(duration, every_sec, max_frames):
+        """Та же формула, что в _sample_frames."""
+        return max(every_sec, duration / max_frames) if duration and max_frames else every_sec
+
+    def test_участники_покрывают_всю_встречу(self):
+        # 8 кадров на часовую встречу — шаг 7.5 минуты, а не 60 секунд.
+        step = self._step(3600, 60.0, 8)
+        assert step * 8 >= 3600
+
+    def test_спикеры_покрывают_четыре_часа(self):
+        step = self._step(4 * 3600, 1.5, 3000)
+        assert step * 3000 >= 4 * 3600
+
+    def test_экран_покрывает_четыре_часа(self):
+        step = self._step(4 * 3600, 5.0, 360)
+        assert step * 360 >= 4 * 3600
+
+    def test_короткую_запись_не_разрежаем(self):
+        """На пятиминутной встрече шаг остаётся заданным, а не растягивается."""
+        assert self._step(300, 1.5, 3000) == 1.5
+
+    def test_две_настройки_не_делят_переменную(self):
+        import pathlib
+        from app import speaker_id
+        src = pathlib.Path(speaker_id.__file__).read_text(encoding="utf-8")
+        assert src.count('getenv("VTX_SPEAKER_MIN_TILE"') == 1

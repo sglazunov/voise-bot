@@ -54,7 +54,10 @@ _NAME_BAND = float(os.getenv("VTX_SPEAKER_NAME_BAND", "0.26"))     # bottom frac
 _TOP_STRIP = float(os.getenv("VTX_SPEAKER_TOP_STRIP", "0.30"))
 # Минимальная доля кадра для плитки ВНЕ верхней полосы (режим сетки, когда
 # никто не делится экраном). Строка меню столько не занимает.
-_MIN_TILE_AREA = float(os.getenv("VTX_SPEAKER_MIN_TILE", "0.02"))
+# Своя переменная: раньше здесь стояла VTX_SPEAKER_MIN_TILE — та же, что у
+# _MIN_TILE выше, хотя величины разные (минимальная сторона против площади).
+# Калибровка одной молча ломала другую.
+_MIN_TILE_AREA = float(os.getenv("VTX_SPEAKER_MIN_TILE_AREA", "0.02"))
 # Доля кадров, в которых подпись должна встретиться, чтобы считаться участником.
 _MIN_SEEN_SHARE = float(os.getenv("VTX_PARTICIPANT_MIN_SHARE", "0.34"))
 
@@ -101,6 +104,15 @@ def _sample_frames(path: str, every_sec: float, max_frames: int):
     elif container.duration:
         duration = float(container.duration) / 1_000_000.0
 
+    # Шаг растягиваем на ВСЮ длительность. Раньше он был фиксированным, и
+    # покрытие упиралось в «шаг × максимум кадров»: участники читались только с
+    # первых 8 минут, спикеры — с первых 75, текст с экрана — с первых 30. На
+    # боевых четырёхчасовых записях вторая половина встречи оставалась без имён
+    # и без содержимого экрана. Чаще заданного шага не берём — только реже.
+    step = every_sec
+    if duration and max_frames > 0:
+        step = max(every_sec, duration / max_frames)
+
     t = 0.0
     count = 0
     while count < max_frames:
@@ -117,7 +129,7 @@ def _sample_frames(path: str, every_sec: float, max_frames: int):
         except Exception:
             break
         count += 1
-        t += every_sec
+        t += step
         if not duration:
             break
     container.close()
@@ -338,9 +350,11 @@ def scan_participants(video_path: str, every_sec: float = 60.0,
     """Read the name labels of EVERY tile in the call grid — the people actually
     connected to the call, exactly as Telemost prints them under the tiles.
 
-    A few frames spread across the meeting are OCR'd whole (labels persist from
-    frame to frame; OCR noise doesn't — so a name must show up in at least
-    `min_seen` frames). The recording bot's own tile is dropped. The result is
+    Кадры распределяются по ВСЕЙ длительности записи (шаг растягивается), и
+    каждый OCR-ится целиком: подписи держатся из кадра в кадр, шум OCR — нет,
+    поэтому имя обязано встретиться минимум в `min_seen` кадрах. Раньше шаг был
+    фиксированным (60 с × 8 кадров), и список участников собирался только по
+    первым восьми минутам — подключившийся позже не попадал в протокол никогда. The recording bot's own tile is dropped. The result is
     the AUTHORITATIVE participants list for the protocol: no guessing from
     speech."""
     import pytesseract
