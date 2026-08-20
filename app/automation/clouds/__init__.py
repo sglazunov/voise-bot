@@ -7,6 +7,10 @@ local disk, Yandex Disk, Google Drive. Credentials come from app.automation
 """
 from __future__ import annotations
 
+from pathlib import Path
+
+from ... import config
+
 from . import gdrive, local, yandex_disk
 from ._http import CloudError
 
@@ -54,7 +58,18 @@ def upload(file_path: str, name: str, settings: dict,
     bcfg = _backend_cfg(settings, key)
     if folder:
         if key == "local":
-            bcfg["local_dir"] = folder
+            # Папка протоколов задана в форме Яндекс.Диска («disk:/…») — для
+            # локального бэкенда это не путь: каталог получался относительным,
+            # а as_uri() на относительном пути падает ValueError. В умолчаниях
+            # стоит именно такое значение, поэтому доставка протокола ломалась
+            # в конфигурации ПО УМОЛЧАНИЮ. Чужую форму игнорируем и кладём
+            # протоколы в подпапку рядом с записями.
+            if Path(folder).is_absolute():
+                bcfg["local_dir"] = folder
+            else:
+                bcfg["local_dir"] = str(Path(
+                    (settings.get("local_dir") or "").strip()
+                    or (config.DATA_DIR / "recordings")) / "protocols")
         elif key == "gdrive":
             bcfg["folder_id"] = folder
         else:  # yandex_disk

@@ -7,7 +7,7 @@ Public surface:
 The bot join (browser.py) and the capture (capture.py) are kept separate so the
 capture backend (x11grab + PulseAudio) sits behind one interface, and so
 each can be tuned independently. Live recording requires Playwright + Chromium +
-ffmpeg + a loopback audio device on the host — see docs/automation-plan.md.
+ffmpeg + a loopback audio device on the host (Xvfb + PulseAudio, docker/run.sh).
 """
 from __future__ import annotations
 
@@ -119,6 +119,10 @@ def record_meeting(url: str, out_path: str, cfg: dict,
     bot = browser.TelemostBot(cfg, on_log=log, display=slot.display, sink=slot.sink)
     rec = None
     wd_stop = threading.Event()   # stops the audio watchdog on any exit path
+    # Объявляем ДО try: обработчик ошибок читает had_silence, а сбой возможен
+    # ещё на входе в звонок — тогда здесь был бы NameError вместо диагностики.
+    audio_state = {"silent_since": None, "warned": False, "had_silence": False,
+                   "had_speech": False, "ended_by_silence": False}
     try:
         if not bot.join(url, should_stop=should_stop):
             shot = str(Path(out_path).with_suffix(".join-failed.png"))
@@ -158,8 +162,6 @@ def record_meeting(url: str, out_path: str, cfg: dict,
         # records mute video for an hour — discovered only after the meeting.
         # Sample the slot's monitor every 30 s (Pulse monitors allow a second
         # reader); after 2 min of continuous silence, shout into the card log.
-        audio_state = {"silent_since": None, "warned": False, "had_silence": False,
-                       "had_speech": False, "ended_by_silence": False}
         # Д15: выход по тишине — независимо от вёрстки Телемоста. Признаки
         # «все вышли» читаются из DOM (счётчик участников, экран «пригласите»,
         # «встреча завершена»), и когда Телемост не отдал НИ ОДНОГО из них, бот
@@ -252,6 +254,22 @@ def record_meeting(url: str, out_path: str, cfg: dict,
             if rec:
                 rec.stop()
         except Exception:
+            pass
+        # Сбой ПОСРЕДИ встречи (сеть, база, вёрстка) не должен стоить записи.
+        # Раньше здесь всегда возвращалось ok:False, карточка уходила в «error»,
+        # а уже записанный файл никто не выгружал и не распознавал: состояние
+        # «error» не входит в pending, и восстановление после перезапуска его не
+        # подбирает. Час встречи пропадал из-за секундной ошибки.
+        try:
+            done = Path(out_path)
+            if done.exists() and done.stat().st_size > 0:
+                log(f"⚠ Сбой во время записи ({e}), но файл записан — "
+                    "продолжаем обработку.")
+                return {"ok": True, "path": out_path, "reason": "error",
+                        "size": done.stat().st_size,
+                        "audio_warning": audio_state["had_silence"],
+                        "warning": f"Запись прервана ошибкой: {e}"}
+        except Exception:      # noqa: BLE001 — спасение файла не обязано работать
             pass
         # Отсутствие виртуального экрана Playwright сообщает стектрейсом на
         # английском, и в карточке встречи вместо причины оказывалась простыня

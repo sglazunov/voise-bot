@@ -96,7 +96,7 @@ ENV VTX_DATA_DIR=/data \
     DISPLAY=:99 \
     XDG_RUNTIME_DIR=/tmp/xdg \
     PULSE_RUNTIME_PATH=/tmp/pulse \
-    OLLAMA_URL=http://ollama:11434 \
+    OLLAMA_URL=http://host.docker.internal:11434 \
     TZ=Europe/Moscow
 
 VOLUME ["/data"]

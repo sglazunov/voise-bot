@@ -398,9 +398,14 @@ class Scheduler:
             def log(msg: str) -> None:
                 msg = str(msg)
                 st.logs.append(msg)
-                # Surface live progress on the card instead of a frozen
-                # "joining…" line (skip the very verbose ffmpeg command dump).
-                if not msg.startswith("ffmpeg:"):
+                # Показываем ход записи вместо застывшего «захожу…», но НЕ
+                # переводим состояние. Раньше здесь стояло _set(st,"recording"),
+                # и запоздавшее сообщение из фонового потока (стирание ссылок в
+                # Weeek ретраится минутами) возвращало карточку в «recording»
+                # после «error» или «uploading». Комната навсегда считалась
+                # занятой, и все следующие встречи по той же постоянной ссылке
+                # получали «Бот уже в этом звонке» до перезапуска.
+                if not msg.startswith("ffmpeg:") and st.state == "recording":
                     self._set(st, "recording", msg)
 
             self._set(st, "recording", "Бот заходит на встречу…")
@@ -410,7 +415,7 @@ class Scheduler:
             # never shows last week's video/protocol as if they were today's;
             # the fresh links are written below as they become ready.
             threading.Thread(target=self._wipe_stale_links,
-                             args=(st, cfg, log), daemon=True).start()
+                             args=(st, cfg, st.logs.append), daemon=True).start()
             # Human-readable file name: «ДД.ММ.ГГГГ, ЧЧ:ММ. - <название задачи>»
             # in the workspace timezone.
             when = (st.start.astimezone(self._tz(cfg)) if st.start

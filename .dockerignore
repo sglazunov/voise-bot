@@ -6,7 +6,6 @@
 data
 frontend/node_modules
 frontend/dist
-*.bat
 docs
 README.md
 .env

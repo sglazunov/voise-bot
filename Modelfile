@@ -1,5 +1,4 @@
 # Кастомная локальная модель для протоколов встреч.
-# Создать/обновить:  make_protocol_model.bat   (или: ollama create vtx-protocol -f Modelfile)
 # Базовая модель — qwen2.5:7b (лучший русский среди локальных 7B).
 
 FROM qwen2.5:7b

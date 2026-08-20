@@ -117,12 +117,15 @@ GIGACHAT_SCOPE = os.getenv("GIGACHAT_SCOPE", "GIGACHAT_API_PERS")
 GIGACHAT_MODEL = os.getenv("VTX_GIGACHAT_MODEL", "GigaChat")
 
 # --- Free: Ollama (fully local, no key; runs on this machine) ---
-# qwen2.5:7b is the pick for this box: strong Russian summarization, ~4.7 GB,
-# fits in 14 GB alongside the Whisper "medium" model. Enabled by default since
-# Ollama is installed locally. Set VTX_OLLAMA=0 to turn it off.
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
+# Ollama в образ НЕ входит — это внешний сервер, который подключают отдельно.
+# Поэтому по умолчанию она ВЫКЛЮЧЕНА: включённой она всегда попадала в список
+# доступных движков, resolve_provider никогда не говорил «не настроено», и
+# задача без единого ключа падала на «Не удалось подключиться к
+# host.docker.internal» вместо понятного «движок не настроен».
+# Включить: VTX_OLLAMA=1 и OLLAMA_URL на свой сервер.
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://host.docker.internal:11434")
 OLLAMA_MODEL = os.getenv("VTX_OLLAMA_MODEL", "qwen2.5:7b")
-OLLAMA_ENABLED = os.getenv("VTX_OLLAMA", "1") == "1"
+OLLAMA_ENABLED = os.getenv("VTX_OLLAMA", "0") == "1"
 
 # Human-friendly labels shown in the UI provider picker.
 PROVIDER_LABELS = {
@@ -135,11 +138,14 @@ PROVIDER_LABELS = {
     "anthropic": "Claude (платно по токенам, точнее)",
 }
 # Order = preference for "auto" (free/local first, paid last).
-# «Авто» берёт ПЕРВЫЙ настроенный движок из этого списка. Groq впереди: на
-# CPU-сервере облачный протокол готов за минуты, локальный — за десятки минут
-# (Ollama остаётся последним резервом цепочки на случай недоступности облаков).
+# «Авто» берёт ПЕРВЫЙ настроенный движок из этого списка.
+# Порядок — по замерам на боевых встречах (см. CLAUDE.md «Выбор движка»):
+# NVIDIA/DeepSeek даёт вдвое более полный протокол, Gemini устойчив и идёт
+# запасным, Groq оказался худшим (дробит темы, теряет задачи, отвечает 413 даже
+# на двадцатиминутной встрече) — поэтому он больше НЕ первый. Ollama последняя:
+# на CPU-сервере локальный протокол считается десятки минут.
 # Переопределяется через VTX_PROVIDER_ORDER="ollama,groq,…".
-_default_order = "groq,nvidia,gemini,yandex,gigachat,anthropic,ollama"
+_default_order = "nvidia,gemini,groq,yandex,gigachat,anthropic,ollama"
 PROVIDER_ORDER = [p.strip() for p in
                   os.getenv("VTX_PROVIDER_ORDER", _default_order).split(",")
                   if p.strip()]
