@@ -209,6 +209,12 @@ export default function Overview() {
               <b>{s?.running ? "Автоматика работает" : "Автоматика остановлена"}</b>
               <div style={{ color: "var(--muted)" }}>
                 Сегодня встреч: {today.length} · записей: {s?.active ?? 0}/{s?.max_parallel ?? 1}</div>
+              {/* Последний сбой опроса Weeek. Без него «автоматика работает», а
+                  встречи не появляются — и причина видна только в логах. */}
+              {(s as any)?.last_error && (
+                <div className="mt-1" style={{ color: "var(--warn)" }}>
+                  Последний опрос Weeek не удался: {(s as any).last_error}</div>
+              )}
             </div>
           </div>
         </Card>

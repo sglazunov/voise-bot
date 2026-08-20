@@ -15,8 +15,10 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, ConfigDict, Field
 
-from . import config, db, llm, analyze, security, sms, user_creds
+from . import config, db, llm, analyze, logs, security, sms, user_creds
 from .jobs import store, STATUS_DONE, STATUS_CANCELLED
+
+log = logs.get("vtx.main")
 
 
 def _provider_list(user_keys: dict | None = None) -> list[dict]:
@@ -465,7 +467,8 @@ def _start_scheduler() -> None:
         from .automation.scheduler import scheduler
         scheduler.start()
     except Exception:
-        pass
+        log.error("Планировщик встреч не запустился — автоматической записи не "
+                  "будет", exc_info=True)
     # Д14: index pre-existing finished jobs for full-text search (idempotent).
     import threading as _th
     _th.Thread(target=store.backfill_search, daemon=True,
@@ -479,7 +482,8 @@ def _start_scheduler() -> None:
             from . import autosetup
             autosetup.ensure_all()
         except Exception:
-            pass
+            log.warning("Предзагрузка модели распознавания не началась",
+                        exc_info=True)
 
 ALLOWED_EXT = {".mp3", ".wav", ".m4a", ".ogg", ".oga", ".opus", ".flac", ".aac",
                ".mp4", ".mkv", ".webm", ".mov", ".wma", ".amr"}

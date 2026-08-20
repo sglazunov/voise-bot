@@ -19,8 +19,10 @@ from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import Dict, Optional
 
-from . import config, db, formats, glossary, names
+from . import config, db, formats, glossary, logs, names
 from .transcribe import transcribe_file
+
+log = logs.get("vtx.jobs")
 
 STATUS_QUEUED = "queued"
 STATUS_RUNNING = "running"
@@ -188,7 +190,7 @@ class JobStore:
                                           "Нажмите «Повторить анализ».")
                 self._jobs[job.id] = job
         except Exception:
-            pass
+            log.error("Не удалось восстановить задачи после старта", exc_info=True)
 
     _save_lock = threading.Lock()
 
@@ -496,8 +498,8 @@ class JobStore:
             if body:
                 db.search_save(job.id, job.owner, Path(job.filename).stem,
                                body, job.created_at or time.time())
-        except Exception:  # noqa: BLE001 — search must never break the pipeline
-            pass
+        except Exception:  # noqa: BLE001 — поиск не должен ломать конвейер
+            log.warning("Задача %s не попала в поисковый индекс", job.id, exc_info=True)
 
     def backfill_search(self) -> None:
         """Index the done jobs that existed before the search feature."""
@@ -512,7 +514,7 @@ class JobStore:
                             and job.id not in indexed):
                         self.index_search(job)
         except Exception:  # noqa: BLE001
-            pass
+            log.warning("Дозаполнение поискового индекса прервано", exc_info=True)
 
     def _enforce_participants(self, job: Job, result: dict) -> dict:
         """Участники протокола = РОВНО те, кто был в окне Телемоста (подписи
@@ -744,7 +746,8 @@ class JobStore:
                     try:
                         db.search_delete(job.id)
                     except Exception:  # noqa: BLE001
-                        pass
+                        log.warning("Не удалось убрать задачу %s из индекса",
+                                    job.id, exc_info=True)
                 self._jobs.pop(job.id, None)
                 self._partial.pop(job.id, None)
                 self._control.pop(job.id, None)
@@ -763,7 +766,7 @@ class JobStore:
             p.unlink(missing_ok=True)
             p.with_suffix(".16k.wav").unlink(missing_ok=True)  # diarization temp
         except Exception:
-            pass
+            log.warning("Не удалось удалить исходник задачи %s", job.id, exc_info=True)
 
     def _cleaner_loop(self) -> None:
         while True:
@@ -771,7 +774,7 @@ class JobStore:
             try:
                 self._purge_old()
             except Exception:
-                pass
+                log.warning("Чистка старых задач сорвалась", exc_info=True)
 
     # ---- worker ------------------------------------------------------------
     def _set(self, job: Job, persist: bool = True, **kw) -> None:
@@ -924,8 +927,9 @@ class JobStore:
                             initial_prompt = (f"{initial_prompt} "
                                               f"Участники встречи: {', '.join(names)}."
                                               ).strip()
-                except Exception:  # a video quirk must not block transcription
-                    pass
+                except Exception:  # особенность видео не должна ломать расшифровку
+                    log.info("Имена участников с видео прочитать не удалось",
+                             exc_info=True)
 
             _t0 = time.time()
             segments, meta = transcribe_file(
@@ -1130,9 +1134,9 @@ class JobStore:
                 try:
                     p.unlink(missing_ok=True)
                 except OSError:
-                    pass
+                    log.debug("Временный файл %s не удалён", p, exc_info=True)
         except Exception:
-            pass
+            log.warning("Чистка временных файлов задачи не удалась", exc_info=True)
 
     def _finalise_cancel(self, job: Job) -> None:
         """Mark a job cancelled, keeping whatever was transcribed so far."""

@@ -21,8 +21,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .. import config, db, security
+from .. import config, db, logs, security
 from . import clouds, recorder, settings as auto_settings, weeek
+
+log = logs.get("vtx.scheduler")
 
 # How late after start we'll still auto-join (avoids joining long-finished
 # meetings on the first poll after startup).
@@ -99,6 +101,8 @@ class Scheduler:
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._last_poll: dict[str, float] = {}  # per-user last Weeek poll
+        # Последняя ошибка опроса по командам — показывается в интерфейсе.
+        self._last_error: dict[str, str] = {}
         self._boot_time = 0.0  # session start; meetings older than this are missed
 
     # -- lifecycle ----------------------------------------------------------
@@ -145,7 +149,10 @@ class Scheduler:
                 "enabled": bool(cfg.get("enabled")),
                 "recording": active > 0,
                 "active": active, "max_parallel": recorder.MAX_SLOTS,
-                "last_poll": self._last_poll.get(user, 0.0), "meetings": meetings}
+                "last_poll": self._last_poll.get(user, 0.0), "meetings": meetings,
+                # Последний сбой опроса — иначе «автоматика работает», а встречи
+                # не появляются, и причина видна только в логах контейнера.
+                "last_error": self._last_error.get(user, "")}
 
     def poll_now(self, user: str) -> dict:
         """Force an immediate Weeek re-poll for this team — the manual «Обновить
@@ -186,10 +193,12 @@ class Scheduler:
                             self._poll(user, cfg)
                             self._last_poll[user] = time.time()
                         self._maybe_trigger(user, cfg)
-                    except Exception:  # one team's failure must not stop others
-                        pass
+                        self._last_error.pop(user, None)
+                    except Exception as e:  # сбой одной команды не валит другие
+                        log.warning("Опрос команды %s сорвался", user, exc_info=True)
+                        self._last_error[user] = f"{type(e).__name__}: {e}"[:300]
             except Exception:  # never let the loop die
-                pass
+                log.error("Сбой в цикле планировщика", exc_info=True)
             self._stop.wait(_TICK_SEC)
 
     def _tz(self, cfg: dict):
@@ -608,7 +617,8 @@ class Scheduler:
                 if res.get("ok"):
                     log(f"Поле «{fld}»: очищено от прошлой встречи.")
             except Exception:  # cosmetic step — never blocks the recording
-                pass
+                log.info("Не удалось очистить поле «%s» задачи %s",
+                         fld, st.task_id, exc_info=True)
 
     def _write_weeek_field(self, token, task_id, field: str, value: str,
                            log, attempts: int = 3) -> bool:
@@ -725,7 +735,8 @@ class Scheduler:
                 try:
                     weeek.add_comment(token, task_id, msg)
                 except Exception:
-                    pass
+                    log.warning("Комментарий в задачу %s не ушёл: %s",
+                                task_id, msg, exc_info=True)
 
         # Ждём, пока задача ЖИВА. Двухчасовой срок объявлял провал даже тогда,
         # когда задача честно стояла в очереди: воркер распознавания один, и
@@ -869,7 +880,7 @@ class Scheduler:
                 if st.state in ("done", "error"):
                     db.meetings_trim(st.owner)
             except Exception:   # noqa: BLE001 — снапшот не должен ронять запись
-                pass
+                log.warning("Снапшот встречи %s не сохранён", st.key, exc_info=True)
             return
         with self._snap_lock:
             self._save_state_locked(st)
@@ -886,7 +897,7 @@ class Scheduler:
             tmp.write_text(json.dumps(snaps, ensure_ascii=False), encoding="utf-8")
             os.replace(tmp, p)
         except Exception:  # persistence is best-effort, never breaks the loop
-            pass
+            log.warning("Снапшот встречи %s не записан в файл", st.key, exc_info=True)
 
     def _revive_recorded_slot(self, user: str, task_id: str,
                               near: datetime, snaps: dict) -> None:
@@ -982,7 +993,8 @@ class Scheduler:
                     try:
                         store.retry(jid)
                     except Exception:  # noqa: BLE001
-                        pass
+                        log.warning("Не удалось перезапустить задачу %s после "
+                                    "рестарта", jid, exc_info=True)
                 st = MeetingState(
                     key=key, task_id=task_id, title=Path(job.filename).stem,
                     url="", start=start, owner=team,
@@ -999,7 +1011,8 @@ class Scheduler:
                 try:
                     store.redeliver(jid, weeek_task=task_id, cloud=True)
                 except Exception:  # noqa: BLE001
-                    pass
+                    log.warning("Повторная доставка задачи %s не удалась", jid,
+                                exc_info=True)
                 threading.Thread(
                     target=self._await_and_upload_protocol,
                     args=(st, jid, cfg),

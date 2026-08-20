@@ -17,7 +17,10 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from ... import logs
 from . import browser, capture
+
+log = logs.get("vtx.recorder")
 
 # --------------------------------------------------------------------------- #
 # Parallel recording slots.
@@ -252,7 +255,7 @@ def record_meeting(url: str, out_path: str, cfg: dict,
             if rec:
                 rec.stop()
         except Exception:
-            pass
+            log.warning("ffmpeg не остановился штатно после сбоя", exc_info=True)
         # Сбой ПОСРЕДИ встречи (сеть, база, вёрстка) не должен стоить записи.
         # Раньше здесь всегда возвращалось ok:False, карточка уходила в «error»,
         # а уже записанный файл никто не выгружал и не распознавал: состояние
@@ -268,7 +271,8 @@ def record_meeting(url: str, out_path: str, cfg: dict,
                         "audio_warning": audio_state["had_silence"],
                         "warning": f"Запись прервана ошибкой: {e}"}
         except Exception:      # noqa: BLE001 — спасение файла не обязано работать
-            pass
+            log.warning("Не удалось спасти уже записанный файл %s", out_path,
+                        exc_info=True)
         # Отсутствие виртуального экрана Playwright сообщает стектрейсом на
         # английском, и в карточке встречи вместо причины оказывалась простыня
         # «BrowserType.launch_persistent_context…». Причина всегда одна и

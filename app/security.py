@@ -36,7 +36,9 @@ from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
-from . import config, db
+from . import config, db, logs
+
+log = logs.get("vtx.security")
 
 _USERS_FILE = config.DATA_DIR / "users.json"
 _SESSIONS_FILE = config.DATA_DIR / "sessions.json"
@@ -579,7 +581,8 @@ def _delete_user_data(username: str) -> None:
         try:
             db.delete_user_data(username)
         except Exception:
-            pass
+            log.error("Данные пользователя %s не удалены из базы — файлы будут "
+                      "стёрты, а строки останутся", username, exc_info=True)
     import shutil
     shutil.rmtree(config.DATA_DIR / "users" / username, ignore_errors=True)
 
