@@ -13,12 +13,24 @@ from __future__ import annotations
 
 import time
 
+import pytest
+
 from app import config
 from app.jobs import (STATUS_ANALYZING, STATUS_QUEUED, STATUS_RUNNING, STATUS_DONE, Job,
                       store)
 
+# Окно ретеншна фиксируем сами. Оно берётся из VTX_RETENTION_HOURS, и на боевом
+# сервере стоит своё значение: при окне больше 25 часов «старая» задача просто
+# не доходила до очистки, и тест либо падал, либо проходил не по той причине.
+RETENTION_HOURS = 24
 
-def _make_job(status: str, age_hours: float) -> Job:
+
+@pytest.fixture(autouse=True)
+def _fixed_retention(monkeypatch):
+    monkeypatch.setattr(config, "RESULT_RETENTION_HOURS", RETENTION_HOURS)
+
+
+def _make_job(status: str, age_hours: float = RETENTION_HOURS + 1) -> Job:
     src = config.UPLOAD_DIR / f"meeting-{status}.mp4"
     src.write_bytes(b"\x00" * 1024)          # «запись встречи»
     job = Job(id=f"adv{status[:6]}01", filename=src.name, audio_path=str(src),
@@ -32,7 +44,7 @@ class TestRetentionVsActiveJobs:
     def test_queued_job_keeps_its_source(self):
         """Задача сутки ждала свободного воркера (три встречи подряд — обычное
         дело). Ретеншн не имеет права трогать то, что ещё не обработано."""
-        job = _make_job(STATUS_QUEUED, age_hours=25)
+        job = _make_job(STATUS_QUEUED, age_hours=RETENTION_HOURS + 1)
         src = config.UPLOAD_DIR / job.filename
 
         store._purge_old()
@@ -42,7 +54,7 @@ class TestRetentionVsActiveJobs:
 
     def test_running_job_keeps_its_source(self):
         """Ещё хуже: воркер прямо сейчас читает этот файл."""
-        job = _make_job(STATUS_RUNNING, age_hours=25)
+        job = _make_job(STATUS_RUNNING, age_hours=RETENTION_HOURS + 1)
         src = config.UPLOAD_DIR / job.filename
 
         store._purge_old()
@@ -75,8 +87,8 @@ class TestRetentionVsActiveJobs:
         monkeypatch.setattr(db, "search_save", lambda *a, **k: None)
         monkeypatch.setattr(db, "stats_add", lambda r: None)
 
-        job = _make_job(STATUS_DONE, age_hours=25)
-        job.finished_at = time.time() - 25 * 3600
+        job = _make_job(STATUS_DONE, age_hours=RETENTION_HOURS + 1)
+        job.finished_at = time.time() - (RETENTION_HOURS + 1) * 3600
         job.id = "advzombie1"
         store._jobs = {job.id: job}
         store._save(job)
@@ -95,7 +107,7 @@ class TestRetentionVsActiveJobs:
     def test_analyzing_job_keeps_its_transcript(self):
         """Распознавание позади, идёт сборка протокола: расшифровка на диске —
         единственное, из чего протокол ещё можно собрать."""
-        job = _make_job(STATUS_ANALYZING, age_hours=25)
+        job = _make_job(STATUS_ANALYZING, age_hours=RETENTION_HOURS + 1)
         txt = store.result_path(job.id, "txt")
         txt.write_text("[00:01] разговор был\n", encoding="utf-8")
 
