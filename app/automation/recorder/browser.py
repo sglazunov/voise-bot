@@ -145,17 +145,38 @@ def readiness(cfg: dict) -> dict:
     return {"ready": True, "mode": mode, "detail": "Режим: гость (по ссылке)."}
 
 
+def _login_busy() -> bool:
+    """Открыто ли сейчас окно входа. Chromium не даёт двум процессам держать
+    один каталог профиля, поэтому проверять вход, пока окно живо, бессмысленно:
+    запуск просто падает."""
+    ses = login_session
+    return bool(ses is not None and ses.alive())
+
+
 def login_status(cfg: dict) -> dict:
     """Check whether the recorder profile is actually logged into Yandex.
 
     Loads passport.yandex.ru/profile in a headless copy of the profile: if it
-    stays on /profile the session is valid; if it redirects to /auth it isn't."""
-    if (cfg.get("auth_mode") or "guest") != "profile":
-        return {"logged_in": None,
-                "detail": "Режим входа — «Гость»: вход в Яндекс не используется. "
-                          "Для записи Телемоста переключите на «Авторизованный»."}
+    stays on /profile the session is valid; if it redirects to /auth it isn't.
+
+    Профиль проверяется ВСЕГДА, независимо от режима входа. Раньше при режиме
+    «Гость» проверка отказывалась смотреть вовсе — и человек, только что
+    вошедший в аккаунт через окно, получал ответ «вход не используется» и
+    никакого подтверждения, что вход удался. Тем более что режим в списке можно
+    выбрать, но забыть сохранить: настройки читаются с диска, там ещё «Гость».
+    Про режим сообщаем отдельно, не мешая факту входа.
+    """
     if not playwright_available():
         return {"logged_in": None, "detail": "Playwright не установлен."}
+    mode = (cfg.get("auth_mode") or "guest")
+    hint = ("" if mode == "profile" else
+            " Но сейчас сохранён режим «Гость» — чтобы бот заходил под этим "
+            "аккаунтом, выберите «Авторизованный» и нажмите «Сохранить "
+            "настройки бота».")
+    if _login_busy():
+        return {"logged_in": None,
+                "detail": "Окно входа ещё открыто — закройте его кнопкой "
+                          "«Готово», потом проверяйте."}
     try:
         from playwright.sync_api import sync_playwright
         user_dir = str(_profile_dir(cfg))
@@ -172,8 +193,9 @@ def login_status(cfg: dict) -> dict:
             except Exception:
                 pass
         logged = "/auth" not in url
-        return {"logged_in": logged,
-                "detail": ("Вход в Яндекс выполнен ✓ — бот будет писать как этот аккаунт."
+        return {"logged_in": logged, "auth_mode": mode,
+                "detail": (("Вход в Яндекс выполнен ✓ — бот будет писать как "
+                            "этот аккаунт." + hint)
                            if logged else
                            "Не вошли в Яндекс. Нажмите «Войти в Яндекс» и авторизуйтесь "
                            "аккаунтом, создавшим встречу.")}
@@ -770,8 +792,18 @@ class _LoginSession:
         """Клик/ввод/навигация. Выполняется в потоке браузера."""
         self._cmds.put((kind, kw))
 
-    def close(self) -> None:
+    def close(self, wait: float = 10.0) -> None:
+        """Закрыть окно и ДОЖДАТЬСЯ, пока браузер отпустит каталог профиля.
+
+        Интерфейс сразу после закрытия зовёт проверку входа, а она открывает тот
+        же профиль. Без ожидания она попадала на ещё занятый каталог и отвечала
+        сбоем — выглядело как «вход не сохранился»."""
         self._stop.set()
+        t = self._thread
+        if t and t.is_alive():
+            t.join(timeout=wait)
+            if t.is_alive():
+                log.warning("Окно входа не закрылось за %s с", wait)
 
     # -- поток браузера ----------------------------------------------------
     def _run(self) -> None:

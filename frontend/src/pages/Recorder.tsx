@@ -147,6 +147,16 @@ export default function Recorder() {
             Под аккаунтом бот видит чат встречи — тогда работает стоп-слово.
             Гостю Телемост чат не показывает.
           </div>
+          {/* Список меняется мгновенно, а бот читает СОХРАНЁННУЮ настройку.
+              Выбрать «Авторизованный» и не нажать «Сохранить» — тихая ловушка:
+              проверка входа отвечает про гостя, и выглядит это как поломка. */}
+          {authState?.auth_mode && authState.auth_mode !== (s.auth_mode || "guest") && (
+            <div className="text-[11.5px] mt-1" style={{ color: "#fbbf24" }}>
+              Режим изменён, но не сохранён: на сервере сейчас
+              «{authState.auth_mode === "profile" ? "Авторизованный" : "Гость"}».
+              Нажмите «Сохранить настройки бота».
+            </div>
+          )}
           <div className="flex gap-2 mt-2 flex-wrap items-center">
             <button className="btn btn-ghost" onClick={openLogin}>
               <LogIn size={15} /> Войти в Яндекс</button>
@@ -154,7 +164,10 @@ export default function Recorder() {
               {authChecking ? "Проверяю…" : "Проверить вход"}</button>
             {authState && <span className="text-[11.5px]" style={{
               color: authState.logged_in ? "#5eead4" : authState.logged_in === false ? "#fbbf24" : "var(--muted)" }}>
-              {authState.logged_in ? "Вход выполнен ✓" : authState.detail}</span>}
+              {/* Показываем ответ целиком. Раньше при успехе выводилось только
+                  «Вход выполнен ✓», и оговорка про несохранённый режим — самое
+                  полезное в ответе — терялась. */}
+              {authState.detail}</span>}
           </div>
         </Card>
 
