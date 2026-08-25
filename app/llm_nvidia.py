@@ -231,13 +231,16 @@ _STREAM_RETRIES = int(os.getenv("VTX_NVIDIA_STREAM_RETRIES", "3"))
 
 def _nvidia_stream(url: str, payload: dict, headers: dict,
                    timeout: int = _NVIDIA_CHUNK_TIMEOUT, should_stop=None,
-                   attempt: int = 0) -> str:
+                   attempt: int = 0, first_timeout: int | None = None) -> str:
     """Собрать ответ из SSE-потока OpenAI-совместимого API.
 
     Формат: строки «data: {json}», конец — «data: [DONE]». Нас интересует
     choices[0].delta.content. Пустые строки и служебные поля пропускаем.
     """
-    first_timeout = max(timeout, _NVIDIA_FIRST_TIMEOUT)
+    # Ожидание ПЕРВОГО куска по умолчанию длиннее обычного, но диагностике нужно
+    # мочь его урезать — иначе проверка молча висит пять минут.
+    first_timeout = (first_timeout if first_timeout is not None
+                     else max(timeout, _NVIDIA_FIRST_TIMEOUT))
     body = json.dumps({**payload, "stream": True}).encode("utf-8")
     req = urllib.request.Request(url, data=body, method="POST")
     req.add_header("Content-Type", "application/json")
@@ -280,7 +283,7 @@ def _nvidia_stream(url: str, payload: dict, headers: dict,
                      e.code, wait, attempt + 1, _STREAM_RETRIES)
             time.sleep(wait)
             return _nvidia_stream(url, payload, headers, timeout,
-                                  should_stop, attempt + 1)
+                                  should_stop, attempt + 1, first_timeout)
         raise RuntimeError(f"HTTP {e.code} от {url}: {body_txt[:300]}") from e
     except urllib.error.URLError as e:
         raise RuntimeError(f"Не удалось подключиться к {url}: {e.reason}") from e
