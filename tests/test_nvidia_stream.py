@@ -175,3 +175,64 @@ def test_первый_кусок_ждём_дольше_остальных():
     тысяч символов, и до первого куска проходит заметно больше времени, чем
     между кусками потом."""
     assert llm_nvidia._NVIDIA_FIRST_TIMEOUT > llm_nvidia._NVIDIA_CHUNK_TIMEOUT
+
+
+class TestЗапаснаяМодель:
+    """Бесплатный NIM грузит модели по-разному: замер на боевом ключе дал 12 с
+    на шестнадцать токенов у deepseek-v4-flash против 0,6 с у nemotron. Занятая
+    модель на длинной генерации отвечает 529 или молчит, и раньше протокол
+    целиком уходил запасному ДВИЖКУ. Ключ при этом живой, соседние модели
+    свободны — правильнее сменить модель, а не движок."""
+
+    def _prov(self, monkeypatch, busy, log):
+        p = llm_nvidia.NvidiaProvider(model="занята/модель", api_key="nvapi-x")
+        monkeypatch.setattr(llm_nvidia, "nvidia_usable_models",
+                            lambda key=None: ["занята/модель", "свободна/раз",
+                                              "свободна/два"])
+
+        def fake(model, prompt, max_tokens, force_json, should_stop):
+            log.append(model)
+            if model in busy:
+                raise RuntimeError('HTTP 529: {"type":"Overloaded"}')
+            return '{"ok": true}'
+
+        monkeypatch.setattr(p, "_complete_one", fake)
+        return p
+
+    def test_занятая_модель_меняется_на_свободную(self, monkeypatch):
+        log: list[str] = []
+        p = self._prov(monkeypatch, {"занята/модель"}, log)
+        assert p.complete("текст") == '{"ok": true}'
+        assert log == ["занята/модель", "свободна/раз"]
+
+    def test_имя_использованной_модели_запоминается(self, monkeypatch):
+        """Шапка протокола берёт имя модели у провайдера — называть занятую
+        было бы неправдой."""
+        p = self._prov(monkeypatch, {"занята/модель"}, [])
+        p.complete("текст")
+        assert p.model == "свободна/раз"
+
+    def test_если_заняты_все_ошибка_пробрасывается(self, monkeypatch):
+        log: list[str] = []
+        p = self._prov(monkeypatch,
+                       {"занята/модель", "свободна/раз", "свободна/два"}, log)
+        with pytest.raises(RuntimeError):
+            p.complete("текст")
+        assert len(log) == 3, "должны быть перебраны все доступные модели"
+
+    def test_обычная_ошибка_не_ведёт_к_смене_модели(self, monkeypatch):
+        """Смена модели — ответ на перегрузку. Ошибка в самом запросе так не
+        лечится, и молча уводить её в другую модель нельзя."""
+        log: list[str] = []
+        p = llm_nvidia.NvidiaProvider(model="модель", api_key="nvapi-x")
+        monkeypatch.setattr(llm_nvidia, "nvidia_usable_models",
+                            lambda key=None: ["модель", "другая"])
+
+        def fake(model, *a, **k):
+            log.append(model)
+            raise RuntimeError("HTTP 400: bad request")
+
+        monkeypatch.setattr(p, "_complete_one", fake)
+        with pytest.raises(RuntimeError):
+            p.complete("текст")
+        assert log == ["модель"]

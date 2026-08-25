@@ -227,6 +227,8 @@ def _looks_complete_json(text: str) -> bool:
 # Сколько раз повторять поток, когда NVIDIA отвечает «перегружены». Их
 # бесплатный NIM отвечает так регулярно; пауза берётся из Retry-After.
 _STREAM_RETRIES = int(os.getenv("VTX_NVIDIA_STREAM_RETRIES", "3"))
+# Сколько ЗАПАСНЫХ моделей того же ключа пробовать, когда текущая занята.
+_STANDBY_MODELS = int(os.getenv("VTX_NVIDIA_STANDBY_MODELS", "2"))
 
 
 def _nvidia_stream(url: str, payload: dict, headers: dict,
@@ -478,11 +480,59 @@ class NvidiaProvider(_KeyProviderMixin):
         # только если каталог недоступен.
         self.model = model or nvidia_default_model(self.api_key)
 
+    def _standby_models(self) -> list[str]:
+        """Запасные модели того же ключа — на случай, когда занята текущая.
+
+        Бесплатный NIM грузит модели по-разному: замер на боевом ключе показал
+        12 секунд на шестнадцать токенов у deepseek-v4-flash против 0,6 секунды
+        у nemotron и gpt-oss-20b — разница в двадцать раз. Модель, стоящая в
+        очереди, на длинной генерации отвечает 529 либо молчит до таймаута,
+        после чего протокол уходит запасному ДВИЖКУ целиком. Но ключ-то живой и
+        другие модели свободны: разумнее сменить модель, чем весь движок.
+        """
+        try:
+            known = nvidia_usable_models(self.api_key) or nvidia_models(self.api_key)
+        except Exception:               # noqa: BLE001 — запасной путь не обязан работать
+            return []
+        return [m for m in known if m != self.model][:_STANDBY_MODELS]
+
     def complete(self, prompt: str, max_tokens: int = 2000,
                  force_json: bool = True, should_stop=None) -> str:
+        try:
+            return self._complete_one(self.model, prompt, max_tokens,
+                                      force_json, should_stop)
+        except GenerationCancelled:
+            raise
+        except Exception as e:          # noqa: BLE001
+            if not is_overloaded(e) or _nvidia_not_entitled(e) or _is_rate_limit(e):
+                raise
+            for alt in self._standby_models():
+                log.warning("NVIDIA: модель %s занята (%s) — пробую %s",
+                            self.model, str(e)[:120], alt)
+                try:
+                    text = self._complete_one(alt, prompt, max_tokens,
+                                              force_json, should_stop)
+                    # Запоминаем: шапка протокола берёт имя модели отсюда, и
+                    # называть занятую было бы неправдой. Заодно следующие
+                    # вызовы (протокол длинной встречи — это десятки запросов)
+                    # сразу пойдут на свободную модель, а не будут снова
+                    # колотиться в очередь.
+                    self.model = alt
+                    return text
+                except GenerationCancelled:
+                    raise
+                except Exception as e2:     # noqa: BLE001
+                    if _nvidia_not_entitled(e2):
+                        continue            # эта модель ключу не выдана
+                    if not is_overloaded(e2):
+                        raise
+            raise
+
+    def _complete_one(self, model: str, prompt: str, max_tokens: int,
+                      force_json: bool, should_stop) -> str:
         url = "https://integrate.api.nvidia.com/v1/chat/completions"
         payload = {
-            "model": self.model,
+            "model": model,
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": max_tokens,
             "temperature": 0.1,

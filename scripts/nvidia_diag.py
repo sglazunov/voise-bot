@@ -86,22 +86,38 @@ def main() -> int:
         short = {"messages": [{"role": "user", "content": "Ответь одним словом: привет"}],
                  "max_tokens": 16, "temperature": 0}
         probe = [default] + [m for m in models[:8] if m != default]
-        free = []
+        free: list[tuple[str, float]] = []
         for mid in probe:
             t = time.time()
             try:
                 _stream({**short, "model": mid}, headers, SHORT_WAIT)
-                free.append(mid)
-                _say(f"  {mid}", True, "отвечает", time.time() - t)
+                dt = time.time() - t
+                free.append((mid, dt))
+                # Время на шестнадцати токенах — это чистая очередь на стороне
+                # NVIDIA. Модель, отвечающая десяток секунд на такую мелочь, на
+                # длинной генерации упрётся в 529 или в таймаут.
+                mark = "отвечает" if dt < 3 else f"отвечает, но МЕДЛЕННО ({dt:.0f} c на 16 токенов)"
+                _say(f"  {mid}", True, mark, dt)
             except Exception as e:                      # noqa: BLE001
                 _say(f"  {mid}", False, str(e)[:140], time.time() - t)
 
         print("")
         if free:
-            print("Отвечают: " + ", ".join(free))
-            if default not in free:
+            fast = [m for m, dt in free if dt < 3]
+            slow = [m for m, dt in free if dt >= 3]
+            print("Отвечают быстро: " + (", ".join(fast) or "—"))
+            if slow:
+                print("Отвечают медленно (очередь): " + ", ".join(slow))
+            cur = dict(free).get(default)
+            if cur is None:
                 print(f"Текущая модель ({default}) НЕ отвечает, а другие — да. "
-                      "Смените её на странице «Нейросети» на любую из списка.")
+                      "Смените её на странице «Нейросети» на любую из быстрых.")
+            elif cur >= 3 and fast:
+                print(f"Текущая модель ({default}) в очереди: {cur:.0f} c на "
+                      "шестнадцать токенов. На длинной встрече это и даёт 529 "
+                      "или молчание до таймаута. Код теперь сам перейдёт на "
+                      "свободную модель, но надёжнее выбрать быструю вручную "
+                      "на странице «Нейросети».")
         else:
             print("Не ответила ни одна модель — занят весь бесплатный сервис "
                   "NVIDIA либо ключ исчерпан. Протоколы будет собирать "
