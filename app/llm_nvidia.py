@@ -224,14 +224,18 @@ def _looks_complete_json(text: str) -> bool:
         return False
 
 
-# Сколько раз повторять поток, когда NVIDIA отвечает «перегружены», и как долго
-# ждать между попытками. Их бесплатный NIM отвечает так регулярно.
+# СКОЛЬКО ВСЕГО ЖДАТЬ NVIDIA, прежде чем отдать встречу запасному движку.
 #
-# Терпения здесь намеренно много: протокол встречи не срочный — он нужен через
-# минуты, а не секунды. Подождать очередь выбранной модели почти всегда лучше,
-# чем собрать протокол чужой: движок выбирают за качество, и подмена ради
-# скорости обесценивает сам выбор. Шесть попыток с паузой до минуты дают около
-# пяти минут ожидания, и только потом начинается поиск замены.
+# Бюджет ограничивает именно ОЖИДАНИЕ — очередь на их стороне: паузы между
+# повторами при «перегружены» плюс ожидание первого куска ответа. Как только
+# модель начала печатать, бюджет больше не действует: генерация длинного
+# протокола законно идёт минутами, и обрывать пошедший ответ незачем.
+#
+# Пять минут: движок выбирают за качество протокола, и подождать очередь
+# выбранной модели лучше, чем сразу отдать встречу запасной. Дольше держать
+# встречу без протокола уже незачем — за пять минут бесплатный NIM либо
+# освобождается, либо занят всерьёз.
+_NVIDIA_WAIT_BUDGET = int(os.getenv("VTX_NVIDIA_WAIT_BUDGET", "300"))
 _STREAM_RETRIES = int(os.getenv("VTX_NVIDIA_STREAM_RETRIES", "6"))
 _STREAM_RETRY_MAX_WAIT = int(os.getenv("VTX_NVIDIA_STREAM_RETRY_WAIT", "60"))
 # Сколько ЗАПАСНЫХ моделей того же ключа пробовать, когда текущая занята.
@@ -259,7 +263,8 @@ def _family(model_id: str) -> str:
 
 def _nvidia_stream(url: str, payload: dict, headers: dict,
                    timeout: int = _NVIDIA_CHUNK_TIMEOUT, should_stop=None,
-                   attempt: int = 0, first_timeout: int | None = None) -> str:
+                   attempt: int = 0, first_timeout: int | None = None,
+                   deadline: float | None = None) -> str:
     """Собрать ответ из SSE-потока OpenAI-совместимого API.
 
     Формат: строки «data: {json}», конец — «data: [DONE]». Нас интересует
@@ -269,6 +274,14 @@ def _nvidia_stream(url: str, payload: dict, headers: dict,
     # мочь его урезать — иначе проверка молча висит пять минут.
     first_timeout = (first_timeout if first_timeout is not None
                      else max(timeout, _NVIDIA_FIRST_TIMEOUT))
+    if deadline is not None:
+        # Ждём ровно столько, сколько осталось от общего бюджета: смысл бюджета
+        # в том, чтобы встреча не стояла в очереди дольше отведённого.
+        left = deadline - time.time()
+        if left <= 1:
+            raise RuntimeError(
+                f"NVIDIA не ответила за отведённые {_NVIDIA_WAIT_BUDGET} с")
+        first_timeout = min(first_timeout, int(left))
     body = json.dumps({**payload, "stream": True}).encode("utf-8")
     req = urllib.request.Request(url, data=body, method="POST")
     req.add_header("Content-Type", "application/json")
@@ -308,11 +321,18 @@ def _nvidia_stream(url: str, payload: dict, headers: dict,
         if e.code in (429, 503, 529) and attempt < _STREAM_RETRIES:
             wait = min(_retry_after(e, body_txt, default=8 * (attempt + 1)),
                        _STREAM_RETRY_MAX_WAIT)
+            if deadline is not None and time.time() + wait >= deadline:
+                # Пауза не влезает в бюджет — ждать смысла нет, пусть встречу
+                # заберёт запасной движок.
+                raise RuntimeError(
+                    f"NVIDIA перегружена, ждать дольше {_NVIDIA_WAIT_BUDGET} с "
+                    f"не будем: HTTP {e.code}") from e
             log.info("NVIDIA: %s, жду %.0f c и повторяю поток (%d/%d)",
                      e.code, wait, attempt + 1, _STREAM_RETRIES)
             time.sleep(wait)
             return _nvidia_stream(url, payload, headers, timeout,
-                                  should_stop, attempt + 1, first_timeout)
+                                  should_stop, attempt + 1, first_timeout,
+                                  deadline)
         raise RuntimeError(f"HTTP {e.code} от {url}: {body_txt[:300]}") from e
     except urllib.error.URLError as e:
         raise RuntimeError(f"Не удалось подключиться к {url}: {e.reason}") from e
@@ -584,7 +604,10 @@ class NvidiaProvider(_KeyProviderMixin):
             "temperature": 0.1,
         }
         headers = {"Authorization": f"Bearer {self.api_key}"}
-        tmo = _nvidia_timeout(max_tokens)
+        # Обычный запрос — запасной путь, и ждать его дольше бюджета нельзя:
+        # именно он раньше висел до 504 у шлюза, пока встреча стояла без
+        # протокола. Потолок тот же, что и у ожидания потока.
+        tmo = min(_nvidia_timeout(max_tokens), _NVIDIA_WAIT_BUDGET)
 
         def post(pl):
             """Таймаут подписываем числом: «read operation timed out» не
@@ -614,10 +637,15 @@ class NvidiaProvider(_KeyProviderMixin):
             if force_json:
                 attempts.append({k: v for k, v in payload.items()
                                  if k != "response_format"})
+            # Бюджет один на весь запрос: и на повторы при «перегружены», и на
+            # вторую попытку без response_format. Иначе минута превращалась бы в
+            # минуту НА КАЖДУЮ попытку.
+            deadline = time.time() + _NVIDIA_WAIT_BUDGET
             for n, pl in enumerate(attempts):
                 try:
                     text = _nvidia_stream(url, pl, headers,
-                                          should_stop=should_stop)
+                                          should_stop=should_stop,
+                                          deadline=deadline)
                     if text.strip():
                         return text.strip()
                 except GenerationCancelled:

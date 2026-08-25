@@ -283,11 +283,11 @@ class TestСемействоМодели:
         ])
         assert p._standby_models()[0] == "deepseek-ai/deepseek-r1"
 
-    def test_ожидание_очереди_не_меньше_нескольких_минут(self):
-        """Протокол нужен через минуты, а не секунды: подождать очередь почти
-        всегда лучше, чем собрать протокол чужой моделью."""
-        assert llm_nvidia._STREAM_RETRIES >= 5
-        assert llm_nvidia._STREAM_RETRIES * llm_nvidia._STREAM_RETRY_MAX_WAIT >= 240
+    def test_ожидание_очереди_укладывается_в_бюджет(self):
+        """Повторы должны успевать упереться в бюджет, а не заканчиваться
+        раньше него: иначе заявленные пять минут ожидания были бы неправдой."""
+        worst = llm_nvidia._STREAM_RETRIES * llm_nvidia._STREAM_RETRY_MAX_WAIT
+        assert worst >= llm_nvidia._NVIDIA_WAIT_BUDGET
 
 
 def test_выбранная_человеком_модель_не_подменяется(monkeypatch):
@@ -306,3 +306,27 @@ def test_выбранная_человеком_модель_не_подменя�
                         lambda key=None: "deepseek-ai/deepseek-v4-flash-0731")
     auto = llm_nvidia.NvidiaProvider(api_key="nvapi-x")
     assert auto._standby_models() == ["deepseek-ai/deepseek-r1"]
+
+
+class TestБюджетОжидания:
+    """Ждать NVIDIA дольше минуты бессмысленно: бесплатный NIM либо отвечает
+    быстро, либо занят всерьёз и за пять минут не освободится. Бюджет
+    ограничивает ОЖИДАНИЕ — очередь на их стороне, — а не саму генерацию:
+    начавшийся ответ обрывать незачем, длинный протокол законно идёт минутами."""
+
+    def test_бюджет_около_пяти_минут(self):
+        """Подождать очередь выбранной модели лучше, чем сразу отдать встречу
+        запасной: движок выбирают за качество протокола."""
+        assert 240 <= llm_nvidia._NVIDIA_WAIT_BUDGET <= 360
+
+    def test_истёкший_бюджет_прекращает_ожидание(self):
+        import time as _t
+        with pytest.raises(RuntimeError, match="не ответила"):
+            llm_nvidia._nvidia_stream("https://x/y", {"model": "m"}, {},
+                                      deadline=_t.time() - 1)
+
+    def test_повторы_и_паузы_укладываются_в_бюджет(self):
+        """Повторов не должно быть столько, чтобы одни паузы съели бюджет."""
+        worst = llm_nvidia._STREAM_RETRIES * llm_nvidia._STREAM_RETRY_MAX_WAIT
+        assert worst >= llm_nvidia._NVIDIA_WAIT_BUDGET, (
+            "повторы должны успевать упереться в бюджет, а не заканчиваться раньше")
