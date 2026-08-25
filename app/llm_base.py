@@ -129,6 +129,19 @@ class _KeyProviderMixin:
         return 3 if self.max_retries is None else int(self.max_retries)
 
 
+def is_overloaded(e: Exception) -> bool:
+    """Сервис перегружен и просит зайти позже (503/529), а не отказывает.
+
+    NVIDIA отвечает 529 «Service temporarily overloaded». Это НЕ исчерпанный
+    лимит ключа и не отсутствие прав: ключ жив, модель доступна, просто их
+    инференс сейчас занят. Отличать важно — по такой ошибке нужно подождать и
+    повторить, а не менять ключ и не объявлять движок отказавшим.
+    """
+    s = f"{type(e).__name__} {e}".lower()
+    return ("529" in s or "overloaded" in s or "503" in s
+            or "service unavailable" in s or "temporarily" in s)
+
+
 def _is_rate_limit(e: Exception) -> bool:
     """Whether an error means the current API key hit its rate/quota limit."""
     s = f"{type(e).__name__} {e}".lower()

@@ -23,7 +23,7 @@ from pathlib import Path
 from . import config, logs
 from .llm_base import (
     GenerationCancelled, _KeyProviderMixin, _http_post_json, _is_rate_limit,
-    _safe_url,
+    _retry_after, _safe_url, is_overloaded,
 )
 
 log = logs.get("vtx.nvidia")
@@ -224,8 +224,14 @@ def _looks_complete_json(text: str) -> bool:
         return False
 
 
+# Сколько раз повторять поток, когда NVIDIA отвечает «перегружены». Их
+# бесплатный NIM отвечает так регулярно; пауза берётся из Retry-After.
+_STREAM_RETRIES = int(os.getenv("VTX_NVIDIA_STREAM_RETRIES", "3"))
+
+
 def _nvidia_stream(url: str, payload: dict, headers: dict,
-                   timeout: int = _NVIDIA_CHUNK_TIMEOUT, should_stop=None) -> str:
+                   timeout: int = _NVIDIA_CHUNK_TIMEOUT, should_stop=None,
+                   attempt: int = 0) -> str:
     """Собрать ответ из SSE-потока OpenAI-совместимого API.
 
     Формат: строки «data: {json}», конец — «data: [DONE]». Нас интересует
@@ -264,6 +270,17 @@ def _nvidia_stream(url: str, payload: dict, headers: dict,
                     parts.append(piece)
     except urllib.error.HTTPError as e:
         body_txt = e.read().decode("utf-8", "replace")
+        # 529 «Service temporarily overloaded» — не отказ, а «зайдите позже».
+        # Обвязка _http_post_json умеет ждать и повторять, но ПОТОК ходит своим
+        # urlopen и этой защиты не имел: перегрузка уводила запрос на обычный
+        # путь, где длинную генерацию встречает 504. Ждём и пробуем снова.
+        if e.code in (429, 503, 529) and attempt < _STREAM_RETRIES:
+            wait = min(_retry_after(e, body_txt, default=6 * (attempt + 1)), 30)
+            log.info("NVIDIA: %s, жду %.0f c и повторяю поток (%d/%d)",
+                     e.code, wait, attempt + 1, _STREAM_RETRIES)
+            time.sleep(wait)
+            return _nvidia_stream(url, payload, headers, timeout,
+                                  should_stop, attempt + 1)
         raise RuntimeError(f"HTTP {e.code} от {url}: {body_txt[:300]}") from e
     except urllib.error.URLError as e:
         raise RuntimeError(f"Не удалось подключиться к {url}: {e.reason}") from e
@@ -509,6 +526,15 @@ class NvidiaProvider(_KeyProviderMixin):
                 except Exception as e:  # noqa: BLE001
                     if _nvidia_not_entitled(e) or _is_rate_limit(e):
                         raise
+                    if is_overloaded(e):
+                        # Повторы в потоке уже исчерпаны: NVIDIA занята всерьёз.
+                        # Идти после этого обычным запросом бессмысленно — он
+                        # получит то же самое либо провисит до 504 у шлюза, и
+                        # всё это время встреча ждёт протокола. Отдаём ошибку
+                        # сразу, чтобы цепочка ушла к следующему движку.
+                        raise RuntimeError(
+                            "NVIDIA перегружена (529) и не отвечает даже "
+                            f"потоком: {e}") from e
                     if n + 1 < len(attempts):
                         log.info("NVIDIA: поток с response_format не удался "
                                  "(%s), пробую без него", e)

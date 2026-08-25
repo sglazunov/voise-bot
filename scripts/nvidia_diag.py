@@ -72,15 +72,42 @@ def main() -> int:
     base = {"model": model, "messages": [{"role": "user", "content": PROMPT}],
             "max_tokens": 4000, "temperature": 0.2}
 
-    for step, payload in (
-            ("2. поток + response_format", {**base, "response_format": {"type": "json_object"}}),
-            ("3. поток без response_format", dict(base))):
-        t = time.time()
-        try:
-            text = llm_nvidia._nvidia_stream(URL, payload, headers)
-            _say(step, True, f"получено {len(text)} символов", time.time() - t)
-        except Exception as e:                          # noqa: BLE001
-            _say(step, False, str(e)[:300], time.time() - t)
+    # Повторы отключаем: диагностике нужен ПЕРВЫЙ ответ, а не итог после пауз.
+    saved_retries = llm_nvidia._STREAM_RETRIES
+    llm_nvidia._STREAM_RETRIES = 0
+    try:
+        for step, payload in (
+                ("2. поток + response_format", {**base, "response_format": {"type": "json_object"}}),
+                ("3. поток без response_format", dict(base))):
+            t = time.time()
+            try:
+                text = llm_nvidia._nvidia_stream(URL, payload, headers, timeout=90)
+                _say(step, True, f"получено {len(text)} символов", time.time() - t)
+            except Exception as e:                      # noqa: BLE001
+                _say(step, False, str(e)[:300], time.time() - t)
+
+        # Перегружена ли ИМЕННО эта модель. В каталоге их шестьдесят с лишним, и
+        # заняты они по-разному: если свободна другая, движок можно вернуть в
+        # строй сменой модели, не дожидаясь, пока разгрузится текущая.
+        print("")
+        print("Короткая проба других моделей каталога (перегружена одна или все):")
+        short = {"messages": [{"role": "user", "content": "Ответь одним словом: привет"}],
+                 "max_tokens": 16, "temperature": 0}
+        free = []
+        for mid in models[:8]:
+            t = time.time()
+            try:
+                llm_nvidia._nvidia_stream(URL, {**short, "model": mid}, headers, timeout=60)
+                free.append(mid)
+                _say(f"   {mid}", True, "отвечает", time.time() - t)
+            except Exception as e:                      # noqa: BLE001
+                _say(f"   {mid}", False, str(e)[:120], time.time() - t)
+        if free:
+            print("")
+            print(f"Свободны: {', '.join(free)}")
+            print("Любую из них можно выбрать движком на странице «Нейросети».")
+    finally:
+        llm_nvidia._STREAM_RETRIES = saved_retries
 
     t = time.time()
     tmo = _nvidia_timeout(base["max_tokens"])
