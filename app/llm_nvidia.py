@@ -236,6 +236,10 @@ _STREAM_RETRIES = int(os.getenv("VTX_NVIDIA_STREAM_RETRIES", "6"))
 _STREAM_RETRY_MAX_WAIT = int(os.getenv("VTX_NVIDIA_STREAM_RETRY_WAIT", "60"))
 # Сколько ЗАПАСНЫХ моделей того же ключа пробовать, когда текущая занята.
 _STANDBY_MODELS = int(os.getenv("VTX_NVIDIA_STANDBY_MODELS", "3"))
+# Разрешить ли замену на модель ДРУГОГО семейства. По умолчанию нет: см.
+# комментарий в _standby_models — чужая модель обошлась протоколу дороже, чем
+# уход к запасному движку.
+_STANDBY_ANY_FAMILY = os.getenv("VTX_NVIDIA_STANDBY_ANY", "0") == "1"
 
 
 def _family(model_id: str) -> str:
@@ -502,6 +506,11 @@ class NvidiaProvider(_KeyProviderMixin):
         # Поэтому берём лучшую из доступных по ключу, а имя из config —
         # только если каталог недоступен.
         self.model = model or nvidia_default_model(self.api_key)
+        # Выбрал ли модель ЧЕЛОВЕК. Если да, подменять её нельзя даже при
+        # перегрузке: движок выбирают за качество протокола, и «зато быстро
+        # ответило» — не тот размен, о котором просили. Подмена остаётся только
+        # для случая, когда модель подобрана автоматически.
+        self._model_chosen = bool(model)
 
     def _standby_models(self) -> list[str]:
         """Запасные модели того же ключа — на случай, когда занята текущая.
@@ -513,19 +522,25 @@ class NvidiaProvider(_KeyProviderMixin):
         после чего протокол уходит запасному ДВИЖКУ целиком. Но ключ-то живой и
         другие модели свободны: разумнее сменить модель, чем весь движок.
         """
+        if self._model_chosen:
+            return []                   # выбор человека не подменяем
         try:
             known = nvidia_usable_models(self.api_key) or nvidia_models(self.api_key)
         except Exception:               # noqa: BLE001 — запасной путь не обязан работать
             return []
         others = [m for m in known if m != self.model]
-        # СНАЧАЛА родня выбранной модели: у DeepSeek в каталоге несколько
-        # вариантов, и качество протокола у них близкое, а очередь — разная.
-        # Менять deepseek на nemotron ради скорости значит менять и то, ради
-        # чего движок выбирали; сперва пробуем остаться в семействе.
+        # Только родня выбранной модели. Проверено на боевом протоколе: подмена
+        # deepseek на nemotron-3-ultra дала протокол БЕЗ ЕДИНОЙ цитаты-основания
+        # — ноль подтверждённых задач из девяти, все с пометкой «проверьте».
+        # Это хуже, чем уйти к запасному движку: у Gemini доля неподтверждённых
+        # около четверти, а не сто процентов. Движок выбирают за качество, и
+        # менять модель на чужую ради того, чтобы «хоть что-то ответило», —
+        # ровно то, чего делать не надо.
         fam = _family(self.model)
         kin = [m for m in others if _family(m) == fam]
-        rest = [m for m in others if _family(m) != fam]
-        return (kin + rest)[:_STANDBY_MODELS]
+        if _STANDBY_ANY_FAMILY:
+            kin += [m for m in others if _family(m) != fam]
+        return kin[:_STANDBY_MODELS]
 
     def complete(self, prompt: str, max_tokens: int = 2000,
                  force_json: bool = True, should_stop=None) -> str:

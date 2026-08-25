@@ -135,6 +135,72 @@ def main() -> int:
                   "NVIDIA либо ключ исчерпан. Протоколы будет собирать "
                   "запасной движок, это штатное поведение.")
 
+        # Решающий замер для выбранной модели: 18 секунд на шестнадцать токенов
+        # можно объяснить двумя совсем разными вещами. Либо модель долго СТОИТ В
+        # ОЧЕРЕДИ, а потом печатает быстро — тогда она пригодна, надо лишь
+        # подождать. Либо она медленно ГЕНЕРИРУЕТ — тогда протокол на четыре
+        # тысячи токенов не соберётся за разумное время ни при каком терпении.
+        # Различить можно только измерив отдельно ожидание первого куска и
+        # скорость после него.
+        if dict(free).get(default) is not None:
+            print("")
+            print(f"Замер модели {default}: сколько ждать первый кусок и как "
+                  "быстро идут остальные…")
+            t0 = time.time()
+            first_at = None
+            got = 0
+            try:
+                payload = {"model": default, "stream": True, "max_tokens": 300,
+                           "temperature": 0.2,
+                           "messages": [{"role": "user", "content":
+                                         "Опиши по пунктам, как проходит рабочая "
+                                         "встреча. Не менее двухсот слов."}]}
+                req = urllib.request.Request(URL, data=json.dumps(payload).encode(),
+                                             method="POST")
+                req.add_header("Content-Type", "application/json")
+                req.add_header("Accept", "text/event-stream")
+                for k, v in headers.items():
+                    req.add_header(k, v)
+                with urllib.request.urlopen(req, timeout=LONG_WAIT) as resp:
+                    for raw in resp:
+                        line = raw.decode("utf-8", "replace").strip()
+                        if not line.startswith("data:"):
+                            continue
+                        chunk = line[5:].strip()
+                        if chunk == "[DONE]":
+                            break
+                        try:
+                            d = json.loads(chunk)
+                        except ValueError:
+                            continue
+                        piece = ((d.get("choices") or [{}])[0].get("delta") or {}).get("content") or ""
+                        if piece:
+                            if first_at is None:
+                                first_at = time.time() - t0
+                            got += len(piece)
+                total = time.time() - t0
+                if first_at is None:
+                    print("   Ни одного куска не пришло.")
+                else:
+                    gen = max(0.1, total - first_at)
+                    speed = got / gen
+                    print(f"   Ожидание первого куска: {first_at:.1f} c")
+                    print(f"   Дальше: {got} символов за {gen:.1f} c "
+                          f"(~{speed:.0f} символов в секунду)")
+                    # Протокол — это тысячи символов, и таких запросов на длинной
+                    # встрече десятки.
+                    mins = (12000 / speed) / 60 if speed else 999
+                    print(f"   Протокол на 12 000 символов занял бы ~{mins:.0f} мин "
+                          "одним запросом.")
+                    if mins > 10:
+                        print("   Это слишком долго: модель не стоит в очереди, "
+                              "а медленно печатает. Терпение тут не поможет.")
+                    else:
+                        print("   Приемлемо: модель просто ждёт очереди, "
+                              "а печатает нормально — терпения хватит.")
+            except Exception as e:                      # noqa: BLE001
+                print(f"   Замер не удался: {str(e)[:200]}")
+
         if not long_run:
             print("")
             print("Проверка на длинном промпте (та, где возникают 529 и 504) "

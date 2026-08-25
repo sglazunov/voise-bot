@@ -185,10 +185,16 @@ class TestЗапаснаяМодель:
     свободны — правильнее сменить модель, а не движок."""
 
     def _prov(self, monkeypatch, busy, log):
-        p = llm_nvidia.NvidiaProvider(model="занята/модель", api_key="nvapi-x")
+        """Модель подобрана АВТОМАТИЧЕСКИ — только такую и можно подменять;
+        выбранную человеком не трогаем (см. отдельный тест ниже). Все варианты
+        одного семейства: замену ищем среди родни."""
+        monkeypatch.setattr(llm_nvidia, "nvidia_default_model",
+                            lambda key=None: "deepseek-ai/deepseek-занята")
+        p = llm_nvidia.NvidiaProvider(api_key="nvapi-x")
         monkeypatch.setattr(llm_nvidia, "nvidia_usable_models",
-                            lambda key=None: ["занята/модель", "свободна/раз",
-                                              "свободна/два"])
+                            lambda key=None: ["deepseek-ai/deepseek-занята",
+                                              "deepseek-ai/deepseek-раз",
+                                              "deepseek-ai/deepseek-два"])
 
         def fake(model, prompt, max_tokens, force_json, should_stop):
             log.append(model)
@@ -201,21 +207,22 @@ class TestЗапаснаяМодель:
 
     def test_занятая_модель_меняется_на_свободную(self, monkeypatch):
         log: list[str] = []
-        p = self._prov(monkeypatch, {"занята/модель"}, log)
+        p = self._prov(monkeypatch, {"deepseek-ai/deepseek-занята"}, log)
         assert p.complete("текст") == '{"ok": true}'
-        assert log == ["занята/модель", "свободна/раз"]
+        assert log == ["deepseek-ai/deepseek-занята", "deepseek-ai/deepseek-раз"]
 
     def test_имя_использованной_модели_запоминается(self, monkeypatch):
         """Шапка протокола берёт имя модели у провайдера — называть занятую
         было бы неправдой."""
-        p = self._prov(monkeypatch, {"занята/модель"}, [])
+        p = self._prov(monkeypatch, {"deepseek-ai/deepseek-занята"}, [])
         p.complete("текст")
-        assert p.model == "свободна/раз"
+        assert p.model == "deepseek-ai/deepseek-раз"
 
     def test_если_заняты_все_ошибка_пробрасывается(self, monkeypatch):
         log: list[str] = []
-        p = self._prov(monkeypatch,
-                       {"занята/модель", "свободна/раз", "свободна/два"}, log)
+        p = self._prov(monkeypatch, {"deepseek-ai/deepseek-занята",
+                                     "deepseek-ai/deepseek-раз",
+                                     "deepseek-ai/deepseek-два"}, log)
         with pytest.raises(RuntimeError):
             p.complete("текст")
         assert len(log) == 3, "должны быть перебраны все доступные модели"
@@ -251,9 +258,24 @@ class TestСемействоМодели:
         assert f("nvidia/nemotron-3-ultra-550b-a55b") == "nemotron"
         assert f("openai/gpt-oss-20b") == "gpt"
 
+    def test_чужое_семейство_не_берётся(self, monkeypatch):
+        """Боевая проверка: подмена deepseek на nemotron дала протокол без единой
+        цитаты-основания — ноль подтверждённых задач из девяти. Это хуже, чем
+        уйти к запасному движку, у которого неподтверждённых около четверти."""
+        monkeypatch.setattr(llm_nvidia, "nvidia_default_model",
+                            lambda key=None: "deepseek-ai/deepseek-v4-flash-0731")
+        p = llm_nvidia.NvidiaProvider(api_key="nvapi-x")
+        monkeypatch.setattr(llm_nvidia, "nvidia_usable_models", lambda key=None: [
+            "deepseek-ai/deepseek-v4-flash-0731",
+            "nvidia/nemotron-3-ultra-550b-a55b",
+            "openai/gpt-oss-20b",
+        ])
+        assert p._standby_models() == [], "чужие модели брать нельзя"
+
     def test_родня_пробуется_первой(self, monkeypatch):
-        p = llm_nvidia.NvidiaProvider(model="deepseek-ai/deepseek-v4-flash-0731",
-                                      api_key="nvapi-x")
+        monkeypatch.setattr(llm_nvidia, "nvidia_default_model",
+                            lambda key=None: "deepseek-ai/deepseek-v4-flash-0731")
+        p = llm_nvidia.NvidiaProvider(api_key="nvapi-x")
         monkeypatch.setattr(llm_nvidia, "nvidia_usable_models", lambda key=None: [
             "nvidia/nemotron-3-ultra-550b-a55b",       # чужая, но первая в списке
             "deepseek-ai/deepseek-v4-flash-0731",      # текущая
@@ -266,3 +288,21 @@ class TestСемействоМодели:
         всегда лучше, чем собрать протокол чужой моделью."""
         assert llm_nvidia._STREAM_RETRIES >= 5
         assert llm_nvidia._STREAM_RETRIES * llm_nvidia._STREAM_RETRY_MAX_WAIT >= 240
+
+
+def test_выбранная_человеком_модель_не_подменяется(monkeypatch):
+    """Движок выбирают за качество протокола. Боевая проверка показала цену
+    подмены: nemotron вместо deepseek дал протокол без единой цитаты-основания —
+    ноль подтверждённых задач из девяти. Поэтому явный выбор неприкосновенен:
+    занята — ждём, не дождались — уходим к запасному ДВИЖКУ, но не к чужой
+    модели."""
+    monkeypatch.setattr(llm_nvidia, "nvidia_usable_models", lambda key=None: [
+        "deepseek-ai/deepseek-v4-flash-0731", "deepseek-ai/deepseek-r1"])
+    chosen = llm_nvidia.NvidiaProvider(model="deepseek-ai/deepseek-v4-flash-0731",
+                                       api_key="nvapi-x")
+    assert chosen._standby_models() == []
+
+    monkeypatch.setattr(llm_nvidia, "nvidia_default_model",
+                        lambda key=None: "deepseek-ai/deepseek-v4-flash-0731")
+    auto = llm_nvidia.NvidiaProvider(api_key="nvapi-x")
+    assert auto._standby_models() == ["deepseek-ai/deepseek-r1"]
