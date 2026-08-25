@@ -206,6 +206,22 @@ def _nvidia_timeout(max_tokens: int) -> int:
 # а не ко всей генерации.
 _NVIDIA_STREAM = os.getenv("VTX_NVIDIA_STREAM", "1") == "1"
 _NVIDIA_CHUNK_TIMEOUT = int(os.getenv("VTX_NVIDIA_CHUNK_TIMEOUT", "120"))
+# До ПЕРВОГО куска ждём дольше: модель сначала читает промпт целиком (на часовой
+# встрече это десятки тысяч символов) и только потом начинает отвечать. Куски
+# после этого идут часто, к ним применяется _NVIDIA_CHUNK_TIMEOUT.
+_NVIDIA_FIRST_TIMEOUT = int(os.getenv("VTX_NVIDIA_FIRST_TIMEOUT", "300"))
+
+
+def _looks_complete_json(text: str) -> bool:
+    """Разбирается ли накопленное как целый JSON-объект."""
+    t = (text or "").strip()
+    if not t.startswith("{") and not t.startswith("["):
+        return False
+    try:
+        json.loads(t)
+        return True
+    except ValueError:
+        return False
 
 
 def _nvidia_stream(url: str, payload: dict, headers: dict,
@@ -215,6 +231,7 @@ def _nvidia_stream(url: str, payload: dict, headers: dict,
     Формат: строки «data: {json}», конец — «data: [DONE]». Нас интересует
     choices[0].delta.content. Пустые строки и служебные поля пропускаем.
     """
+    first_timeout = max(timeout, _NVIDIA_FIRST_TIMEOUT)
     body = json.dumps({**payload, "stream": True}).encode("utf-8")
     req = urllib.request.Request(url, data=body, method="POST")
     req.add_header("Content-Type", "application/json")
@@ -226,7 +243,7 @@ def _nvidia_stream(url: str, payload: dict, headers: dict,
     try:
         # Ошибку сервер отдаёт обычным JSON, а не потоком; urllib поднимает её
         # как HTTPError до первой строки, поэтому парсер тела ошибки не видит.
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=first_timeout) as resp:
             for raw in resp:            # построчно: таймаут — на каждый кусок
                 if should_stop and should_stop():
                     raise GenerationCancelled()
@@ -250,12 +267,22 @@ def _nvidia_stream(url: str, payload: dict, headers: dict,
         raise RuntimeError(f"HTTP {e.code} от {url}: {body_txt[:300]}") from e
     except urllib.error.URLError as e:
         raise RuntimeError(f"Не удалось подключиться к {url}: {e.reason}") from e
+    text = "".join(parts)
     if not done:
-        # Поток кончился без «[DONE]» — это обрыв, а не короткий ответ. Отдать
-        # накопленное наверх нельзя: обрезанный JSON выглядит как готовый
-        # протокол, только без половины разделов. Пусть решает обычный запрос.
-        raise RuntimeError("поток оборван до конца ответа")
-    return "".join(parts)
+        # Поток кончился без «[DONE]». Обычно это обрыв, и отдавать наверх
+        # обрезанный JSON нельзя: он выглядит как готовый протокол, только без
+        # половины разделов. Но не всякий шлюз шлёт «[DONE]» — а мы просили
+        # JSON, и у него есть надёжный признак целости. Если накопленное
+        # разбирается как полный JSON, ответ пришёл до конца, и выбрасывать его
+        # ради обычного запроса (который на длинной генерации получит 504) —
+        # значит терять готовый результат на ровном месте.
+        if _looks_complete_json(text):
+            log.info("NVIDIA: поток закончился без [DONE], но ответ — целый "
+                     "JSON (%d символов); принимаю", len(text))
+            return text
+        raise RuntimeError(
+            f"поток оборван до конца ответа (получено {len(text)} символов)")
+    return text
 
 
 # «Function '<uuid>': Not found for account '<id>'» — единственный ответ,
@@ -464,23 +491,35 @@ class NvidiaProvider(_KeyProviderMixin):
         # передачи; всё прочее (сеть, неподдержанный stream) отдаём обычному
         # запросу, чтобы новый режим не отнял работающее.
         if _NVIDIA_STREAM:
-            try:
-                text = _nvidia_stream(url, payload, headers,
-                                      should_stop=should_stop)
-                if text.strip():
-                    return text.strip()
-            except GenerationCancelled:
-                raise                   # отмена — не повод пробовать иначе
-            except Exception as e:      # noqa: BLE001
-                if _nvidia_not_entitled(e) or _is_rate_limit(e):
-                    raise
-                # Молчать здесь нельзя. Дальше идёт обычный запрос, и на длинной
-                # генерации он ловит от шлюза NVIDIA 504 — именно эта 504 и
-                # попадала в шапку протокола, а настоящая причина (почему
-                # оборвался ПОТОК) не оставляла следа нигде.
-                log.warning("NVIDIA: поток не удался (%s), пробую обычным "
-                            "запросом — на длинном ответе шлюз, скорее всего, "
-                            "ответит 504", e)
+            # Второй заход — без response_format: не каждая модель в каталоге
+            # принимает его вместе со stream, а отказ по этой причине уводил
+            # запрос на обычный путь, где длинную генерацию ждёт 504.
+            attempts = [payload]
+            if force_json:
+                attempts.append({k: v for k, v in payload.items()
+                                 if k != "response_format"})
+            for n, pl in enumerate(attempts):
+                try:
+                    text = _nvidia_stream(url, pl, headers,
+                                          should_stop=should_stop)
+                    if text.strip():
+                        return text.strip()
+                except GenerationCancelled:
+                    raise               # отмена — не повод пробовать иначе
+                except Exception as e:  # noqa: BLE001
+                    if _nvidia_not_entitled(e) or _is_rate_limit(e):
+                        raise
+                    if n + 1 < len(attempts):
+                        log.info("NVIDIA: поток с response_format не удался "
+                                 "(%s), пробую без него", e)
+                        continue
+                    # Молчать здесь нельзя. Дальше идёт обычный запрос, и на
+                    # длинной генерации он ловит от шлюза NVIDIA 504 — именно
+                    # эта 504 и попадала в шапку протокола, а настоящая причина
+                    # (почему оборвался ПОТОК) не оставляла следа нигде.
+                    log.warning("NVIDIA: поток не удался (%s), пробую обычным "
+                                "запросом — на длинном ответе шлюз, скорее "
+                                "всего, ответит 504", e)
 
         if force_json:
             try:

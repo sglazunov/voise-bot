@@ -149,3 +149,29 @@ class TestОтменаСквозьОбёртки:
         rot = llm._RotatingProvider(Plain, None, [("k1", "")])
         assert rot.accepts_should_stop is False
         assert rot.complete("тест", should_stop=lambda: True) == "ok"
+
+
+class TestПотокБезDONE:
+    """Не всякий шлюз шлёт «[DONE]». Раньше такой поток считался оборванным, и
+    ГОТОВЫЙ ответ выбрасывался ради обычного запроса — а тот на длинной
+    генерации получает от NVIDIA 504. Мы просим JSON, и у него есть надёжный
+    признак целости: он разбирается целиком."""
+
+    def test_целый_json_принимается(self):
+        assert llm_nvidia._looks_complete_json('{"topics": [{"topic": "a"}]}')
+
+    def test_обрезанный_json_не_принимается(self):
+        assert not llm_nvidia._looks_complete_json('{"topics": [{"topic": "a"')
+
+    def test_просто_текст_не_принимается(self):
+        assert not llm_nvidia._looks_complete_json("почти готовый протокол")
+
+    def test_пусто_не_принимается(self):
+        assert not llm_nvidia._looks_complete_json("")
+
+
+def test_первый_кусок_ждём_дольше_остальных():
+    """Модель сначала читает промпт целиком — на часовой встрече это десятки
+    тысяч символов, и до первого куска проходит заметно больше времени, чем
+    между кусками потом."""
+    assert llm_nvidia._NVIDIA_FIRST_TIMEOUT > llm_nvidia._NVIDIA_CHUNK_TIMEOUT
