@@ -236,3 +236,33 @@ class TestЗапаснаяМодель:
         with pytest.raises(RuntimeError):
             p.complete("текст")
         assert log == ["модель"]
+
+
+class TestСемействоМодели:
+    """Движок выбирают за качество протокола. Значит и замену занятой модели
+    надо искать сначала СРЕДИ РОДНИ: у DeepSeek в каталоге несколько вариантов,
+    качество у них близкое, а очередь — разная. Менять deepseek на nemotron
+    ради скорости — менять то, ради чего движок и выбрали."""
+
+    def test_семейство_вычисляется(self):
+        f = llm_nvidia._family
+        assert f("deepseek-ai/deepseek-v4-flash-0731") == "deepseek"
+        assert f("deepseek-ai/deepseek-r1") == "deepseek"
+        assert f("nvidia/nemotron-3-ultra-550b-a55b") == "nemotron"
+        assert f("openai/gpt-oss-20b") == "gpt"
+
+    def test_родня_пробуется_первой(self, monkeypatch):
+        p = llm_nvidia.NvidiaProvider(model="deepseek-ai/deepseek-v4-flash-0731",
+                                      api_key="nvapi-x")
+        monkeypatch.setattr(llm_nvidia, "nvidia_usable_models", lambda key=None: [
+            "nvidia/nemotron-3-ultra-550b-a55b",       # чужая, но первая в списке
+            "deepseek-ai/deepseek-v4-flash-0731",      # текущая
+            "deepseek-ai/deepseek-r1",                 # родня
+        ])
+        assert p._standby_models()[0] == "deepseek-ai/deepseek-r1"
+
+    def test_ожидание_очереди_не_меньше_нескольких_минут(self):
+        """Протокол нужен через минуты, а не секунды: подождать очередь почти
+        всегда лучше, чем собрать протокол чужой моделью."""
+        assert llm_nvidia._STREAM_RETRIES >= 5
+        assert llm_nvidia._STREAM_RETRIES * llm_nvidia._STREAM_RETRY_MAX_WAIT >= 240

@@ -224,11 +224,33 @@ def _looks_complete_json(text: str) -> bool:
         return False
 
 
-# Сколько раз повторять поток, когда NVIDIA отвечает «перегружены». Их
-# бесплатный NIM отвечает так регулярно; пауза берётся из Retry-After.
-_STREAM_RETRIES = int(os.getenv("VTX_NVIDIA_STREAM_RETRIES", "3"))
+# Сколько раз повторять поток, когда NVIDIA отвечает «перегружены», и как долго
+# ждать между попытками. Их бесплатный NIM отвечает так регулярно.
+#
+# Терпения здесь намеренно много: протокол встречи не срочный — он нужен через
+# минуты, а не секунды. Подождать очередь выбранной модели почти всегда лучше,
+# чем собрать протокол чужой: движок выбирают за качество, и подмена ради
+# скорости обесценивает сам выбор. Шесть попыток с паузой до минуты дают около
+# пяти минут ожидания, и только потом начинается поиск замены.
+_STREAM_RETRIES = int(os.getenv("VTX_NVIDIA_STREAM_RETRIES", "6"))
+_STREAM_RETRY_MAX_WAIT = int(os.getenv("VTX_NVIDIA_STREAM_RETRY_WAIT", "60"))
 # Сколько ЗАПАСНЫХ моделей того же ключа пробовать, когда текущая занята.
-_STANDBY_MODELS = int(os.getenv("VTX_NVIDIA_STANDBY_MODELS", "2"))
+_STANDBY_MODELS = int(os.getenv("VTX_NVIDIA_STANDBY_MODELS", "3"))
+
+
+def _family(model_id: str) -> str:
+    """Семейство модели: «deepseek-ai/deepseek-v4-flash-0731» → «deepseek».
+
+    Нужно, чтобы при перегрузке искать замену СРЕДИ РОДНИ. Движок выбирают за
+    качество протокола, а оно у вариантов одного семейства близкое — в отличие
+    от чужой модели, пусть и более быстрой.
+    """
+    tail = (model_id or "").split("/")[-1].lower()
+    vendor = (model_id or "").split("/")[0].lower()
+    for part in (tail.split("-")[0], vendor.replace("-ai", "").replace("ai", "")):
+        if part:
+            return part
+    return tail
 
 
 def _nvidia_stream(url: str, payload: dict, headers: dict,
@@ -280,7 +302,8 @@ def _nvidia_stream(url: str, payload: dict, headers: dict,
         # urlopen и этой защиты не имел: перегрузка уводила запрос на обычный
         # путь, где длинную генерацию встречает 504. Ждём и пробуем снова.
         if e.code in (429, 503, 529) and attempt < _STREAM_RETRIES:
-            wait = min(_retry_after(e, body_txt, default=6 * (attempt + 1)), 30)
+            wait = min(_retry_after(e, body_txt, default=8 * (attempt + 1)),
+                       _STREAM_RETRY_MAX_WAIT)
             log.info("NVIDIA: %s, жду %.0f c и повторяю поток (%d/%d)",
                      e.code, wait, attempt + 1, _STREAM_RETRIES)
             time.sleep(wait)
@@ -494,7 +517,15 @@ class NvidiaProvider(_KeyProviderMixin):
             known = nvidia_usable_models(self.api_key) or nvidia_models(self.api_key)
         except Exception:               # noqa: BLE001 — запасной путь не обязан работать
             return []
-        return [m for m in known if m != self.model][:_STANDBY_MODELS]
+        others = [m for m in known if m != self.model]
+        # СНАЧАЛА родня выбранной модели: у DeepSeek в каталоге несколько
+        # вариантов, и качество протокола у них близкое, а очередь — разная.
+        # Менять deepseek на nemotron ради скорости значит менять и то, ради
+        # чего движок выбирали; сперва пробуем остаться в семействе.
+        fam = _family(self.model)
+        kin = [m for m in others if _family(m) == fam]
+        rest = [m for m in others if _family(m) != fam]
+        return (kin + rest)[:_STANDBY_MODELS]
 
     def complete(self, prompt: str, max_tokens: int = 2000,
                  force_json: bool = True, should_stop=None) -> str:

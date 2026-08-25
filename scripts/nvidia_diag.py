@@ -85,7 +85,15 @@ def main() -> int:
         print(f"Короткая проба моделей (по {SHORT_WAIT} c на модель) — кто вообще отвечает:")
         short = {"messages": [{"role": "user", "content": "Ответь одним словом: привет"}],
                  "max_tokens": 16, "temperature": 0}
-        probe = [default] + [m for m in models[:8] if m != default]
+        # Родня выбранной модели идёт в пробу целиком: если занята текущая, но
+        # свободна соседняя того же семейства, качество протокола не пострадает.
+        from app.llm_nvidia import _family
+        fam = _family(default)
+        kin = [m for m in models if _family(m) == fam and m != default]
+        others = [m for m in models if _family(m) != fam][:6]
+        probe = [default] + kin + others
+        if kin:
+            print(f"(в каталоге есть родня «{fam}»: {len(kin)} шт. — пробуем их первыми)")
         free: list[tuple[str, float]] = []
         for mid in probe:
             t = time.time()
@@ -108,6 +116,10 @@ def main() -> int:
             print("Отвечают быстро: " + (", ".join(fast) or "—"))
             if slow:
                 print("Отвечают медленно (очередь): " + ", ".join(slow))
+            kin_fast = [m for m in fast if _family(m) == fam and m != default]
+            if kin_fast:
+                print(f"Свободная родня «{fam}»: {', '.join(kin_fast)} — "
+                      "качество протокола у них близкое к текущей модели.")
             cur = dict(free).get(default)
             if cur is None:
                 print(f"Текущая модель ({default}) НЕ отвечает, а другие — да. "
