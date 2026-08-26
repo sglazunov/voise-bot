@@ -38,13 +38,20 @@ LONG_PROMPT = ("Ниже — фрагмент рабочей встречи. В�
                + ("Обсудили сроки, бюджет, дизайн, тесты, найм и релиз. " * 200))
 
 
-def _key(user: str | None) -> str:
+def _keys(user: str | None) -> list[str]:
+    """ВСЕ ключи команды. Права проверяются у каждого ключа отдельно: одна и та
+    же модель может быть выдана одному ключу и не выдана другому, а при ротации
+    запросы идут по всем."""
+    out = []
     if user:
         from app import user_creds
-        entries = user_creds.load(user).get("nvidia") or []
-        if entries:
-            return entries[0].get("key") or ""
-    return config.NVIDIA_API_KEY or ""
+        for e in user_creds.load(user).get("nvidia") or []:
+            k = e.get("key") or ""
+            if k:
+                out.append(k)
+    if not out and config.NVIDIA_API_KEY:
+        out.append(config.NVIDIA_API_KEY)
+    return out
 
 
 def _say(step: str, ok: bool, detail: str, secs: float) -> None:
@@ -61,12 +68,29 @@ def main() -> int:
     long_run = "--long" in sys.argv
     all_run = "--all" in sys.argv
     user = args[0] if args else None
-    key = _key(user)
-    if not key:
+    keys = _keys(user)
+    if not keys:
         print("Ключ NVIDIA не найден. Укажите логин команды первым аргументом.")
         return 2
-    print(f"Ключ: …{key[-6:]}   поток включён: {llm_nvidia._NVIDIA_STREAM}")
+    print(f"Ключей: {len(keys)}   поток включён: {llm_nvidia._NVIDIA_STREAM}")
+    rc = 0
+    for n, key in enumerate(keys, 1):
+        print("")
+        print("=" * 70)
+        print(f"КЛЮЧ {n} из {len(keys)}: …{key[-6:]}")
+        print("=" * 70)
+        rc = _check(key, long_run=long_run, all_run=all_run) or rc
+    print("")
+    print("Читать так: 404 «not found for account» — модель ключу НЕ ВЫДАНА, "
+          "ждать бесполезно, нужна другая. 529 «Overloaded» или молчание до "
+          "таймаута — занят инференс, ключ и права ни при чём, помогает "
+          "терпение. Права у КАЖДОГО ключа свои: модель, недоступная одному, "
+          "может работать у второго.")
+    return rc
 
+
+def _check(key: str, long_run: bool, all_run: bool) -> int:
+    """Полная проверка ОДНОГО ключа."""
     t = time.time()
     try:
         models = llm_nvidia.nvidia_models(key)
@@ -258,12 +282,6 @@ def main() -> int:
     finally:
         llm_nvidia._STREAM_RETRIES = saved
 
-    print("")
-    print("Читать так: 529 «Overloaded» — занят инференс NVIDIA, ключ и права "
-          "ни при чём. Молчание до таймаута — тоже перегрузка, только без "
-          "ответа. Сбоит лишь шаг с response_format — мешает он. Проходит "
-          "поток, но не обычный запрос — так и задумано, длинный ответ живёт "
-          "только в потоке.")
     return 0
 
 
