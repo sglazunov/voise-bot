@@ -570,7 +570,24 @@ class NvidiaProvider(_KeyProviderMixin):
         except GenerationCancelled:
             raise
         except Exception as e:          # noqa: BLE001
-            if not is_overloaded(e) or _nvidia_not_entitled(e) or _is_rate_limit(e):
+            if _nvidia_not_entitled(e):
+                # Модель ключу не выдана. Каталог NVIDIA (шесть десятков имён)
+                # НЕ равен списку того, что ключ может вызвать, и выбрать в
+                # интерфейсе можно недоступное. Уходить из-за этого к запасному
+                # движку неправильно: у ключа есть рабочая модель, надо просто
+                # взять её — и сказать об этом вслух, иначе настройка так и
+                # останется неверной.
+                fallback = nvidia_default_model(self.api_key)
+                if fallback and fallback != self.model:
+                    log.warning("NVIDIA: модель %s этому ключу не выдана — "
+                                "перехожу на доступную %s. Поменяйте выбор на "
+                                "странице «Нейросети».", self.model, fallback)
+                    text = self._complete_one(fallback, prompt, max_tokens,
+                                              force_json, should_stop)
+                    self.model = fallback
+                    return text
+                raise
+            if not is_overloaded(e) or _is_rate_limit(e):
                 raise
             for alt in self._standby_models():
                 log.warning("NVIDIA: модель %s занята (%s) — пробую %s",
@@ -596,6 +613,20 @@ class NvidiaProvider(_KeyProviderMixin):
 
     def _complete_one(self, model: str, prompt: str, max_tokens: int,
                       force_json: bool, should_stop) -> str:
+        try:
+            return self._request(model, prompt, max_tokens, force_json, should_stop)
+        except GenerationCancelled:
+            raise
+        except Exception as e:          # noqa: BLE001
+            # Имя модели в тексте ошибки обязательно: шапка протокола
+            # показывала «nvidia: HTTP 404 …», и понять, какая модель не выдана
+            # ключу, было нельзя — а именно это и надо чинить.
+            if model and model not in str(e):
+                raise type(e)(f"модель {model}: {e}") from e
+            raise
+
+    def _request(self, model: str, prompt: str, max_tokens: int,
+                 force_json: bool, should_stop) -> str:
         url = "https://integrate.api.nvidia.com/v1/chat/completions"
         payload = {
             "model": model,

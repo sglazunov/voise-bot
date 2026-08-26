@@ -330,3 +330,39 @@ class TestБюджетОжидания:
         worst = llm_nvidia._STREAM_RETRIES * llm_nvidia._STREAM_RETRY_MAX_WAIT
         assert worst >= llm_nvidia._NVIDIA_WAIT_BUDGET, (
             "повторы должны успевать упереться в бюджет, а не заканчиваться раньше")
+
+
+class TestМодельНеВыданаКлючу:
+    """Каталог NVIDIA (шесть десятков имён) НЕ равен списку того, что ключ может
+    вызвать: выбрать в интерфейсе можно недоступное, и тогда приходит 404
+    «Function … not found for account». Уходить из-за этого к запасному движку
+    неправильно — у ключа есть рабочая модель."""
+
+    def test_переходим_на_доступную_модель(self, monkeypatch):
+        monkeypatch.setattr(llm_nvidia, "nvidia_default_model",
+                            lambda key=None: "deepseek-ai/deepseek-v4-flash-0731")
+        p = llm_nvidia.NvidiaProvider(model="чужая/модель", api_key="nvapi-x")
+        seen: list[str] = []
+
+        def fake(model, prompt, max_tokens, force_json, should_stop):
+            seen.append(model)
+            if model == "чужая/модель":
+                raise RuntimeError("HTTP 404: Function 'x' not found for account")
+            return '{"ok": true}'
+
+        monkeypatch.setattr(p, "_request", fake)
+        assert p.complete("текст") == '{"ok": true}'
+        assert seen == ["чужая/модель", "deepseek-ai/deepseek-v4-flash-0731"]
+        assert p.model == "deepseek-ai/deepseek-v4-flash-0731"
+
+    def test_имя_модели_попадает_в_ошибку(self, monkeypatch):
+        """Шапка протокола показывала «nvidia: HTTP 404 …» — какая модель не
+        выдана ключу, понять было нельзя, а чинить надо именно это."""
+        p = llm_nvidia.NvidiaProvider(model="чужая/модель", api_key="nvapi-x")
+
+        def boom(*a, **k):
+            raise RuntimeError("HTTP 500: что-то пошло не так")
+
+        monkeypatch.setattr(p, "_request", boom)
+        with pytest.raises(RuntimeError, match="чужая/модель"):
+            p._complete_one("чужая/модель", "текст", 100, True, None)

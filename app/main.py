@@ -85,6 +85,7 @@ def _engine_list(user_keys: dict | None = None) -> list[dict]:
             # и только пока проверка не прошла — весь каталог. Каталог
             # перечисляет всё опубликованное, а аккаунту выдана лишь часть.
             models = llm.nvidia_usable_models(key or None)
+            verified = models is not None
             if models is None:
                 # Проверки ещё нет — запускаем её в фоне и пока показываем
                 # каталог. Иначе список навсегда оставался бы каталогом:
@@ -94,8 +95,15 @@ def _engine_list(user_keys: dict | None = None) -> list[dict]:
                 models = llm.nvidia_models(key or None)
             if models:
                 for m in models:
+                    # Каталог NVIDIA НЕ равен списку того, что ключ может
+                    # вызвать. Пока перебор не прошёл, показывается каталог, и
+                    # выбранная из него модель может ответить 404 «not found
+                    # for account» — уже в момент сборки протокола, когда
+                    # встреча записана. Помечаем, чтобы выбор был осознанным.
                     engines.append({"value": f"nvidia:{m}",
-                                    "label": f"NVIDIA · {m}"})
+                                    "label": (f"NVIDIA · {m}" if verified
+                                              else f"NVIDIA · {m} (доступ не проверен)"),
+                                    "verified": verified})
             else:
                 engines.append({"value": "nvidia",
                                 "label": f"NVIDIA · {config.NVIDIA_MODEL} (по умолчанию)"})
