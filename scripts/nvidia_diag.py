@@ -2,7 +2,10 @@
 """Почему NVIDIA не отвечает: пробуем по одному способу и печатаем, что вышло.
 
 Запуск в контейнере:
-    docker compose exec app python scripts/nvidia_diag.py <логин> [--long]
+    docker compose exec app python scripts/nvidia_diag.py <логин> [--all] [--long]
+
+  --all   перебрать ВЕСЬ каталог и выписать, что ключ реально может вызвать
+  --long  тяжёлая проверка на длинном промпте (минуты)
 
 Логин нужен, чтобы взять ключ команды из хранилища; без него берётся
 NVIDIA_API_KEY из окружения. Ключ нигде не печатается.
@@ -56,6 +59,7 @@ def _stream(payload: dict, headers: dict, wait: int) -> str:
 def main() -> int:
     args = [a for a in sys.argv[1:] if not a.startswith("-")]
     long_run = "--long" in sys.argv
+    all_run = "--all" in sys.argv
     user = args[0] if args else None
     key = _key(user)
     if not key:
@@ -82,7 +86,8 @@ def main() -> int:
     saved, llm_nvidia._STREAM_RETRIES = llm_nvidia._STREAM_RETRIES, 0
     try:
         print("")
-        print(f"Короткая проба моделей (по {SHORT_WAIT} c на модель) — кто вообще отвечает:")
+        what = "ВСЕГО каталога" if all_run else "нескольких моделей"
+        print(f"Проба {what} (по {SHORT_WAIT} c на модель) — кто вообще отвечает:")
         short = {"messages": [{"role": "user", "content": "Ответь одним словом: привет"}],
                  "max_tokens": 16, "temperature": 0}
         # Родня выбранной модели идёт в пробу целиком: если занята текущая, но
@@ -92,6 +97,11 @@ def main() -> int:
         kin = [m for m in models if _family(m) == fam and m != default]
         others = [m for m in models if _family(m) != fam][:6]
         probe = [default] + kin + others
+        if all_run:
+            # Полный перебор каталога: только он показывает, что ключ РЕАЛЬНО
+            # может вызвать. Каталог этому не равен — модель может быть в
+            # списке и отвечать 404 «not found for account».
+            probe = [default] + [m for m in models if m != default]
         if kin:
             print(f"(в каталоге есть родня «{fam}»: {len(kin)} шт. — пробуем их первыми)")
         free: list[tuple[str, float]] = []
