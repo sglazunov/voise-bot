@@ -18,6 +18,7 @@
 """
 from __future__ import annotations
 
+import pathlib
 import sys
 import time
 
@@ -28,17 +29,26 @@ from app.jobs import STATUS_DONE, store                 # noqa: E402
 
 
 def _transcript(user: str, job_id: str | None) -> tuple[str, str]:
-    jobs = [j for j in store.list(user) if j.status == STATUS_DONE]
+    # Ищем по ВСЕМ задачам, а не по одному логину: задачи принадлежат команде,
+    # и логин, под которым запускают скрипт, может ей не совпадать. Фильтр по
+    # владельцу тут ничего не защищает — скрипт и так запускают на сервере.
+    jobs = [j for j in store.list() if j.status == STATUS_DONE]
     if job_id:
         jobs = [j for j in jobs if j.id == job_id]
     if not jobs:
-        raise SystemExit("Готовых задач не нашлось — укажите job_id явно.")
-    job = jobs[0]
-    for fmt in ("txt", "plain"):
-        p = store.result_path(job.id, fmt)
-        if p.exists():
-            return job.filename, p.read_text(encoding="utf-8")
-    raise SystemExit(f"У задачи {job.id} нет файла расшифровки.")
+        allj = store.list()
+        print(f"Готовых задач не нашлось. Всего задач в базе: {len(allj)}")
+        for j in allj[:10]:
+            print(f"  {j.id}  {j.status:10} владелец={j.owner}  {j.filename[:50]}")
+        raise SystemExit("Укажите job_id явно или задайте --file <путь к .txt>.")
+    # Берём ту, у которой расшифровка на диске: у старых задач её мог убрать
+    # ретеншн, и падать из-за этого посреди списка незачем.
+    for job in jobs:
+        for fmt in ("txt", "plain"):
+            f = store.result_path(job.id, fmt)
+            if f.exists():
+                return job.filename, f.read_text(encoding="utf-8")
+    raise SystemExit("Ни у одной готовой задачи не осталось файла расшифровки.")
 
 
 def _score(res: dict) -> tuple[int, int, int, int]:
@@ -65,7 +75,14 @@ def main() -> int:
     if not models:
         raise SystemExit("Укажите движки: --models nvidia:модель,gemini")
 
-    name, text = _transcript(user, job_id)
+    src = None
+    for i, a in enumerate(sys.argv):
+        if a == "--file" and i + 1 < len(sys.argv):
+            src = sys.argv[i + 1]
+    if src:
+        name, text = src, pathlib.Path(src).read_text(encoding="utf-8")
+    else:
+        name, text = _transcript(user, job_id)
     keys = user_creds.load(user)
     print(f"Встреча: {name}")
     print(f"Расшифровка: {len(text)} символов")
