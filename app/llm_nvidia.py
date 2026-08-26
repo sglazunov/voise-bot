@@ -246,6 +246,24 @@ _STANDBY_MODELS = int(os.getenv("VTX_NVIDIA_STANDBY_MODELS", "3"))
 _STANDBY_ANY_FAMILY = os.getenv("VTX_NVIDIA_STANDBY_ANY", "0") == "1"
 
 
+# Размышлять ли reasoning-моделям вслух. У DeepSeek v4 и подобных есть режим
+# «thinking»: модель сначала рассуждает, потом отвечает. Нам нужен строгий JSON
+# протокола, рассуждения в него не идут — а токены и время тратятся, и на
+# бесплатном тарифе это прямо приближает лимит. Включить: VTX_NVIDIA_THINKING=1.
+_NVIDIA_THINKING = os.getenv("VTX_NVIDIA_THINKING", "0") == "1"
+# Модели, которые понимают этот переключатель. Слать его всем подряд нельзя:
+# незнакомый extra_body часть моделей отвергает целиком.
+_THINKING_MODELS = ("deepseek-v4", "deepseek-r", "qwen3", "nemotron-3-nano-omni")
+
+
+def _thinking_args(model_id: str) -> dict:
+    """Аргументы шаблона для reasoning-моделей — или пусто."""
+    low = (model_id or "").lower()
+    if not any(t in low for t in _THINKING_MODELS):
+        return {}
+    return {"chat_template_kwargs": {"thinking": _NVIDIA_THINKING}}
+
+
 def _family(model_id: str) -> str:
     """Семейство модели: «deepseek-ai/deepseek-v4-flash-0731» → «deepseek».
 
@@ -661,6 +679,7 @@ class NvidiaProvider(_KeyProviderMixin):
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": max_tokens,
             "temperature": 0.1,
+            **_thinking_args(model),
         }
         headers = {"Authorization": f"Bearer {self.api_key}"}
         # Обычный запрос — запасной путь, и ждать его дольше бюджета нельзя:

@@ -404,3 +404,20 @@ class TestНедоступнаяМодельЗапоминается:
         llm_nvidia.nvidia_mark_denied("nvapi-первый", "спорная/модель")
         assert llm_nvidia.nvidia_default_model("nvapi-первый") == "запасная/модель"
         assert llm_nvidia.nvidia_default_model("nvapi-второй") == "спорная/модель"
+
+
+class TestРежимРазмышления:
+    """У DeepSeek v4 и подобных есть режим «thinking»: модель сначала рассуждает,
+    потом отвечает. Протоколу нужен строгий JSON — рассуждения в него не идут, а
+    токены и время тратятся, и на бесплатном тарифе это приближает лимит."""
+
+    def test_переключатель_уходит_только_знающим_моделям(self):
+        assert "chat_template_kwargs" in llm_nvidia._thinking_args(
+            "deepseek-ai/deepseek-v4-flash-0731")
+        # Незнакомый extra_body часть моделей отвергает целиком — не шлём.
+        assert llm_nvidia._thinking_args("nvidia/nemotron-3-ultra-550b-a55b") == {}
+        assert llm_nvidia._thinking_args("openai/gpt-oss-20b") == {}
+
+    def test_по_умолчанию_размышления_выключены(self):
+        args = llm_nvidia._thinking_args("deepseek-ai/deepseek-v4-flash-0731")
+        assert args["chat_template_kwargs"]["thinking"] is False
