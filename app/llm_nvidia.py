@@ -398,6 +398,11 @@ _nvidia_default_cache: dict[str, tuple[float, str]] = {}
 _NVIDIA_DEFAULT_TTL = 600.0     # 10 минут: каталог меняется днями, не минутами
 
 
+# Модели, ответившие «not found for account»: ключ → набор имён. Каталог NVIDIA
+# общий для всех, а права выдаются на ключ, и разница видна только по ответу.
+_nvidia_denied: dict[str, set[str]] = {}
+
+
 def nvidia_default_model(api_key: str | None = None) -> str:
     """Лучшая доступная модель: сначала проверенная по ключу, затем верхняя из
     каталога, и только если сети нет — имя из настроек.
@@ -414,14 +419,36 @@ def nvidia_default_model(api_key: str | None = None) -> str:
     hit = _nvidia_default_cache.get(ident)
     if hit and time.time() - hit[0] < _NVIDIA_DEFAULT_TTL:
         return hit[1]
+    denied = _nvidia_denied.get(ident) or set()
     usable = nvidia_usable_models(key)
-    model = usable[0] if usable else ""
-    if not model:
-        catalog = nvidia_models(key)
-        model = catalog[0] if catalog else ""
-    model = model or config.NVIDIA_MODEL
+    pool = [m for m in (usable or []) if m not in denied]
+    if not pool:
+        # Проверки ещё нет — берём каталог, но БЕЗ моделей, которые этому ключу
+        # уже отвечали «not found for account». Иначе умолчанием остаётся
+        # верхняя строка каталога, а она может быть недоступна: каталог у NVIDIA
+        # общий, а права выдаются на ключ. Так протокол уходил запасному движку
+        # с 404 при живом ключе и работающих соседних моделях.
+        pool = [m for m in nvidia_models(key) if m not in denied]
+    model = pool[0] if pool else config.NVIDIA_MODEL
     _nvidia_default_cache[ident] = (time.time(), model)
     return model
+
+
+def nvidia_mark_denied(api_key: str | None, model: str) -> None:
+    """Запомнить, что ЭТА модель ЭТОМУ ключу не выдана.
+
+    Один раз получив 404, ходить в неё снова незачем: ответ мгновенный, но
+    каждая такая попытка — это протокол, ушедший запасному движку. Список
+    живёт в памяти процесса: права меняются на стороне NVIDIA, и после
+    перезапуска правильно проверить заново.
+    """
+    key = api_key or config.NVIDIA_API_KEY
+    if not key or not model:
+        return
+    ident = _nvidia_key_id(key)
+    _nvidia_denied.setdefault(ident, set()).add(model)
+    # Умолчание могло указывать как раз на неё — пересчитаем при следующем спросе.
+    _nvidia_default_cache.pop(ident, None)
 
 
 def nvidia_ensure_verified(api_key: str | None = None) -> None:
@@ -571,6 +598,7 @@ class NvidiaProvider(_KeyProviderMixin):
             raise
         except Exception as e:          # noqa: BLE001
             if _nvidia_not_entitled(e):
+                nvidia_mark_denied(self.api_key, self.model)
                 # Модель ключу не выдана. Каталог NVIDIA (шесть десятков имён)
                 # НЕ равен списку того, что ключ может вызвать, и выбрать в
                 # интерфейсе можно недоступное. Уходить из-за этого к запасному

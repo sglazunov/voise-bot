@@ -366,3 +366,41 @@ class TestМодельНеВыданаКлючу:
         monkeypatch.setattr(p, "_request", boom)
         with pytest.raises(RuntimeError, match="чужая/модель"):
             p._complete_one("чужая/модель", "текст", 100, True, None)
+
+
+class TestНедоступнаяМодельЗапоминается:
+    """Каталог NVIDIA общий для всех, а права выдаются на КЛЮЧ. Модель может
+    стоять первой строкой каталога и отвечать 404 «not found for account» — так
+    и вышло с deepseek-v4-flash. Раньше она же оставалась умолчанием, и каждая
+    встреча уходила запасному движку при живом ключе и работающих соседях."""
+
+    def setup_method(self):
+        llm_nvidia._nvidia_denied.clear()
+        llm_nvidia._nvidia_default_cache.clear()
+
+    def test_умолчание_обходит_недоступную(self, monkeypatch):
+        monkeypatch.setattr(llm_nvidia, "nvidia_usable_models", lambda key=None: None)
+        monkeypatch.setattr(llm_nvidia, "nvidia_models",
+                            lambda key=None: ["нет/доступа", "есть/доступ"])
+        assert llm_nvidia.nvidia_default_model("nvapi-k") == "нет/доступа"
+
+        llm_nvidia.nvidia_mark_denied("nvapi-k", "нет/доступа")
+        assert llm_nvidia.nvidia_default_model("nvapi-k") == "есть/доступ"
+
+    def test_отметка_сбрасывает_кэш_умолчания(self, monkeypatch):
+        """Иначе умолчание десять минут продолжало бы указывать на недоступную."""
+        monkeypatch.setattr(llm_nvidia, "nvidia_usable_models", lambda key=None: None)
+        monkeypatch.setattr(llm_nvidia, "nvidia_models",
+                            lambda key=None: ["нет/доступа", "есть/доступ"])
+        llm_nvidia.nvidia_default_model("nvapi-k")          # кэш заполнен
+        llm_nvidia.nvidia_mark_denied("nvapi-k", "нет/доступа")
+        assert llm_nvidia._nvidia_key_id("nvapi-k") not in llm_nvidia._nvidia_default_cache
+
+    def test_запрет_свой_у_каждого_ключа(self, monkeypatch):
+        """Модель, недоступная одному ключу, может работать у второго."""
+        monkeypatch.setattr(llm_nvidia, "nvidia_usable_models", lambda key=None: None)
+        monkeypatch.setattr(llm_nvidia, "nvidia_models",
+                            lambda key=None: ["спорная/модель", "запасная/модель"])
+        llm_nvidia.nvidia_mark_denied("nvapi-первый", "спорная/модель")
+        assert llm_nvidia.nvidia_default_model("nvapi-первый") == "запасная/модель"
+        assert llm_nvidia.nvidia_default_model("nvapi-второй") == "спорная/модель"
