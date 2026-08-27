@@ -21,6 +21,7 @@ from __future__ import annotations
 import pathlib
 import sys
 import time
+import traceback
 
 sys.path.insert(0, "/app")
 
@@ -123,7 +124,11 @@ def main() -> int:
             print(f"{label[:44]:44} {topics:>5} {tasks:>7} {share:>14} {time.time() - t:>7.0f}c")
         except Exception as e:                          # noqa: BLE001
             print(f"{m[:44]:44} {'—':>5} {'—':>7} {'—':>14} {time.time() - t:>7.0f}c  "
-                  f"{str(e)[:100]}")
+                  f"{type(e).__name__}: {str(e)[:90]}")
+            # Место сбоя, а не только текст: «'str' object has no attribute
+            # 'get'» без кадра ничего не говорит о том, где именно чинить.
+            for fr in traceback.extract_tb(e.__traceback__)[-3:]:
+                print(f"      {fr.filename.split('/')[-1]}:{fr.lineno} в {fr.name}(): {fr.line}")
 
     print("")
     print("Смотреть в первую очередь на «подтверждено»: это доля пунктов с "
