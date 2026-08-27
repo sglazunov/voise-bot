@@ -53,17 +53,37 @@ _CHUNK_OVERLAP = 800
 _MAX_CHUNKS = 16
 
 def _extract_json(raw: str) -> dict:
-    """Parse the model's answer into a dict, tolerating code fences / stray text."""
+    """Разобрать ответ модели в словарь, стерпев ограду кода и лишний текст.
+
+    Лишнее бывает и ПОСЛЕ объекта: пояснение «Вот ваш протокол…», второй JSON,
+    следы размышлений. Раньше такой ответ падал с «Extra data», хотя сам
+    протокол в нём был целым, — и готовая работа модели выбрасывалась. Поэтому
+    берём ПЕРВЫЙ полный объект через raw_decode, а хвост игнорируем.
+    """
     raw = raw.strip()
     raw = re.sub(r"^```(?:json)?\s*", "", raw)
     raw = re.sub(r"\s*```$", "", raw).strip()
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", raw, re.DOTALL)
-        if not match:
-            raise
-        return json.loads(match.group(0))
+        pass
+    dec = json.JSONDecoder()
+    # Пробуем с каждой открывающей скобки: перед объектом тоже бывает текст.
+    for i, ch in enumerate(raw):
+        if ch != "{":
+            continue
+        try:
+            obj, _end = dec.raw_decode(raw, i)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict):
+            return obj
+    # Последняя попытка — жадный поиск от первой скобки до последней: так
+    # разбирается объект, внутри которого модель наделала мелких огрех.
+    match = re.search(r"\{.*\}", raw, re.DOTALL)
+    if not match:
+        raise json.JSONDecodeError("В ответе модели нет JSON-объекта", raw, 0)
+    return json.loads(match.group(0))
 
 
 def _split_chunks(text: str) -> list[str]:
