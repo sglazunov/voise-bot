@@ -122,6 +122,16 @@ def main() -> int:
             used = res.get("_model") or ""
             label = m if not used or used in m else f"{m} → {used}"
             print(f"{label[:44]:44} {topics:>5} {tasks:>7} {share:>14} {time.time() - t:>7.0f}c")
+            if not topics and not tasks:
+                # Пустой протокол при честно потраченных минутах — это либо
+                # модель не поняла задачу, либо ответ не разобрался. Без этой
+                # подсказки в таблице просто нули, и непонятно, что случилось.
+                print(f"      пусто. участники={len(res.get('participants') or [])} "
+                      f"решения={len(res.get('decisions') or [])} "
+                      f"итог={len(str(res.get('summary') or ''))} симв.")
+                for k in ("_warning", "_fallback", "analysis_error"):
+                    if res.get(k):
+                        print(f"      {k}: {str(res[k])[:160]}")
         except Exception as e:                          # noqa: BLE001
             print(f"{m[:44]:44} {'—':>5} {'—':>7} {'—':>14} {time.time() - t:>7.0f}c  "
                   f"{type(e).__name__}: {str(e)[:90]}")
