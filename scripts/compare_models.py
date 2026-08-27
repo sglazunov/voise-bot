@@ -61,24 +61,44 @@ def _score(res: dict) -> tuple[int, int, int, int]:
     return len(res.get("detailed") or []), len(res.get("tasks") or []), ok, total
 
 
+# Ключи, за которыми идёт ЗНАЧЕНИЕ. Без этого списка значение попадало в
+# позиционные аргументы и молча становилось job_id: скрипт искал задачу с
+# идентификатором «gemini,nvidia:…», не находил и отвечал «готовых задач не
+# нашлось» при восьмидесяти восьми готовых задачах в базе.
+_WITH_VALUE = ("--models", "--file")
+
+
+def _parse(argv: list[str]) -> tuple[list[str], dict[str, str]]:
+    pos: list[str] = []
+    opts: dict[str, str] = {}
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a in _WITH_VALUE and i + 1 < len(argv):
+            opts[a] = argv[i + 1]
+            i += 2
+            continue
+        if a.startswith("--"):
+            opts[a] = ""
+            i += 1
+            continue
+        pos.append(a)
+        i += 1
+    return pos, opts
+
+
 def main() -> int:
-    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    args, opts = _parse(sys.argv[1:])
     if not args:
         raise SystemExit("Укажите логин команды первым аргументом.")
     user = args[0]
     job_id = args[1] if len(args) > 1 else None
 
-    models = None
-    for i, a in enumerate(sys.argv):
-        if a == "--models" and i + 1 < len(sys.argv):
-            models = [m.strip() for m in sys.argv[i + 1].split(",") if m.strip()]
+    models = [m.strip() for m in (opts.get("--models") or "").split(",") if m.strip()]
     if not models:
         raise SystemExit("Укажите движки: --models nvidia:модель,gemini")
 
-    src = None
-    for i, a in enumerate(sys.argv):
-        if a == "--file" and i + 1 < len(sys.argv):
-            src = sys.argv[i + 1]
+    src = opts.get("--file")
     if src:
         name, text = src, pathlib.Path(src).read_text(encoding="utf-8")
     else:
