@@ -47,11 +47,15 @@ GUESS_URLS = (
     "https://openrouter.ai/api/v1",
     "https://api.openai.com/v1",
 )
-# Способы передать ключ. Bearer — почти везде; api-key ждёт MiMo от Xiaomi.
-AUTH_STYLES = ("bearer", "api-key", "x-api-key")
+# Способы передать ключ. Bearer — почти везде; api-key ждёт MiMo от Xiaomi;
+# «none» — свой сервер (vLLM, llama.cpp, LM Studio, Ollama), который обычно
+# вообще не спрашивает ключа.
+AUTH_STYLES = ("bearer", "api-key", "x-api-key", "none")
 
 
 def _auth_headers(style: str, key: str) -> dict:
+    if style == "none" or not key:
+        return {}
     if style == "bearer":
         return {"Authorization": f"Bearer {key}"}
     return {style: key}
@@ -93,10 +97,15 @@ def detect(key: str, base_url: str = "") -> dict:
     в ответ не попадает.
     """
     key = (key or "").strip()
-    if not key:
-        return {"ok": False, "error": "Пустой ключ."}
+    base_url = (base_url or "").strip()
+    if not key and not base_url:
+        # Без ключа можно подключить только СВОЙ сервер, и тогда нужен адрес:
+        # угадывать по пустому ключу нечего.
+        return {"ok": False,
+                "error": "Укажите ключ — или адрес API, если это ваш сервер "
+                         "без ключа (например http://vllm:8000/v1)."}
     hint, known_url = hint_for(key)
-    urls = [u for u in (base_url.strip(), known_url) if u] or list(GUESS_URLS)
+    urls = [u for u in (base_url, known_url) if u] or list(GUESS_URLS)
     for url in urls:
         for style in AUTH_STYLES:
             models = list_models(url, key, style)
@@ -105,11 +114,17 @@ def detect(key: str, base_url: str = "") -> dict:
                          _safe_url(url), len(models), style)
                 return {"ok": True, "base_url": url.rstrip("/"), "auth": style,
                         "models": models, "hint": hint}
+    if not base_url:
+        return {"ok": False, "hint": hint,
+                "error": "Ключ не подошёл ни к одному известному адресу. "
+                         "Укажите адрес API поставщика — обычно он оканчивается "
+                         "на /v1."}
     return {"ok": False, "hint": hint,
-            "error": ("Ключ не подошёл ни к одному известному адресу. "
-                      "Укажите адрес API поставщика — обычно он оканчивается "
-                      "на /v1." if not base_url else
-                      "По этому адресу ключ не принят: проверьте адрес и ключ.")}
+            "error": ("По этому адресу ответа нет. Проверьте адрес и ключ; для "
+                      "своего сервера убедитесь, что он отвечает на "
+                      f"{base_url.rstrip('/')}/models и доступен из контейнера "
+                      "приложения (localhost внутри контейнера — это САМ "
+                      "контейнер, а не хост).")}
 
 
 class CustomProvider(_KeyProviderMixin):

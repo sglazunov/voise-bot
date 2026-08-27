@@ -58,7 +58,7 @@ class TestОпределение:
         monkeypatch.setattr(llm_custom, "list_models",
                             lambda *a, **k: [])
         got = detect("мусор", "https://api.example.com/v1")
-        assert not got["ok"] and "не принят" in got["error"]
+        assert not got["ok"] and "Проверьте адрес и ключ" in got["error"]
 
     def test_пустой_ключ_не_ходит_в_сеть(self, monkeypatch):
         monkeypatch.setattr(llm_custom, "list_models", lambda *a, **k: pytest.fail(
@@ -120,3 +120,32 @@ class TestПровайдер:
         self._prov().complete("текст")
         assert len(calls) == 2
         assert "response_format" in calls[0] and "response_format" not in calls[1]
+
+
+class TestСвойСервер:
+    """Локальный vLLM, llama.cpp, LM Studio или Ollama обычно вообще не
+    спрашивает ключа — там достаточно адреса."""
+
+    def test_без_ключа_но_с_адресом_подключается(self, monkeypatch):
+        def fake(base_url, key, style, timeout=15):
+            # Свой сервер отвечает и без заголовка авторизации.
+            return ["deepseek-r1:8b"] if style == "none" else []
+        monkeypatch.setattr(llm_custom, "list_models", fake)
+        got = detect("", "http://vllm:8000/v1")
+        assert got["ok"] and got["auth"] == "none"
+        assert got["models"] == ["deepseek-r1:8b"]
+
+    def test_без_ключа_и_без_адреса_понятный_отказ(self):
+        got = detect("", "")
+        assert not got["ok"] and "адрес" in got["error"]
+
+    def test_заголовок_не_шлётся_когда_ключа_нет(self):
+        p = CustomProvider(api_key="", extra=json.dumps(
+            {"base_url": "http://vllm:8000/v1", "auth": "none", "model": "m"}))
+        assert p._headers() == {}
+
+    def test_подсказка_про_localhost_в_контейнере(self, monkeypatch):
+        """Частая ошибка: localhost внутри контейнера — это сам контейнер."""
+        monkeypatch.setattr(llm_custom, "list_models", lambda *a, **k: [])
+        got = detect("", "http://localhost:8000/v1")
+        assert "контейнер" in got["error"]

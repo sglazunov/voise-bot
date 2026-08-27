@@ -679,7 +679,9 @@ def connect_provider(body: ProviderKey, user: str = Depends(current_user)):
     extra = body.extra.strip()
     if provider not in config.KEY_PROVIDERS:
         raise HTTPException(400, f"Подключение по ключу не поддерживается для '{provider}'")
-    if not key:
+    # Свой сервер (vLLM, llama.cpp, Ollama, LM Studio) обычно ключа не
+    # спрашивает — там достаточно адреса.
+    if not key and not (provider == "custom" and extra):
         raise HTTPException(400, "Введите ключ")
     if provider == "yandex" and not extra:
         raise HTTPException(400, "Для YandexGPT укажите folder id (идентификатор каталога)")
