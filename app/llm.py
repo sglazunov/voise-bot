@@ -37,6 +37,7 @@ from .llm_base import (                 # noqa: F401 — часть публич
     GenerationCancelled, LLMProvider, _KeyProviderMixin,
     _http_post_json, _is_rate_limit, _retry_after, _safe_url,
 )
+from .llm_custom import CustomProvider  # noqa: F401 — часть публичного API
 from .llm_nvidia import (               # noqa: F401 — часть публичного API
     NvidiaProvider, nvidia_models, nvidia_probe_state, nvidia_start_verify,
     nvidia_usable_models, nvidia_default_model, nvidia_ensure_verified,
@@ -359,6 +360,7 @@ class GigaChatProvider:
 
 
 _PROVIDERS = {
+    "custom": CustomProvider,
     "ollama": OllamaProvider,
     "groq": GroqProvider,
     "nvidia": NvidiaProvider,

@@ -14,6 +14,11 @@ type Engine = { value: string; label: string };
 const EXTRA: Record<string, { label: string; ph: string } | undefined> = {
   yandex: { label: "Folder ID (каталог)", ph: "b1g..." },
   gigachat: { label: "Scope (необязательно)", ph: "GIGACHAT_API_PERS" },
+  // Универсальный провайдер: адрес нужен ТОЛЬКО для незнакомого поставщика.
+  // Ключи вида nvapi-…, gsk_…, sk-or-… узнаются по виду, адрес подставляется
+  // сам, а список моделей приходит от самого поставщика.
+  custom: { label: "Адрес API (если поставщик незнакомый)",
+            ph: "https://api.deepseek.com/v1 — можно оставить пустым" },
 };
 
 export default function Providers() {
@@ -144,6 +149,14 @@ function ProviderCard({ p, models, onChange, toast }:
           : <span className="chip" style={{ color: "var(--muted)" }}>не подключён</span>}
       </div>
 
+      {p.id === "custom" && (
+        <div className="text-[12px] mb-2" style={{ color: "var(--muted)" }}>
+          Вставьте ключ любого OpenAI-совместимого сервиса — DeepSeek, MiMo,
+          OpenRouter, OpenAI, свой сервер. Адрес, способ авторизации и список
+          моделей определятся сами; адрес ниже нужен, только если поставщик
+          незнакомый.
+        </div>
+      )}
       <label className="lbl">API-ключ</label>
       <input className="field" type="password" value={key} onChange={(e) => setKey(e.target.value)}
         placeholder={p.available ? "добавить ещё ключ" : "вставьте ключ"} />

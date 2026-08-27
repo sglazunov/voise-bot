@@ -125,6 +125,10 @@ OLLAMA_ENABLED = os.getenv("VTX_OLLAMA", "0") == "1"
 
 # Human-friendly labels shown in the UI provider picker.
 PROVIDER_LABELS = {
+    # Любой поставщик по одному ключу: адрес, способ авторизации и список
+    # моделей определяются сами. Нужен, потому что состав бесплатных моделей у
+    # поставщиков меняется, а писать новый класс под каждого — тупик.
+    "custom": "Любой провайдер по ключу (OpenAI-совместимый)",
     "ollama": "Локально · Ollama (бесплатно, оффлайн)",
     "groq": "Groq · Llama (бесплатно, облако)",
     "nvidia": "NVIDIA NIM · Kimi/DeepSeek/Qwen (бесплатно, ~40 запросов/мин)",
@@ -141,7 +145,9 @@ PROVIDER_LABELS = {
 # на двадцатиминутной встрече) — поэтому он больше НЕ первый. Ollama последняя:
 # на CPU-сервере локальный протокол считается десятки минут.
 # Переопределяется через VTX_PROVIDER_ORDER="ollama,groq,…".
-_default_order = "nvidia,gemini,groq,yandex,gigachat,anthropic,ollama"
+# «custom» первым: свой ключ подключают намеренно и под конкретную модель,
+# значит он и есть выбор пользователя. Остальные — как раньше.
+_default_order = "custom,nvidia,gemini,groq,yandex,gigachat,anthropic,ollama"
 PROVIDER_ORDER = [p.strip() for p in
                   os.getenv("VTX_PROVIDER_ORDER", _default_order).split(",")
                   if p.strip()]
@@ -178,7 +184,8 @@ PROVIDER_MODELS = {
 }
 
 # Providers configurable from the UI by an API key (+ optional extra field).
-KEY_PROVIDERS = {"anthropic", "groq", "nvidia", "gemini", "yandex", "gigachat"}
+KEY_PROVIDERS = {"anthropic", "groq", "nvidia", "gemini", "yandex", "gigachat",
+                 "custom"}
 
 # Сколько дней живёт ключ провайдера. Пока известен только у NVIDIA: бесплатный
 # `nvapi-…` выдаётся на полгода. Когда он истекает, протоколы начинают молча

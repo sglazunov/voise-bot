@@ -1,6 +1,7 @@
 """FastAPI app: web upload UI + REST API for transcription jobs."""
 from __future__ import annotations
 
+import json
 import os
 import re
 import time
@@ -70,6 +71,24 @@ def _engine_list(user_keys: dict | None = None) -> list[dict]:
                             "label": f"Локально · {config.OLLAMA_MODEL} (по умолчанию)"})
     for p in avail:
         if p == "ollama":
+            continue
+        if p == "custom":
+            # Список пришёл от самого поставщика при подключении ключа и лежит
+            # рядом с ним. Прибивать его в коде нельзя: у каждого поставщика он
+            # свой и меняется — ради этого универсальный провайдер и заведён.
+            seen: set[str] = set()
+            for cred in (user_keys or {}).get("custom") or []:
+                try:
+                    cfg = json.loads(cred.get("extra") or "{}")
+                except ValueError:
+                    continue
+                for m in cfg.get("models") or []:
+                    if m in seen:
+                        continue
+                    seen.add(m)
+                    engines.append({"value": f"custom:{m}", "label": f"Свой ключ · {m}"})
+            if not seen:
+                engines.append({"value": "custom", "label": "Свой ключ · по умолчанию"})
             continue
         if p == "nvidia":
             # Каталог NVIDIA — сотня моделей и он меняется, поэтому список
@@ -664,6 +683,32 @@ def connect_provider(body: ProviderKey, user: str = Depends(current_user)):
         raise HTTPException(400, "Введите ключ")
     if provider == "yandex" and not extra:
         raise HTTPException(400, "Для YandexGPT укажите folder id (идентификатор каталога)")
+
+    if provider == "custom":
+        # Один ключ — и всё остальное выясняется само: адрес API, способ
+        # авторизации и список моделей. Так не нужен отдельный класс под
+        # каждого поставщика: их состав моделей меняется, а NVIDIA за неделю
+        # дважды поменяла бесплатный набор и отобрала DeepSeek.
+        #
+        # В `extra` пользователь может передать адрес, если поставщик незнакомый
+        # (по виду ключа угадываются NVIDIA, Groq, OpenRouter и другие).
+        from .llm_custom import detect
+        found = detect(key, extra)
+        if not found.get("ok"):
+            raise HTTPException(400, found.get("error") or "Ключ не подошёл.")
+        models = found["models"]
+        extra = json.dumps({"base_url": found["base_url"], "auth": found["auth"],
+                            "model": models[0], "models": models[:200]},
+                           ensure_ascii=False)
+        user_creds.add(user, provider, key, extra)
+        where = found["hint"] or found["base_url"]
+        return {"ok": True, "connected": provider,
+                "note": (f"Ключ принят: {where}, доступно моделей — "
+                         f"{len(models)}. Модель по умолчанию — «{models[0]}»; "
+                         "сменить можно в «Движке протокола»."),
+                "keys": user_creds.counts(user).get(provider, 1),
+                "models": models[:200],
+                "providers": _provider_list(user_creds.load(user))}
 
     # Verify the key with a cheap non-JSON ping BEFORE saving, so a bad key
     # fails fast and nothing is persisted.

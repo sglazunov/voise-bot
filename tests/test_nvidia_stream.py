@@ -10,7 +10,7 @@
 """
 import json
 import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
@@ -55,7 +55,10 @@ class _Handler(BaseHTTPRequestHandler):
 
 @pytest.fixture(scope="module")
 def server():
-    srv = HTTPServer(("127.0.0.1", 0), _Handler)
+    # Потокобезопасный: одиночный HTTPServer обслуживает по одному соединению
+    # за раз, и на Windows прогон изредка падал с «удалённый хост разорвал
+    # подключение» — не из-за кода, а из-за очереди у самого сервера.
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     yield f"http://127.0.0.1:{srv.server_port}"
     srv.shutdown()
