@@ -132,6 +132,41 @@ def is_chat_model(model_id: str) -> bool:
     return not any(bad in low for bad in config.CUSTOM_NON_CHAT)
 
 
+# Пары «ключ + модель», на которых поставщик ответил «not found for account».
+# Ключ — только его отпечаток, сам ключ здесь не хранится.
+#
+# Зачем помнить: 404 у одного ключа не значит 404 у другого — права выдаются на
+# ключ. Поэтому запрет ЧАСТНЫЙ, и следующая попытка идёт другим ключом. Срок
+# суточный: права меняются на стороне поставщика, и вечный запрет означал бы,
+# что вернувшаяся модель больше никогда не будет использована.
+_denied: dict[tuple[str, str], float] = {}
+DENY_TTL = 24 * 3600
+
+
+def _key_id(key: str) -> str:
+    import hashlib
+    return hashlib.sha256((key or "").encode("utf-8")).hexdigest()[:12]
+
+
+def mark_denied(key: str, model: str) -> None:
+    """Запомнить, что эта модель этому ключу не выдана."""
+    if not model:
+        return
+    _denied[(_key_id(key), model)] = time.time() + DENY_TTL
+    log.info("Модель %s недоступна ключу …%s — не пробуем сутки", model,
+             _key_id(key)[-4:])
+
+
+def is_denied(key: str, model: str) -> bool:
+    until = _denied.get((_key_id(key), model))
+    if until is None:
+        return False
+    if until < time.time():
+        _denied.pop((_key_id(key), model), None)   # срок вышел — пробуем снова
+        return False
+    return True
+
+
 def ping_model(base_url: str, key: str, style: str, model: str) -> tuple[bool, str]:
     """Дешёвый вызов: модель есть в списке — но выдана ли она ключу?
 
@@ -297,3 +332,17 @@ class CustomProvider(_KeyProviderMixin):
         if should_stop and should_stop():
             raise GenerationCancelled()
         return out["choices"][0]["message"]["content"].strip()
+
+    def complete_guarded(self, *a, **kw) -> str:
+        """complete с запоминанием «модель этому ключу не выдана».
+
+        Отдельным методом, чтобы обычный complete оставался прозрачным: пометка
+        — побочный эффект, и прятать её внутрь общего пути не хочется.
+        """
+        try:
+            return self.complete(*a, **kw)
+        except Exception as e:          # noqa: BLE001
+            low = str(e).lower()
+            if "not found for account" in low or "model not found" in low:
+                mark_denied(self.api_key, self.model)
+            raise

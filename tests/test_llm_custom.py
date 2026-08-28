@@ -269,3 +269,56 @@ class TestПрефиксыИзКонфига:
         assert hint_for("pplx-a")[0] == "Perplexity"
         assert hint_for("tp-a")[0].startswith("Xiaomi MiMo")
         assert hint_for("AIzaSyA")[0] == "Google Gemini"
+
+
+class TestЗапретМоделиПоКлючу:
+    """404 «not found for account» у одного ключа не значит того же у другого:
+    права выдаются на ключ. Поэтому запрет частный, а срок суточный — права
+    меняются на стороне поставщика, и вечный запрет похоронил бы вернувшуюся
+    модель навсегда."""
+
+    def setup_method(self):
+        llm_custom._denied.clear()
+
+    def test_запрет_частный_для_ключа(self):
+        llm_custom.mark_denied("ключ-один", "модель")
+        assert llm_custom.is_denied("ключ-один", "модель")
+        assert not llm_custom.is_denied("ключ-два", "модель")
+
+    def test_срок_истекает(self, monkeypatch):
+        """Сутки прошли — модель снова пробуется: у поставщика права меняются."""
+        llm_custom.mark_denied("ключ", "модель")
+        assert llm_custom.is_denied("ключ", "модель")
+        # Оригинал фиксируем ДО подмены: лямбда, зовущая подменённый time.time,
+        # вызвала бы саму себя.
+        real_now = llm_custom.time.time()
+        monkeypatch.setattr(llm_custom.time, "time",
+                            lambda: real_now + llm_custom.DENY_TTL + 1)
+        assert not llm_custom.is_denied("ключ", "модель")
+
+    def test_сам_ключ_не_хранится(self):
+        """В памяти только отпечаток: ключ не должен лежать в структурах."""
+        llm_custom.mark_denied("nvapi-очень-секретный", "модель")
+        assert not any("секретный" in str(k) for k in llm_custom._denied)
+
+    def test_пометка_ставится_на_404(self, monkeypatch):
+        p = CustomProvider(api_key="k", extra=json.dumps(
+            {"base_url": "https://x/v1", "auth": "bearer", "model": "м"}))
+
+        def boom(*a, **kw):
+            raise RuntimeError("HTTP 404: Function 'x' not found for account")
+
+        monkeypatch.setattr(p, "complete", boom)
+        with pytest.raises(RuntimeError):
+            p.complete_guarded("текст")
+        assert llm_custom.is_denied("k", "м")
+
+    def test_обычная_ошибка_не_помечает(self, monkeypatch):
+        """Сетевой сбой или 500 — это не «модель не выдана»."""
+        p = CustomProvider(api_key="k", extra=json.dumps(
+            {"base_url": "https://x/v1", "auth": "bearer", "model": "м"}))
+        monkeypatch.setattr(p, "complete", lambda *a, **kw: (_ for _ in ()).throw(
+            RuntimeError("HTTP 500: internal error")))
+        with pytest.raises(RuntimeError):
+            p.complete_guarded("текст")
+        assert not llm_custom.is_denied("k", "м")

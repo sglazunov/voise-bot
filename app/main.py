@@ -76,14 +76,22 @@ def _engine_list(user_keys: dict | None = None) -> list[dict]:
             # Список пришёл от самого поставщика при подключении ключа и лежит
             # рядом с ним. Прибивать его в коде нельзя: у каждого поставщика он
             # свой и меняется — ради этого универсальный провайдер и заведён.
+            from .llm_custom import is_denied
+            creds = (user_keys or {}).get("custom") or []
             seen: set[str] = set()
-            for cred in (user_keys or {}).get("custom") or []:
+            for cred in creds:
                 try:
                     cfg = json.loads(cred.get("extra") or "{}")
                 except ValueError:
                     continue
                 for m in cfg.get("models") or []:
                     if m in seen:
+                        continue
+                    # Модель, которую отвергли ВСЕ ключи, показывать незачем:
+                    # выбрать её — значит получить 404 в момент сборки
+                    # протокола. Если хоть один ключ её тянет, оставляем:
+                    # права выдаются на ключ, и ротация до него дойдёт.
+                    if all(is_denied(c.get("key") or "", m) for c in creds):
                         continue
                     seen.add(m)
                     engines.append({"value": f"custom:{m}", "label": f"Свой ключ · {m}"})
