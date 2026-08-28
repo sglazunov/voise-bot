@@ -151,6 +151,11 @@ _default_order = "custom,nvidia,gemini,groq,yandex,gigachat,anthropic,ollama"
 PROVIDER_ORDER = [p.strip() for p in
                   os.getenv("VTX_PROVIDER_ORDER", _default_order).split(",")
                   if p.strip()]
+# Провайдеры, которых нет в заданном порядке, дописываются в конец. Порядок
+# берётся из .env, а он написан однажды и живёт годами: новый провайдер иначе
+# не появился бы в интерфейсе вовсе — карточки строятся именно по этому списку.
+# Молча прятать способ подключиться хуже, чем поставить его последним.
+PROVIDER_ORDER += [p for p in PROVIDER_LABELS if p not in PROVIDER_ORDER]
 
 # Selectable model tiers per cloud provider — "how powerful the API model is".
 # Chosen from the UI as "<provider>:<model>"; the first entry is the default.

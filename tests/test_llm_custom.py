@@ -149,3 +149,24 @@ class TestСвойСервер:
         monkeypatch.setattr(llm_custom, "list_models", lambda *a, **k: [])
         got = detect("", "http://localhost:8000/v1")
         assert "контейнер" in got["error"]
+
+
+class TestВидимостьПровайдера:
+    """Карточки на странице «Нейросети» строятся по PROVIDER_ORDER, а он берётся
+    из .env — написан однажды и живёт годами. Новый провайдер иначе не появился
+    бы в интерфейсе вовсе: способ подключиться был бы, а показать его негде."""
+
+    def test_custom_есть_в_порядке(self):
+        from app import config
+        assert "custom" in config.PROVIDER_ORDER
+
+    def test_ни_один_провайдер_не_потерян(self):
+        """Каждому известному провайдеру нужно место в списке — иначе его
+        карточка просто не отрисуется."""
+        from app import config
+        missing = [p for p in config.PROVIDER_LABELS if p not in config.PROVIDER_ORDER]
+        assert not missing, f"нет в PROVIDER_ORDER: {missing}"
+
+    def test_custom_принимает_ключ(self):
+        from app import config
+        assert "custom" in config.KEY_PROVIDERS
