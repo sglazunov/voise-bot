@@ -170,3 +170,102 @@ class TestВидимостьПровайдера:
     def test_custom_принимает_ключ(self):
         from app import config
         assert "custom" in config.KEY_PROVIDERS
+
+
+class TestНормализацияАдреса:
+    """Люди вставляют полный URL из документации. Без обрезки вышло бы
+    «…/chat/completions/models», и адрес молча не работал бы."""
+
+    def test_хвосты_обрезаются(self):
+        n = llm_custom.normalize_url
+        assert n("https://api.x.com/v1/chat/completions") == "https://api.x.com/v1"
+        assert n("https://api.x.com/v1/models") == "https://api.x.com/v1"
+        assert n("https://api.x.com/v1/") == "https://api.x.com/v1"
+
+    def test_обычный_адрес_не_трогается(self):
+        assert llm_custom.normalize_url("https://api.deepseek.com") == "https://api.deepseek.com"
+
+
+class TestЗащитаАдреса:
+    """Ключ отправляется на указанный адрес, поэтому адрес проверяется ДО."""
+
+    def test_служебный_адрес_облака_запрещён(self):
+        """По 169.254.169.254 облачные машины отдают собственные учётные данные."""
+        assert "служебный" in llm_custom.check_url("http://169.254.169.254/v1")
+
+    def test_публичный_http_запрещён(self):
+        """Иначе ключ уйдёт по сети незашифрованным."""
+        assert "https" in llm_custom.check_url("http://api.example.com/v1")
+
+    def test_свой_сервер_по_http_разрешён(self):
+        assert llm_custom.check_url("http://vllm:8000/v1") == ""
+        assert llm_custom.check_url("http://192.168.1.10:8000/v1") == ""
+        assert llm_custom.check_url("http://localhost:11434/v1") == ""
+
+    def test_чужая_схема_запрещена(self):
+        assert "http://" in llm_custom.check_url("ftp://api.example.com/v1")
+
+
+class TestНеподдерживаемыйКлюч:
+    def test_anthropic_отвергается_без_запросов(self, monkeypatch):
+        """У Anthropic другой формат API. Перебор чужих адресов означал бы
+        отправку ключа третьим лицам — этого делать нельзя."""
+        monkeypatch.setattr(llm_custom, "list_models", lambda *a, **k: pytest.fail(
+            "ключ Anthropic не должен уходить ни на один адрес"))
+        got = detect("sk-ant-api03-секрет")
+        assert not got["ok"] and "Anthropic" in got["error"]
+
+
+class TestФильтрМоделей:
+    """В /models лежат вперемешку эмбеддинги и реранкеры: протокол они не
+    соберут, а счётчик «доступно моделей — N» сбивают."""
+
+    def test_не_чат_модели_отсеиваются(self):
+        assert llm_custom.is_chat_model("deepseek-chat")
+        assert llm_custom.is_chat_model("nvidia/nemotron-3-super-120b")
+        assert not llm_custom.is_chat_model("text-embedding-3-large")
+        assert not llm_custom.is_chat_model("bge-reranker-v2")
+        assert not llm_custom.is_chat_model("whisper-large-v3")
+        assert not llm_custom.is_chat_model("stable-diffusion-xl")
+
+    def test_detect_возвращает_только_чатовые(self, monkeypatch):
+        monkeypatch.setattr(llm_custom, "list_models", lambda *a, **k: [
+            "чат/модель", "text-embedding-ada", "rerank-v1"])
+        got = detect("ключ", "https://api.example.com/v1")
+        assert got["models"] == ["чат/модель"]
+        assert got["skipped"] == 2
+
+    def test_только_эмбеддинги_считаются_неподходящим_адресом(self, monkeypatch):
+        monkeypatch.setattr(llm_custom, "list_models",
+                            lambda *a, **k: ["text-embedding-3"])
+        assert detect("ключ", "https://api.example.com/v1")["ok"] is False
+
+
+class TestПробныйВызов:
+    def test_живая_модель(self, monkeypatch):
+        monkeypatch.setattr(llm_custom, "_http_post_json",
+                            lambda *a, **k: {"choices": [{"message": {"content": "ok"}}]})
+        ok, why = llm_custom.ping_model("https://x/v1", "k", "bearer", "m")
+        assert ok and why == ""
+
+    def test_модель_не_выдана_ключу(self, monkeypatch):
+        """Тот самый разрыв: модель есть в каталоге, а вызов даёт 404."""
+        def boom(*a, **k):
+            raise RuntimeError("HTTP 404: Function not found for account")
+        monkeypatch.setattr(llm_custom, "_http_post_json", boom)
+        ok, why = llm_custom.ping_model("https://x/v1", "k", "bearer", "m")
+        assert not ok and "404" in why
+
+
+class TestПрефиксыИзКонфига:
+    """Таблица в конфиге, а не в логике: поставщики меняются, и дополнять
+    список правкой конфига проще, чем правкой кода."""
+
+    def test_все_приставки_openai(self):
+        for k in ("sk-proj-a", "sk-svcacct-a", "sk-None-a"):
+            assert hint_for(k)[0] == "OpenAI", k
+
+    def test_новые_поставщики(self):
+        assert hint_for("pplx-a")[0] == "Perplexity"
+        assert hint_for("tp-a")[0].startswith("Xiaomi MiMo")
+        assert hint_for("AIzaSyA")[0] == "Google Gemini"

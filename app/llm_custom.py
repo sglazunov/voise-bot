@@ -18,39 +18,29 @@ DeepSeek. Здесь наоборот — ключ один, а всё оста�
 """
 from __future__ import annotations
 
+import ipaddress
 import json
+import socket
+import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
-from . import logs
+from . import config, logs
 from .llm_base import (GenerationCancelled, _KeyProviderMixin, _http_post_json,
                        _safe_url)
 
 log = logs.get("vtx.custom")
 
-# Известные поставщики по виду ключа. Совпадение по префиксу — подсказка, а не
-# приговор: адрес всё равно проверяется запросом, и если поставщик не тот,
-# проверка это покажет.
-KNOWN = (
-    ("nvapi-", "NVIDIA NIM", "https://integrate.api.nvidia.com/v1"),
-    ("gsk_", "Groq", "https://api.groq.com/openai/v1"),
-    ("sk-ant-", "Anthropic", ""),          # не OpenAI-совместим, см. ниже
-    ("sk-or-", "OpenRouter", "https://openrouter.ai/api/v1"),
-    ("sk-proj-", "OpenAI", "https://api.openai.com/v1"),
-    ("AIza", "Google Gemini", ""),         # свой формат, см. ниже
-)
-# Куда заглянуть, когда вид ключа ничего не говорит. Порядок — от более
-# вероятного к менее.
-GUESS_URLS = (
-    "https://api.deepseek.com/v1",
-    "https://api.xiaomimimo.com/v1",
-    "https://openrouter.ai/api/v1",
-    "https://api.openai.com/v1",
-)
-# Способы передать ключ. Bearer — почти везде; api-key ждёт MiMo от Xiaomi;
-# «none» — свой сервер (vLLM, llama.cpp, LM Studio, Ollama), который обычно
-# вообще не спрашивает ключа.
+# Способы передать ключ. Bearer берут почти все, поэтому он первый; «none» —
+# свой сервер (vLLM, llama.cpp, LM Studio, Ollama), который ключа не спрашивает.
 AUTH_STYLES = ("bearer", "api-key", "x-api-key", "none")
+
+# Таймауты. Медленный поставщик не должен подвешивать подключение: молчание до
+# таймаута шлюза выглядит как «непонятно, что происходит».
+MODELS_TIMEOUT = 10
+PING_TIMEOUT = 15
+DETECT_DEADLINE = 25
 
 
 def _auth_headers(style: str, key: str) -> dict:
@@ -61,16 +51,116 @@ def _auth_headers(style: str, key: str) -> dict:
     return {style: key}
 
 
+def normalize_url(raw: str) -> str:
+    """Привести адрес к базовому виду.
+
+    Люди вставляют полный URL из документации — вместе с /chat/completions или
+    /models. Без обрезки вышло бы «…/chat/completions/models», и адрес молча не
+    работал бы.
+    """
+    u = (raw or "").strip().rstrip("/")
+    for tail in ("/chat/completions", "/completions", "/models", "/embeddings"):
+        if u.endswith(tail):
+            u = u[: -len(tail)].rstrip("/")
+    return u
+
+
+def _is_private_host(host: str) -> bool:
+    """Адрес внутри своей сети или имя сервиса docker — туда http:// можно."""
+    if not host:
+        return False
+    if host in ("localhost", "host.docker.internal"):
+        return True
+    if "." not in host:
+        return True                     # имя сервиса compose: app, vllm, ollama
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        try:
+            ip = ipaddress.ip_address(socket.gethostbyname(host))
+        except (OSError, ValueError):
+            return False
+    return bool(ip.is_private or ip.is_loopback)
+
+
+def check_url(raw: str) -> str:
+    """Проверить адрес ДО того, как послать туда ключ. Вернуть текст ошибки.
+
+    Две опасности. Служебные адреса облака (169.254.169.254 и подобные): запрос
+    туда с сервера возвращает учётные данные самой машины. И открытый http:// на
+    публичный хост — ключ уйдёт по сети незашифрованным.
+    """
+    if not raw:
+        return ""
+    parts = urllib.parse.urlsplit(raw if "://" in raw else "https://" + raw)
+    host = (parts.hostname or "").lower()
+    if not host:
+        return "Адрес не похож на URL — нужен вид https://сервер/v1."
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        ip = None
+    if ip is not None and (ip.is_link_local or ip.is_reserved or ip.is_multicast):
+        return ("Этот адрес служебный, запросы туда запрещены: по нему облачные "
+                "машины отдают собственные учётные данные.")
+    if parts.scheme not in ("http", "https"):
+        return "Поддерживаются только адреса http:// и https://."
+    if parts.scheme == "http" and not _is_private_host(host):
+        return ("Для публичного адреса нужен https://. Открытый http:// "
+                "разрешён только для своих серверов в локальной сети — иначе "
+                "ключ уйдёт по сети незашифрованным.")
+    return ""
+
+
+def unsupported_reason(key: str) -> str:
+    """Ключ, который НЕЛЬЗЯ никуда отправлять, и почему."""
+    k = (key or "").strip()
+    for prefix, why in config.CUSTOM_UNSUPPORTED:
+        if k.startswith(prefix):
+            return why
+    return ""
+
+
+def is_chat_model(model_id: str) -> bool:
+    """Годится ли модель для сборки протокола.
+
+    В /models лежат вперемешку эмбеддинги, реранкеры, распознавание речи и
+    картиночные модели. Протокол они не соберут, а список замусоривают и сбивают
+    счётчик «доступно моделей — N».
+    """
+    low = (model_id or "").lower()
+    return not any(bad in low for bad in config.CUSTOM_NON_CHAT)
+
+
+def ping_model(base_url: str, key: str, style: str, model: str) -> tuple[bool, str]:
+    """Дешёвый вызов: модель есть в списке — но выдана ли она ключу?
+
+    Ровно этот разрыв стоил недели разбирательств: NVIDIA показывала deepseek в
+    каталоге и отвечала 404 при вызове. Один токен стоит почти ничего, а знать
+    это лучше при подключении, чем в момент сборки протокола.
+    """
+    payload = {"model": model, "max_tokens": 1, "temperature": 0,
+               "messages": [{"role": "user", "content": "ok"}]}
+    try:
+        _http_post_json(base_url.rstrip("/") + "/chat/completions", payload,
+                        _auth_headers(style, key), timeout=PING_TIMEOUT,
+                        max_retries=0)
+        return True, ""
+    except Exception as e:              # noqa: BLE001
+        return False, str(e)[:200]
+
+
 def hint_for(key: str) -> tuple[str, str]:
     """Подсказка по виду ключа: (название поставщика, адрес) или пустые строки."""
     k = (key or "").strip()
-    for prefix, name, url in KNOWN:
+    for prefix, name, url in config.CUSTOM_KEY_PREFIXES:
         if k.startswith(prefix):
             return name, url
     return "", ""
 
 
-def list_models(base_url: str, key: str, style: str, timeout: int = 15) -> list[str]:
+def list_models(base_url: str, key: str, style: str,
+                timeout: int = MODELS_TIMEOUT) -> list[str]:
     """Модели поставщика. Пустой список — значит адрес или ключ не подошли."""
     url = base_url.rstrip("/") + "/models"
     req = urllib.request.Request(url, method="GET")
@@ -80,6 +170,7 @@ def list_models(base_url: str, key: str, style: str, timeout: int = 15) -> list[
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except (urllib.error.URLError, OSError, ValueError):
+        # Тело ответа не логируем: у некоторых поставщиков в нём эхом стоит ключ.
         return []
     items = data.get("data") if isinstance(data, dict) else data
     out = []
@@ -97,7 +188,14 @@ def detect(key: str, base_url: str = "") -> dict:
     в ответ не попадает.
     """
     key = (key or "").strip()
-    base_url = (base_url or "").strip()
+    base_url = normalize_url(base_url)
+    stop = unsupported_reason(key)
+    if stop:
+        # Отказываем ДО перебора адресов: иначе ключ ушёл бы третьим лицам.
+        return {"ok": False, "error": stop}
+    bad = check_url(base_url)
+    if bad:
+        return {"ok": False, "error": bad}
     if not key and not base_url:
         # Без ключа можно подключить только СВОЙ сервер, и тогда нужен адрес:
         # угадывать по пустому ключу нечего.
@@ -105,15 +203,30 @@ def detect(key: str, base_url: str = "") -> dict:
                 "error": "Укажите ключ — или адрес API, если это ваш сервер "
                          "без ключа (например http://vllm:8000/v1)."}
     hint, known_url = hint_for(key)
-    urls = [u for u in (base_url, known_url) if u] or list(GUESS_URLS)
+    urls = [u for u in (base_url, known_url) if u] or list(config.CUSTOM_GUESS_URLS)
+    started = time.time()
     for url in urls:
         for style in AUTH_STYLES:
-            models = list_models(url, key, style)
-            if models:
-                log.info("Ключ опознан: %s, моделей %d, авторизация %s",
-                         _safe_url(url), len(models), style)
-                return {"ok": True, "base_url": url.rstrip("/"), "auth": style,
-                        "models": models, "hint": hint}
+            if time.time() - started > DETECT_DEADLINE:
+                return {"ok": False, "hint": hint,
+                        "error": f"Определение заняло дольше {DETECT_DEADLINE} с "
+                                 "и остановлено. Укажите адрес API вручную."}
+            if not key and style != "none":
+                continue        # без ключа перебирать заголовки незачем
+            found = list_models(url, key, style)
+            if not found:
+                continue
+            # Не-чат модели убираем: эмбеддинги и реранкеры протокол не соберут,
+            # а список замусоривают и сбивают счётчик «доступно моделей — N».
+            models = [m for m in found if is_chat_model(m)]
+            if not models:
+                continue
+            log.info("Ключ опознан: %s, моделей %d из %d, авторизация %s, %.1f c",
+                     _safe_url(url), len(models), len(found), style,
+                     time.time() - started)
+            return {"ok": True, "base_url": url.rstrip("/"), "auth": style,
+                    "models": models, "hint": hint,
+                    "skipped": len(found) - len(models)}
     if not base_url:
         return {"ok": False, "hint": hint,
                 "error": "Ключ не подошёл ни к одному известному адресу. "
@@ -122,9 +235,10 @@ def detect(key: str, base_url: str = "") -> dict:
     return {"ok": False, "hint": hint,
             "error": ("По этому адресу ответа нет. Проверьте адрес и ключ; для "
                       "своего сервера убедитесь, что он отвечает на "
-                      f"{base_url.rstrip('/')}/models и доступен из контейнера "
-                      "приложения (localhost внутри контейнера — это САМ "
-                      "контейнер, а не хост).")}
+                      f"{base_url}/models и доступен из контейнера приложения "
+                      "(localhost внутри контейнера — это САМ контейнер, а не "
+                      "хост: укажите имя сервиса из docker-compose.yml или "
+                      "host.docker.internal).")}
 
 
 class CustomProvider(_KeyProviderMixin):

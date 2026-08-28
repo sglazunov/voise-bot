@@ -85,6 +85,16 @@ function ProviderCard({ p, models, onChange, toast }:
   { p: Provider; models: Engine[]; onChange: () => void; toast: (m: string, bad?: boolean) => void }) {
   const [key, setKey] = useState("");
   const [extra, setExtra] = useState("");
+  const [refreshing, setRefreshing] = useState(false);
+  async function refreshCustom() {
+    setRefreshing(true);
+    try {
+      const r = await api.post("/api/providers/custom/refresh");
+      toast(r.note || "Список моделей обновлён");
+      onChange();
+    } catch (e: any) { toast(e.message, true); }
+    finally { setRefreshing(false); }
+  }
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState("");
   const [keys, setKeys] = useState<any[] | null>(null);
@@ -176,6 +186,14 @@ function ProviderCard({ p, models, onChange, toast }:
         {p.keys > 0 && (
           <button className="btn btn-ghost" onClick={() => (keys === null ? loadKeys() : setKeys(null))}>
             {keys === null ? "Мои ключи" : "Скрыть"}</button>
+        )}
+        {p.id === "custom" && p.keys > 0 && (
+          // Состав моделей меняется на стороне поставщика: NVIDIA за неделю
+          // убрала десять штук вместе с DeepSeek. Без обновления в списке
+          // остаются имена, которые уже отвечают 404 — и узнаётся это в момент
+          // сборки протокола, когда встреча уже записана.
+          <button className="btn btn-ghost" onClick={refreshCustom} disabled={refreshing}>
+            {refreshing ? "Обновляю…" : "Обновить список моделей"}</button>
         )}
         {p.id === "nvidia" && p.keys > 0 && (
           // Каталог NVIDIA перечисляет всё опубликованное, а аккаунту выдана

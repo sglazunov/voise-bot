@@ -80,6 +80,7 @@ EXPECTED = {
     "POST /api/profile/phone",
     "POST /api/profile/team/remove",
     "POST /api/providers/connect",
+    "POST /api/providers/custom/refresh",
     "POST /api/providers/disconnect",
     "POST /api/providers/keys/remove",
     "POST /api/providers/nvidia/verify",

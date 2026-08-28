@@ -102,6 +102,21 @@ def add(user: str, provider: str, key: str, extra: str = "") -> None:
     _write(user, raw)
 
 
+def set_extra(user: str, provider: str, index: int, extra: str) -> None:
+    """Заменить сопутствующие данные ключа, не трогая сам ключ.
+
+    Нужно провайдеру «свой ключ»: у него в extra лежит список моделей
+    поставщика, и он устаревает — модели у поставщиков появляются и пропадают.
+    Переподключать ради этого ключ было бы странно.
+    """
+    user = security.team_of(user)
+    raw = _read_raw(user)
+    entries = raw.get(provider) or []
+    if 0 <= index < len(entries):
+        entries[index]["extra"] = security.encrypt_secret(user, extra or "")
+        _write(user, raw)
+
+
 def remove_at(user: str, provider: str, index: int) -> None:
     user = security.team_of(user)
     raw = _read_raw(user)

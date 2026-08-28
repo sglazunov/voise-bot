@@ -157,6 +157,49 @@ PROVIDER_ORDER = [p.strip() for p in
 # Молча прятать способ подключиться хуже, чем поставить его последним.
 PROVIDER_ORDER += [p for p in PROVIDER_LABELS if p not in PROVIDER_ORDER]
 
+# --------------------------------------------------------------------------- #
+# Универсальное подключение по ключу (провайдер «custom»).
+# Таблицы здесь, а не в логике: поставщики и их адреса меняются, и дополнять
+# список правкой конфига проще, чем правкой кода.
+# --------------------------------------------------------------------------- #
+# Приставка ключа -> (название поставщика, адрес API). Совпадение — подсказка,
+# а не приговор: адрес всё равно подтверждается живым запросом.
+CUSTOM_KEY_PREFIXES = (
+    ("nvapi-", "NVIDIA NIM", "https://integrate.api.nvidia.com/v1"),
+    ("gsk_", "Groq", "https://api.groq.com/openai/v1"),
+    ("sk-or-", "OpenRouter", "https://openrouter.ai/api/v1"),
+    # OpenAI больше не выпускает «голые» sk-: актуальны три приставки.
+    ("sk-proj-", "OpenAI", "https://api.openai.com/v1"),
+    ("sk-svcacct-", "OpenAI", "https://api.openai.com/v1"),
+    ("sk-None-", "OpenAI", "https://api.openai.com/v1"),
+    ("pplx-", "Perplexity", "https://api.perplexity.ai"),
+    # У MiMo два вида ключей с РАЗНЫМИ адресами: tp- — токен-план.
+    ("tp-", "Xiaomi MiMo (токен-план)",
+     os.getenv("VTX_MIMO_TOKEN_PLAN_URL", "https://api.xiaomimimo.com/v1")),
+    ("AIza", "Google Gemini",
+     "https://generativelanguage.googleapis.com/v1beta/openai"),
+)
+# Куда заглянуть, когда приставка ничего не говорит (обычный «sk-…»).
+CUSTOM_GUESS_URLS = (
+    "https://api.deepseek.com",          # канонично без /v1, суффикс допустим
+    "https://api.xiaomimimo.com/v1",
+    "https://openrouter.ai/api/v1",
+    "https://api.openai.com/v1",
+)
+# Ключи, которые НЕ надо никуда отправлять: у Anthropic другой формат API
+# (/v1/messages), и перебор чужих адресов означал бы отдачу ключа третьим лицам.
+CUSTOM_UNSUPPORTED = (
+    ("sk-ant-", "Anthropic не поддерживается этим подключением — у него другой "
+                "формат API. Подключите Anthropic отдельной карточкой."),
+)
+# Не-чат модели: в /models их отдают вперемешку с чатовыми, а протокол они
+# собрать не могут. Совпадение по куску идентификатора.
+CUSTOM_NON_CHAT = (
+    "embed", "embedding", "rerank", "reranker", "moderation", "guard",
+    "whisper", "tts", "audio", "speech", "voice", "image", "vision-encoder",
+    "dall-e", "stable-diffusion", "clip", "ocr", "sd3", "flux",
+)
+
 # Selectable model tiers per cloud provider — "how powerful the API model is".
 # Chosen from the UI as "<provider>:<model>"; the first entry is the default.
 # Weaker/cheaper tiers are faster; stronger tiers give better protocols.

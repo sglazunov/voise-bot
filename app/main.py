@@ -694,20 +694,38 @@ def connect_provider(body: ProviderKey, user: str = Depends(current_user)):
         #
         # В `extra` пользователь может передать адрес, если поставщик незнакомый
         # (по виду ключа угадываются NVIDIA, Groq, OpenRouter и другие).
-        from .llm_custom import detect
+        from .llm_custom import detect, ping_model
         found = detect(key, extra)
         if not found.get("ok"):
             raise HTTPException(400, found.get("error") or "Ключ не подошёл.")
         models = found["models"]
+        # Модель есть в списке — но выдана ли она ключу? Именно этот разрыв
+        # стоил недели разбирательств: NVIDIA показывала deepseek в каталоге и
+        # отвечала 404 при вызове. Один токен стоит почти ничего, а знать это
+        # лучше сейчас, чем в момент сборки протокола.
+        default = models[0]
+        ok_ping, why = ping_model(found["base_url"], key, found["auth"], default)
+        where = found["hint"] or found["base_url"]
+        skipped = found.get("skipped") or 0
+        tail = f" Не-чат моделей пропущено: {skipped}." if skipped else ""
+        if ok_ping:
+            note = (f"Ключ принят: {where}, доступно моделей — {len(models)}. "
+                    f"Модель по умолчанию — «{default}»; сменить можно в "
+                    f"«Движке протокола».{tail}")
+        else:
+            # Подключение всё равно создаём: ключ живой, просто эта модель ему
+            # не выдана — остальные могут работать.
+            default = ""
+            note = (f"Ключ принят: {where}, моделей в списке — {len(models)}. "
+                    f"Но «{models[0]}» этому ключу недоступна ({why}). "
+                    f"Выберите другую в «Движке протокола».{tail}")
         extra = json.dumps({"base_url": found["base_url"], "auth": found["auth"],
-                            "model": models[0], "models": models[:200]},
+                            "model": default, "models": models[:200],
+                            "hint": found.get("hint") or "",
+                            "detected_at": time.time()},
                            ensure_ascii=False)
         user_creds.add(user, provider, key, extra)
-        where = found["hint"] or found["base_url"]
-        return {"ok": True, "connected": provider,
-                "note": (f"Ключ принят: {where}, доступно моделей — "
-                         f"{len(models)}. Модель по умолчанию — «{models[0]}»; "
-                         "сменить можно в «Движке протокола»."),
+        return {"ok": True, "connected": provider, "note": note,
                 "keys": user_creds.counts(user).get(provider, 1),
                 "models": models[:200],
                 "providers": _provider_list(user_creds.load(user))}
@@ -801,6 +819,52 @@ class ProviderRef(BaseModel):
     provider: str
 
 
+@app.post("/api/providers/custom/refresh")
+def refresh_custom_models(user: str = Depends(current_user)):
+    """Перечитать список моделей у поставщика сохранённым ключом.
+
+    Состав моделей меняется на их стороне: NVIDIA за неделю убрала десять штук
+    вместе с DeepSeek. Без обновления в выборе движка остаются имена, которые
+    уже отвечают 404 — и узнаётся это в момент сборки протокола, когда встреча
+    уже записана.
+    """
+    from .llm_custom import detect
+    entries = user_creds.load(user).get("custom") or []
+    if not entries:
+        raise HTTPException(400, "Провайдер «свой ключ» не подключён.")
+    added: list[str] = []
+    removed: list[str] = []
+    updated = 0
+    for idx, e in enumerate(entries):
+        try:
+            cfg = json.loads(e.get("extra") or "{}")
+        except ValueError:
+            cfg = {}
+        was = list(cfg.get("models") or [])
+        found = detect(e.get("key") or "", cfg.get("base_url") or "")
+        if not found.get("ok"):
+            continue
+        now = found["models"]
+        added += [m for m in now if m not in was]
+        removed += [m for m in was if m not in now]
+        cfg.update(base_url=found["base_url"], auth=found["auth"],
+                   models=now[:200], detected_at=time.time())
+        # Выбранная модель могла исчезнуть у поставщика. Молча подменять её
+        # нельзя — человек выбирал осознанно; сбрасываем и говорим об этом.
+        if cfg.get("model") and cfg["model"] not in now:
+            cfg["model"] = ""
+        user_creds.set_extra(user, "custom", idx, json.dumps(cfg, ensure_ascii=False))
+        updated += 1
+    if not updated:
+        raise HTTPException(502, "Ни один ключ не ответил — список не обновлён.")
+    gone = sorted(set(removed))
+    note = f"Обновлено ключей: {updated}. Добавлено: {len(set(added))}, удалено: {len(gone)}."
+    if gone:
+        note += " Пропали у поставщика: " + ", ".join(gone[:8])
+    return {"ok": True, "added": sorted(set(added)), "removed": gone, "note": note,
+            "engines": _engine_list(user_creds.load(user))}
+
+
 @app.post("/api/providers/disconnect")
 def disconnect_provider(body: ProviderRef, user: str = Depends(current_user)):
     """Remove ALL of this user's saved keys for a provider."""
@@ -815,8 +879,25 @@ def provider_keys(provider: str, user: str = Depends(current_user)):
     entries = user_creds.load(user).get(prov) or []
 
     def mask(k: str) -> str:
+        # Приставка ключа говорит, чей он (nvapi-, gsk_, sk-or-), поэтому
+        # показываем шесть первых символов — по ним ключ узнаётся среди
+        # нескольких, а восстановить его нельзя.
         k = k or ""
-        return "•" * len(k) if len(k) <= 8 else f"{k[:4]}…{k[-4:]}"
+        return "•" * len(k) if len(k) <= 12 else f"{k[:6]}…{k[-4:]}"
+
+    def side(e: dict) -> str:
+        """Что показать рядом с ключом. У «своего ключа» в extra лежит JSON со
+        списком моделей — выводить его целиком незачем, полезен адрес."""
+        raw = e.get("extra") or ""
+        if prov != "custom":
+            return raw
+        try:
+            cfg = json.loads(raw)
+        except ValueError:
+            return ""
+        where = cfg.get("hint") or cfg.get("base_url") or ""
+        n = len(cfg.get("models") or [])
+        return f"{where} · моделей: {n}" if n else str(where)
 
     # Срок жизни ключа. У NVIDIA бесплатный ключ действует полгода: когда он
     # истекает, протоколы начинают молча собираться запасным движком, и без
@@ -836,7 +917,7 @@ def provider_keys(provider: str, user: str = Depends(current_user)):
 
     return {"provider": prov, "keys": [
         {"index": i, "masked": mask(e.get("key", "")),
-         "extra": (e.get("extra") or ""), **life(float(e.get("at") or 0))}
+         "extra": side(e), **life(float(e.get("at") or 0))}
         for i, e in enumerate(entries)]}
 
 
