@@ -322,3 +322,57 @@ class TestЗапретМоделиПоКлючу:
         with pytest.raises(RuntimeError):
             p.complete_guarded("текст")
         assert not llm_custom.is_denied("k", "м")
+
+
+class TestYandexCloud:
+    """Yandex Cloud AI Studio даёт DeepSeek через OpenAI-совместимый шлюз, но
+    список моделей не отдаёт, а имя модели включает идентификатор каталога:
+    «gpt://<folder>/deepseek-v4-flash/latest»."""
+
+    def test_подключение_из_переменных_окружения(self, monkeypatch):
+        from app import config
+        monkeypatch.setattr(config, "YANDEX_CLOUD_API_KEY", "AQVN-тест")
+        monkeypatch.setattr(config, "YANDEX_CLOUD_FOLDER", "b1g9i77")
+        monkeypatch.setattr(config, "YANDEX_CLOUD_MODEL", "deepseek-v4-flash/latest")
+        cfg = json.loads(config.custom_env_extra())
+        assert cfg["model"] == "gpt://b1g9i77/deepseek-v4-flash/latest"
+        assert cfg["base_url"].endswith("/v1")
+
+    def test_полное_имя_модели_не_ломается(self, monkeypatch):
+        """Если в .env уже записан полный gpt://…, второй раз каталог не клеим."""
+        from app import config
+        monkeypatch.setattr(config, "YANDEX_CLOUD_API_KEY", "AQVN")
+        monkeypatch.setattr(config, "YANDEX_CLOUD_FOLDER", "b1g")
+        monkeypatch.setattr(config, "YANDEX_CLOUD_MODEL", "gpt://другой/модель")
+        assert json.loads(config.custom_env_extra())["model"] == "gpt://другой/модель"
+
+    def test_без_каталога_подключения_нет(self, monkeypatch):
+        from app import config
+        monkeypatch.setattr(config, "YANDEX_CLOUD_API_KEY", "AQVN")
+        monkeypatch.setattr(config, "YANDEX_CLOUD_FOLDER", "")
+        assert config.custom_env_extra() == ""
+
+    def test_шлюз_без_списка_требует_модель(self, monkeypatch):
+        """Список не спрашиваем — но и подключиться вслепую нельзя."""
+        monkeypatch.setattr(llm_custom, "list_models", lambda *a, **k: pytest.fail(
+            "у этого шлюза список моделей не запрашивается"))
+        got = detect("AQVN-ключ", "https://ai.api.cloud.yandex.net/v1")
+        assert not got["ok"] and "укажите модель" in got["error"].lower()
+
+    def test_модель_подтверждается_вызовом(self, monkeypatch):
+        monkeypatch.setattr(llm_custom, "list_models", lambda *a, **k: pytest.fail(
+            "список запрашиваться не должен"))
+        monkeypatch.setattr(llm_custom, "ping_model",
+                            lambda url, key, style, model: (style == "bearer", "нет"))
+        got = detect("AQVN-ключ", "https://ai.api.cloud.yandex.net/v1",
+                     "gpt://b1g/deepseek-v4-flash/latest")
+        assert got["ok"] and got["manual"] is True
+        assert got["models"] == ["gpt://b1g/deepseek-v4-flash/latest"]
+
+    def test_модель_с_двоеточиями_переживает_разбор(self):
+        """Движок выбирается строкой «custom:<модель>», а в имени модели свои
+        двоеточия и слэши — делить надо только по первому."""
+        name = "custom:gpt://b1g/deepseek-v4-flash/latest"
+        base, _, model = name.partition(":")
+        assert base == "custom"
+        assert model == "gpt://b1g/deepseek-v4-flash/latest"

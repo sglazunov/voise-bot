@@ -85,6 +85,10 @@ function ProviderCard({ p, models, onChange, toast }:
   { p: Provider; models: Engine[]; onChange: () => void; toast: (m: string, bad?: boolean) => void }) {
   const [key, setKey] = useState("");
   const [extra, setExtra] = useState("");
+  // Имя модели — только для «своего ключа» и только когда шлюз не отдаёт
+  // список. Так устроен Yandex Cloud: моделей много, а перечислить их через
+  // OpenAI-совместимый эндпоинт нельзя, и имя включает каталог.
+  const [model, setModel] = useState("");
   const [refreshing, setRefreshing] = useState(false);
   async function refreshCustom() {
     setRefreshing(true);
@@ -105,7 +109,8 @@ function ProviderCard({ p, models, onChange, toast }:
     if (!key.trim()) { toast("Введите ключ", true); return; }
     setBusy(true); setNote("");
     try {
-      const r = await api.post("/api/providers/connect", { provider: p.id, api_key: key, extra });
+      const r = await api.post("/api/providers/connect",
+        { provider: p.id, api_key: key, extra, model });
       setKey(""); setExtra(""); setNote(r.note || ""); toast(`${p.label}: ключ подключён`);
       onChange(); if (keys !== null) loadKeys();
     } catch (e: any) { toast(e.message, true); } finally { setBusy(false); }
@@ -174,6 +179,17 @@ function ProviderCard({ p, models, onChange, toast }:
         <>
           <label className="lbl mt-2">{ex.label}</label>
           <input className="field" value={extra} onChange={(e) => setExtra(e.target.value)} placeholder={ex.ph} />
+        </>
+      )}
+      {p.id === "custom" && (
+        <>
+          <label className="lbl mt-2">Модель (если список недоступен)</label>
+          <input className="field" value={model} onChange={(e) => setModel(e.target.value)}
+            placeholder="gpt://b1g…/deepseek-v4-flash/latest — для Yandex Cloud" />
+          <div className="text-[11.5px] mt-1" style={{ color: "var(--muted)" }}>
+            Нужно только тем шлюзам, которые не перечисляют свои модели. У
+            Yandex Cloud имя модели включает идентификатор каталога.
+          </div>
         </>
       )}
       {note && (

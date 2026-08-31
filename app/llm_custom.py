@@ -216,7 +216,20 @@ def list_models(base_url: str, key: str, style: str,
     return out
 
 
-def detect(key: str, base_url: str = "") -> dict:
+def _manual_only(base_url: str) -> bool:
+    """Шлюз, который не отдаёт список моделей по /v1/models.
+
+    Такой, например, Yandex Cloud AI Studio: моделей у него много, но
+    перечислять их через OpenAI-совместимый эндпоинт он не умеет, а имя модели
+    включает идентификатор каталога — «gpt://<folder>/deepseek-v4-flash/latest».
+    Для таких подключаемся по указанной вручную модели и проверяем её вызовом.
+    """
+    host = (urllib.parse.urlsplit(base_url).hostname or "").lower()
+    return any(host == h or host.endswith("." + h)
+               for h in config.CUSTOM_MANUAL_MODEL_HOSTS)
+
+
+def detect(key: str, base_url: str = "", model: str = "") -> dict:
     """Определить поставщика по ключу: адрес, способ авторизации, модели.
 
     Возвращает {ok, base_url, auth, models, hint, error}. Ключ не логируется и
@@ -240,6 +253,30 @@ def detect(key: str, base_url: str = "") -> dict:
     hint, known_url = hint_for(key)
     urls = [u for u in (base_url, known_url) if u] or list(config.CUSTOM_GUESS_URLS)
     started = time.time()
+
+    model = (model or "").strip()
+    if base_url and (model or _manual_only(base_url)):
+        # Список моделей не спрашиваем: либо шлюз его не отдаёт, либо человек
+        # прямо назвал модель. Проверяем вызовом — это надёжнее любого списка.
+        if not model:
+            return {"ok": False, "hint": hint,
+                    "error": "Этот шлюз не отдаёт список моделей — укажите "
+                             "модель вручную. Для Yandex Cloud имя выглядит "
+                             "как gpt://<идентификатор-каталога>/"
+                             "deepseek-v4-flash/latest."}
+        for style in AUTH_STYLES:
+            if not key and style != "none":
+                continue
+            ok, why = ping_model(base_url, key, style, model)
+            if ok:
+                log.info("Модель подтверждена вызовом: %s, авторизация %s",
+                         _safe_url(base_url), style)
+                return {"ok": True, "base_url": base_url, "auth": style,
+                        "models": [model], "hint": hint, "manual": True}
+            last = why
+        return {"ok": False, "hint": hint,
+                "error": f"Модель «{model}» не ответила по этому адресу: {last}"}
+
     for url in urls:
         for style in AUTH_STYLES:
             if time.time() - started > DETECT_DEADLINE:

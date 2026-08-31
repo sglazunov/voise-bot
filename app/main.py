@@ -621,7 +621,10 @@ def team_stats(days: int = 30, user: str = Depends(current_user)):
 class ProviderKey(BaseModel):
     provider: str
     api_key: str
-    extra: str = ""   # YandexGPT: folder id · GigaChat: scope (optional)
+    extra: str = ""   # YandexGPT: folder id · GigaChat: scope · custom: адрес API
+    # Только для «своего ключа»: имя модели, когда шлюз не отдаёт список
+    # (Yandex Cloud AI Studio — как раз такой).
+    model: str = ""
 
 
 @app.get("/api/providers")
@@ -703,7 +706,7 @@ def connect_provider(body: ProviderKey, user: str = Depends(current_user)):
         # В `extra` пользователь может передать адрес, если поставщик незнакомый
         # (по виду ключа угадываются NVIDIA, Groq, OpenRouter и другие).
         from .llm_custom import detect, ping_model
-        found = detect(key, extra)
+        found = detect(key, extra, body.model)
         if not found.get("ok"):
             raise HTTPException(400, found.get("error") or "Ключ не подошёл.")
         models = found["models"]
@@ -712,7 +715,11 @@ def connect_provider(body: ProviderKey, user: str = Depends(current_user)):
         # отвечала 404 при вызове. Один токен стоит почти ничего, а знать это
         # лучше сейчас, чем в момент сборки протокола.
         default = models[0]
-        ok_ping, why = ping_model(found["base_url"], key, found["auth"], default)
+        if found.get("manual"):
+            # Модель уже проверена вызовом внутри detect — второй раз незачем.
+            ok_ping, why = True, ""
+        else:
+            ok_ping, why = ping_model(found["base_url"], key, found["auth"], default)
         where = found["hint"] or found["base_url"]
         skipped = found.get("skipped") or 0
         tail = f" Не-чат моделей пропущено: {skipped}." if skipped else ""

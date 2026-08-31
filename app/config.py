@@ -6,6 +6,7 @@ Defaults are tuned for THIS machine:
     beam search for noticeably better Russian quality than the old low-end
     "small"/greedy defaults.
 """
+import json
 import os
 from pathlib import Path
 
@@ -179,6 +180,19 @@ CUSTOM_KEY_PREFIXES = (
     ("AIza", "Google Gemini",
      "https://generativelanguage.googleapis.com/v1beta/openai"),
 )
+# Yandex Cloud AI Studio: OpenAI-совместимый шлюз, через него доступен DeepSeek
+# без лимитов бесплатного NIM. Особенность — имя модели включает каталог:
+# «gpt://<folder-id>/deepseek-v4-flash/latest». Список моделей шлюз не отдаёт,
+# поэтому модель указывается вручную (см. CUSTOM_MANUAL_MODEL_HOSTS).
+YANDEX_CLOUD_URL = os.getenv("YANDEX_CLOUD_URL", "https://ai.api.cloud.yandex.net/v1")
+YANDEX_CLOUD_FOLDER = os.getenv("YANDEX_CLOUD_FOLDER", "")
+YANDEX_CLOUD_API_KEY = os.getenv("YANDEX_CLOUD_API_KEY", "")
+YANDEX_CLOUD_MODEL = os.getenv("YANDEX_CLOUD_MODEL", "deepseek-v4-flash/latest")
+
+# Хосты, которые НЕ отдают список моделей по /v1/models. Для них подключение
+# идёт по указанной вручную модели: проверяем её пробным вызовом, а не списком.
+CUSTOM_MANUAL_MODEL_HOSTS = ("ai.api.cloud.yandex.net",)
+
 # Куда заглянуть, когда приставка ничего не говорит (обычный «sk-…»).
 CUSTOM_GUESS_URLS = (
     "https://api.deepseek.com",          # канонично без /v1, суффикс допустим
@@ -249,6 +263,22 @@ KEY_TTL_DAYS = {"nvidia": 183}
 PROVIDER_TPM = {"groq": int(os.getenv("VTX_GROQ_TPM", "12000"))}
 
 
+def custom_env_extra() -> str:
+    """Описание «своего» провайдера из переменных окружения — как JSON.
+
+    Нужно, чтобы Yandex Cloud можно было подключить одним лишь .env, не заходя
+    в интерфейс: ключ, каталог и модель там уже прописаны.
+    """
+    if not (YANDEX_CLOUD_API_KEY and YANDEX_CLOUD_FOLDER):
+        return ""
+    model = YANDEX_CLOUD_MODEL
+    if not model.startswith("gpt://"):
+        model = f"gpt://{YANDEX_CLOUD_FOLDER}/{model}"
+    return json.dumps({"base_url": YANDEX_CLOUD_URL, "auth": "bearer",
+                       "model": model, "models": [model],
+                       "hint": "Yandex Cloud AI Studio"}, ensure_ascii=False)
+
+
 def provider_creds(provider: str, user_keys: dict | None = None) -> list[tuple[str, str]]:
     """List of (api_key, extra) for a provider — ALL the user's keys (for
     rate-limit rotation), else the server env fallback. `user_keys` is
@@ -264,6 +294,10 @@ def provider_creds(provider: str, user_keys: dict | None = None) -> list[tuple[s
         "gemini": (GEMINI_API_KEY, ""),
         "yandex": (YANDEX_API_KEY, YANDEX_FOLDER_ID),
         "gigachat": (GIGACHAT_AUTH_KEY, GIGACHAT_SCOPE),
+        # Yandex Cloud AI Studio, заданный переменными окружения: подключение
+        # собирается само, без карточки в интерфейсе. Имя модели включает
+        # каталог — «gpt://<folder>/<model>», так требует их шлюз.
+        "custom": (YANDEX_CLOUD_API_KEY, custom_env_extra()),
     }.get(provider, ("", ""))
     return [env] if env[0] else []
 
@@ -283,7 +317,10 @@ def available_providers(user_keys: dict | None = None) -> list[str]:
     out = []
     if OLLAMA_ENABLED:
         out.append("ollama")
-    for p in ("groq", "nvidia", "gemini", "yandex", "gigachat", "anthropic"):
+    # Перебираем KEY_PROVIDERS, а не список из литералов: жёсткий перечень уже
+    # один раз потерял нового провайдера — он подключался, но нигде не
+    # появлялся, потому что его забыли дописать сразу в трёх местах.
+    for p in sorted(KEY_PROVIDERS):
         if _has_provider_key(p, user_keys):
             out.append(p)
     return [p for p in PROVIDER_ORDER if p in out]

@@ -20,7 +20,10 @@ const nav = [
 ];
 const tools = [
   { to: "/recognition", icon: Mic, label: "Распознавание" },
-  { to: "/providers", icon: BrainCircuit, label: "Нейросети" },
+  // Страница «Нейросети» временно убрана из меню: подключение движков
+  // перестраивается. Маршрут остаётся рабочим по прямой ссылке /providers,
+  // чтобы ключи можно было править, пока идёт перестройка.
+  // { to: "/providers", icon: BrainCircuit, label: "Нейросети" },
   { to: "/context", icon: Brain, label: "Контекст для ИИ" },
   { to: "/profile", icon: User, label: "Профиль" },
 ];
@@ -30,7 +33,10 @@ const tabs = [
   { to: "/", icon: LayoutGrid, label: "Обзор", end: true },
   { to: "/meetings", icon: CalendarClock, label: "Встречи" },
   { to: "/recognition", icon: Mic, label: "Распозн." },
-  { to: "/providers", icon: BrainCircuit, label: "Нейросети" },
+  // Было «Нейросети» — страница временно убрана, пока перестраивается
+  // подключение движков. На её место встал планировщик: это следующий по
+  // частоте экран.
+  { to: "/scheduler", icon: ListChecks, label: "План" },
 ];
 
 /* Automation is a global control shown in three places (desktop topbar, mobile
