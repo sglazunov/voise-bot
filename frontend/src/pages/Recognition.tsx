@@ -6,6 +6,7 @@ import {
 import { Page } from "../components/Layout";
 import { Card, Select, useToast } from "../components/ui";
 import { api } from "../lib/api";
+import { EngineSelect, Engine } from "../components/EngineSelect";
 import { fmtDateTime } from "../lib/format";
 
 const MODELS = [
@@ -49,7 +50,7 @@ export default function Recognition() {
   const [docxProv, setDocxProv] = useState("");  // какой движок скачиваем
   const [busy, setBusy] = useState(false);
   const [prog, setProg] = useState(0);
-  const [engines, setEngines] = useState<{ value: string; label: string }[]>([]);
+  const [engines, setEngines] = useState<Engine[]>([]);
   // Настройки формы переживают обновление страницы (localStorage). Заметки и
   // контекст не сохраняем — они у каждой встречи свои.
   const OPTS_DEFAULTS = { language: "ru", model: "", analyze: true, diarize: false, capture_screen: false, identify_speakers: false, provider: "auto", context_hint: "", preset: "universal" };
@@ -366,8 +367,11 @@ export default function Recognition() {
             )}
             {recommend && <div className="text-[11px] mt-1" style={{ color: "var(--muted)" }}>💡 {recommend}</div>}
             <label className="lbl mt-3">Движок протокола</label>
-            <Select value={opts.provider} onChange={(v) => setOpts({ ...opts, provider: v })}
-              options={[{ value: "auto", label: "Авто" }, ...engines.map((e) => ({ value: e.value, label: e.label }))]} />
+            {/* Два поля: поставщик и его модель. Одним списком это была сотня
+                строк «Свой ключ · …», где не отличить OpenRouter от Yandex
+                Cloud. */}
+            <EngineSelect engines={engines} value={opts.provider}
+              onChange={(v) => setOpts({ ...opts, provider: v })} />
             <label className="lbl mt-3">Тип встречи (пресет протокола)</label>
             <Select value={opts.preset} onChange={(v) => setOpts({ ...opts, preset: v })}
               options={presets.length ? presets : [{ value: "universal", label: "Универсальный" }]} />

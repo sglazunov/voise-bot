@@ -4,6 +4,7 @@ import { Page } from "../components/Layout";
 import { Card, Switch, Select, useToast } from "../components/ui";
 import { useSettings } from "../lib/useSettings";
 import { api } from "../lib/api";
+import { EngineSelect, Engine } from "../components/EngineSelect";
 import { Status } from "../lib/format";
 
 const DAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"];
@@ -30,7 +31,7 @@ function Toggle({ title, sub, on, onChange }: any) {
 export default function Scheduler() {
   const { s, set, save , ready } = useSettings();
   const [st, setSt] = useState<Status | null>(null);
-  const [engines, setEngines] = useState<{ value: string; label: string }[]>([]);
+  const [engines, setEngines] = useState<Engine[]>([]);
   const [presets, setPresets] = useState<{ value: string; label: string }[]>([]);
   useEffect(() => { api.get("/api/presets").then((d) => setPresets(d.presets || [])).catch(() => {}); }, []);
   const toast = useToast();
@@ -179,9 +180,10 @@ export default function Scheduler() {
             «Авто»: планёрка/стендап → задачи и статусы, демо → показанное и вопросы,
             1:1 → договорённости, иначе — универсальный.</div>
           <label className="lbl">Движок протокола (нейросеть · модель)</label>
-          <Select value={s.analyze_provider || "auto"} onChange={(v) => set("analyze_provider", v)}
-            options={[{ value: "auto", label: "Авто (Groq — в первую очередь, локальный — резерв)" },
-                      ...engines.map((e) => ({ value: e.value, label: e.label }))]} />
+          {/* Поставщик и модель — раздельно: подключённых ключей бывает
+              несколько, и в одном списке модели разных сервисов не различить. */}
+          <EngineSelect engines={engines} value={s.analyze_provider || "auto"}
+            onChange={(v) => set("analyze_provider", v)} />
           <div className="text-[11.5px] mt-1" style={{ color: "var(--muted)" }}>
             Ключи и список моделей — на вкладке «Нейросети».</div>
         </div>

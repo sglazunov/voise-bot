@@ -64,11 +64,15 @@ def _engine_list(user_keys: dict | None = None) -> list[dict]:
 
         if models:
             for m in sorted(models, key=rank):
-                engines.append({"value": f"ollama:{m}", "label": _ollama_label(m)})
+                engines.append({"value": f"ollama:{m}", "label": _ollama_label(m),
+                                "provider": "ollama", "group": "Локально · Ollama",
+                                "model": m})
         else:
             # Ollama enabled but server down / no models yet — offer the default.
             engines.append({"value": "ollama",
-                            "label": f"Локально · {config.OLLAMA_MODEL} (по умолчанию)"})
+                            "label": f"Локально · {config.OLLAMA_MODEL} (по умолчанию)",
+                            "provider": "ollama", "group": "Локально · Ollama",
+                            "model": config.OLLAMA_MODEL})
     for p in avail:
         if p == "ollama":
             continue
@@ -94,9 +98,16 @@ def _engine_list(user_keys: dict | None = None) -> list[dict]:
                     if all(is_denied(c.get("key") or "", m) for c in creds):
                         continue
                     seen.add(m)
-                    engines.append({"value": f"custom:{m}", "label": f"Свой ключ · {m}"})
+                    # Группа — имя поставщика из подключения: под «своим
+                    # ключом» живут модели РАЗНЫХ сервисов (OpenRouter, Yandex
+                    # Cloud, свой сервер), и в общем списке их не различить.
+                    where = cfg.get("hint") or cfg.get("base_url") or "Свой ключ"
+                    engines.append({"value": f"custom:{m}", "label": f"{where} · {m}",
+                                    "provider": "custom", "group": where, "model": m})
             if not seen:
-                engines.append({"value": "custom", "label": "Свой ключ · по умолчанию"})
+                engines.append({"value": "custom", "label": "Свой ключ · по умолчанию",
+                                "provider": "custom", "group": "Свой ключ",
+                                "model": "по умолчанию"})
             continue
         if p == "nvidia":
             # Каталог NVIDIA — сотня моделей и он меняется, поэтому список
@@ -130,19 +141,26 @@ def _engine_list(user_keys: dict | None = None) -> list[dict]:
                     engines.append({"value": f"nvidia:{m}",
                                     "label": (f"NVIDIA · {m}" if verified
                                               else f"NVIDIA · {m} (доступ не проверен)"),
-                                    "verified": verified})
+                                    "verified": verified, "provider": "nvidia",
+                                    "group": "NVIDIA NIM",
+                                    "model": m if verified else f"{m} (доступ не проверен)"})
             else:
-                engines.append({"value": "nvidia",
+                engines.append({"value": "nvidia", "provider": "nvidia",
+                                "group": "NVIDIA NIM", "model": config.NVIDIA_MODEL,
                                 "label": f"NVIDIA · {config.NVIDIA_MODEL} (по умолчанию)"})
             continue
         tiers = config.PROVIDER_MODELS.get(p)
         if tiers:
             # One entry per model tier so the user picks how powerful it is.
             # The tier label already names the brand (Llama / GigaChat / …).
+            group = config.PROVIDER_LABELS.get(p, p)
             for t in tiers:
-                engines.append({"value": f"{p}:{t['value']}", "label": t["label"]})
+                engines.append({"value": f"{p}:{t['value']}", "label": t["label"],
+                                "provider": p, "group": group, "model": t["label"]})
         else:
-            engines.append({"value": p, "label": config.PROVIDER_LABELS.get(p, p)})
+            group = config.PROVIDER_LABELS.get(p, p)
+            engines.append({"value": p, "label": group, "provider": p,
+                            "group": group, "model": "по умолчанию"})
     return engines
 
 app = FastAPI(title="Voice Transcriber", version="1.0")
