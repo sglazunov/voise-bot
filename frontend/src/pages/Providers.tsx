@@ -183,12 +183,14 @@ function ProviderCard({ p, models, onChange, toast }:
       )}
       {p.id === "custom" && (
         <>
-          <label className="lbl mt-2">Модель (если список недоступен)</label>
+          <label className="lbl mt-2">Модели (если список недоступен)</label>
           <input className="field" value={model} onChange={(e) => setModel(e.target.value)}
-            placeholder="gpt://b1g…/deepseek-v4-flash/latest — для Yandex Cloud" />
+            placeholder="gpt://b1g…/deepseek-v4-flash/latest, gpt://b1g…/yandexgpt/latest" />
           <div className="text-[11.5px] mt-1" style={{ color: "var(--muted)" }}>
-            Нужно только тем шлюзам, которые не перечисляют свои модели. У
-            Yandex Cloud имя модели включает идентификатор каталога.
+            Нужно только тем шлюзам, которые не перечисляют свои модели.
+            Несколько — через запятую: на один ключ Yandex Cloud вешается
+            сразу несколько, и каждая проверяется отдельно. Имя модели там
+            включает идентификатор каталога.
           </div>
         </>
       )}

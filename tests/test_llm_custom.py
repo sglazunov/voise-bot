@@ -357,7 +357,7 @@ class TestYandexCloud:
         monkeypatch.setattr(llm_custom, "list_models", lambda *a, **k: pytest.fail(
             "у этого шлюза список моделей не запрашивается"))
         got = detect("AQVN-ключ", "https://ai.api.cloud.yandex.net/v1")
-        assert not got["ok"] and "укажите модель" in got["error"].lower()
+        assert not got["ok"] and "укажите их вручную" in got["error"].lower()
 
     def test_модель_подтверждается_вызовом(self, monkeypatch):
         monkeypatch.setattr(llm_custom, "list_models", lambda *a, **k: pytest.fail(
@@ -376,3 +376,46 @@ class TestYandexCloud:
         base, _, model = name.partition(":")
         assert base == "custom"
         assert model == "gpt://b1g/deepseek-v4-flash/latest"
+
+
+class TestНесколькоМоделейНаКлюч:
+    """На один ключ Yandex Cloud вешается несколько моделей. Ограничиться одной
+    значило бы, что остальные, за которые уже заплачено, недоступны в выборе."""
+
+    def test_разбор_списка(self):
+        f = llm_custom.split_models
+        assert f("a, b ,c") == ["a", "b", "c"]
+        assert f("gpt://b1g/deepseek-v4-flash/latest, gpt://b1g/yandexgpt/latest") == [
+            "gpt://b1g/deepseek-v4-flash/latest", "gpt://b1g/yandexgpt/latest"]
+        assert f("a,,a, b") == ["a", "b"], "дубли и пустые отбрасываются"
+        assert f("") == []
+
+    def test_подключаются_только_ответившие(self, monkeypatch):
+        """Не ответившая модель не должна попасть в список: выбрать её значит
+        получить ошибку в момент сборки протокола."""
+        monkeypatch.setattr(llm_custom, "list_models", lambda *a, **k: [])
+        monkeypatch.setattr(llm_custom, "ping_model",
+                            lambda url, key, style, m: ("живая" in m, "404"))
+        got = detect("AQVN", "https://ai.api.cloud.yandex.net/v1",
+                     "gpt://b/живая, gpt://b/мёртвая")
+        assert got["ok"]
+        assert got["models"] == ["gpt://b/живая"]
+        assert got["failed"] == ["gpt://b/мёртвая"]
+
+    def test_если_не_ответила_ни_одна(self, monkeypatch):
+        monkeypatch.setattr(llm_custom, "list_models", lambda *a, **k: [])
+        monkeypatch.setattr(llm_custom, "ping_model",
+                            lambda *a, **k: (False, "HTTP 404"))
+        got = detect("AQVN", "https://ai.api.cloud.yandex.net/v1", "a, b")
+        assert not got["ok"] and "Ни одна из моделей" in got["error"]
+
+    def test_каталог_подставляется_каждой(self, monkeypatch):
+        from app import config
+        monkeypatch.setattr(config, "YANDEX_CLOUD_API_KEY", "AQVN")
+        monkeypatch.setattr(config, "YANDEX_CLOUD_FOLDER", "b1g")
+        monkeypatch.setattr(config, "YANDEX_CLOUD_MODEL",
+                            "deepseek-v4-flash/latest, gpt://чужой/модель, yandexgpt")
+        models = json.loads(config.custom_env_extra())["models"]
+        assert models == ["gpt://b1g/deepseek-v4-flash/latest",
+                          "gpt://чужой/модель",      # уже полное — не трогаем
+                          "gpt://b1g/yandexgpt"]

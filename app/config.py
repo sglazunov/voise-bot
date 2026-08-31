@@ -271,11 +271,21 @@ def custom_env_extra() -> str:
     """
     if not (YANDEX_CLOUD_API_KEY and YANDEX_CLOUD_FOLDER):
         return ""
-    model = YANDEX_CLOUD_MODEL
-    if not model.startswith("gpt://"):
-        model = f"gpt://{YANDEX_CLOUD_FOLDER}/{model}"
+    # На один ключ Yandex Cloud вешается НЕСКОЛЬКО моделей — перечисляются
+    # через запятую. Каталог подставляем каждой, у которой его ещё нет.
+    models = []
+    for raw in YANDEX_CLOUD_MODEL.replace(chr(10), ",").split(","):
+        m = raw.strip()
+        if not m:
+            continue
+        if not m.startswith("gpt://"):
+            m = f"gpt://{YANDEX_CLOUD_FOLDER}/{m}"
+        if m not in models:
+            models.append(m)
+    if not models:
+        return ""
     return json.dumps({"base_url": YANDEX_CLOUD_URL, "auth": "bearer",
-                       "model": model, "models": [model],
+                       "model": models[0], "models": models,
                        "hint": "Yandex Cloud AI Studio"}, ensure_ascii=False)
 
 

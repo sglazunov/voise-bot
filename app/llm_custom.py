@@ -216,6 +216,22 @@ def list_models(base_url: str, key: str, style: str,
     return out
 
 
+def split_models(raw: str) -> list[str]:
+    """Разобрать список моделей, записанных через запятую.
+
+    На один ключ Yandex Cloud вешается несколько моделей, и выбирать между
+    ними нужно в интерфейсе. Разделитель — запятая: в самих именах её нет, а
+    слэши и двоеточия есть («gpt://<folder>/deepseek-v4-flash/latest»).
+    """
+    out, seen = [], set()
+    for part in (raw or "").replace(chr(10), ",").split(","):
+        m = part.strip()
+        if m and m not in seen:
+            seen.add(m)
+            out.append(m)
+    return out
+
+
 def _manual_only(base_url: str) -> bool:
     """Шлюз, который не отдаёт список моделей по /v1/models.
 
@@ -254,28 +270,38 @@ def detect(key: str, base_url: str = "", model: str = "") -> dict:
     urls = [u for u in (base_url, known_url) if u] or list(config.CUSTOM_GUESS_URLS)
     started = time.time()
 
-    model = (model or "").strip()
-    if base_url and (model or _manual_only(base_url)):
+    wanted = split_models(model)
+    if base_url and (wanted or _manual_only(base_url)):
         # Список моделей не спрашиваем: либо шлюз его не отдаёт, либо человек
-        # прямо назвал модель. Проверяем вызовом — это надёжнее любого списка.
-        if not model:
+        # прямо назвал модели. Проверяем вызовом — это надёжнее любого списка.
+        if not wanted:
             return {"ok": False, "hint": hint,
-                    "error": "Этот шлюз не отдаёт список моделей — укажите "
-                             "модель вручную. Для Yandex Cloud имя выглядит "
-                             "как gpt://<идентификатор-каталога>/"
+                    "error": "Этот шлюз не отдаёт список моделей — укажите их "
+                             "вручную, через запятую. Для Yandex Cloud имя "
+                             "выглядит как gpt://<идентификатор-каталога>/"
                              "deepseek-v4-flash/latest."}
+        # На один ключ Yandex Cloud вешается НЕСКОЛЬКО моделей, поэтому
+        # проверяем каждую: рабочие берём, про остальные говорим честно.
         for style in AUTH_STYLES:
             if not key and style != "none":
                 continue
-            ok, why = ping_model(base_url, key, style, model)
-            if ok:
-                log.info("Модель подтверждена вызовом: %s, авторизация %s",
-                         _safe_url(base_url), style)
-                return {"ok": True, "base_url": base_url, "auth": style,
-                        "models": [model], "hint": hint, "manual": True}
-            last = why
+            ok_models, failed = [], []
+            for m in wanted:
+                ok, why = ping_model(base_url, key, style, m)
+                (ok_models if ok else failed).append(m if ok else (m, why))
+            if ok_models:
+                log.info("Моделей подтверждено вызовом: %d из %d, %s, авторизация %s",
+                         len(ok_models), len(wanted), _safe_url(base_url), style)
+                out = {"ok": True, "base_url": base_url, "auth": style,
+                       "models": ok_models, "hint": hint, "manual": True}
+                if failed:
+                    out["failed"] = [m for m, _ in failed]
+                return out
+            last = failed[0][1] if failed else "нет ответа"
+        names = ", ".join(wanted)
         return {"ok": False, "hint": hint,
-                "error": f"Модель «{model}» не ответила по этому адресу: {last}"}
+                "error": f"Ни одна из моделей ({names}) не ответила по этому "
+                         f"адресу: {last}"}
 
     for url in urls:
         for style in AUTH_STYLES:

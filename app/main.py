@@ -723,6 +723,10 @@ def connect_provider(body: ProviderKey, user: str = Depends(current_user)):
         where = found["hint"] or found["base_url"]
         skipped = found.get("skipped") or 0
         tail = f" Не-чат моделей пропущено: {skipped}." if skipped else ""
+        # На один ключ можно повесить несколько моделей: о тех, что не
+        # отозвались, говорим прямо — иначе человек будет искать их в списке.
+        if found.get("failed"):
+            tail += (" Не ответили: " + ", ".join(found["failed"][:5]) + ".")
         if ok_ping:
             note = (f"Ключ принят: {where}, доступно моделей — {len(models)}. "
                     f"Модель по умолчанию — «{default}»; сменить можно в "
