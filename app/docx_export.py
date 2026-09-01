@@ -14,11 +14,18 @@ def _task_parts(item) -> tuple[str, str]:
 
 
 def _vinfo(analysis: dict, key: str, idx: int) -> Optional[dict]:
-    """Verification record for a list item (Д5); None on old protocols."""
+    """Verification record for a list item (Д5); None on old protocols.
+
+    Запись обязана быть словарём, но модель отвечает не всегда по схеме: в
+    боевом протоколе от Yandex Cloud вместо словарей пришли строки. Не-словарь
+    равнозначен «проверки нет» — иначе на нём падал бы весь экспорт в Word, то
+    есть готовый протокол терялся бы из-за формы разметки.
+    """
     try:
-        return (analysis.get("verification") or {})[key][idx]
+        rec = (analysis.get("verification") or {})[key][idx]
     except (KeyError, IndexError, TypeError):
         return None
+    return rec if isinstance(rec, dict) else None
 
 
 _GRAY = (0x8A, 0x8A, 0x8A)

@@ -889,8 +889,16 @@ def _strip_unfounded_owners(result: dict, ver: dict) -> None:
         for idx, item in enumerate(result.get(key) or []):
             if not isinstance(item, dict) or not item.get("owner"):
                 continue
-            v = ver[key][idx]
-            if not (v["ok"] and v["owner_ok"]):
+            try:
+                v = ver[key][idx]
+            except (KeyError, IndexError, TypeError):
+                continue                # проверки по этому пункту нет
+            if not isinstance(v, dict):
+                # Модель ответила не по схеме (в боевом протоколе от Yandex
+                # Cloud здесь пришли строки). Снимать ответственного из-за
+                # формы разметки нельзя — это молчаливая порча протокола.
+                continue
+            if not (v.get("ok") and v.get("owner_ok")):
                 item["owner"] = ""
 
 

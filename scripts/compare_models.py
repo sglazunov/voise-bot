@@ -53,12 +53,21 @@ def _transcript(user: str, job_id: str | None) -> tuple[str, str]:
 
 
 def _score(res: dict) -> tuple[int, int, int, int]:
-    ver = (res.get("verification") or {})
+    """Темы, задачи и доля пунктов с дословной цитатой.
+
+    Разметка проверки — список словарей по индексу пункта, но не всякая модель
+    отвечает ровно так: встречаются строки и None. Пропускаем такие, а не
+    падаем: протокол уже собран, и терять из-за подсчёта весь прогон незачем.
+    """
+    ver = res.get("verification")
+    if not isinstance(ver, dict):
+        ver = {}
     total = ok = 0
     for key in ("tasks", "minor_tasks", "done_tasks", "decisions"):
         for item in ver.get(key) or []:
             total += 1
-            ok += 1 if (item or {}).get("ok") else 0
+            if isinstance(item, dict) and item.get("ok"):
+                ok += 1
     return len(res.get("detailed") or []), len(res.get("tasks") or []), ok, total
 
 
