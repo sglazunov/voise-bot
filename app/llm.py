@@ -36,7 +36,7 @@ from .llm_base import (                 # noqa: F401 — часть публич
     GenerationCancelled, LLMProvider, _KeyProviderMixin,
     _http_post_json, _is_rate_limit, is_key_rejected, _retry_after, _safe_url,
 )
-from .llm_custom import CustomProvider  # noqa: F401 — часть публичного API
+from .llm_custom import CustomProvider, text_of  # noqa: F401 — часть публичного API
 
 
 # ---------------------------------------------------------------------------
@@ -167,7 +167,12 @@ class GroqProvider(_KeyProviderMixin):
         headers = {"Authorization": f"Bearer {self.api_key}"}
         out = _http_post_json(url, payload, headers, timeout=180,
                               max_retries=self._retries)
-        return out["choices"][0]["message"]["content"].strip()
+        # Разбор общий с «своим ключом»: content бывает null (рассуждающие
+        # модели) или списком кусков, и голое .strip() падало на None.
+        text, _ = text_of(out)
+        if not text:
+            raise RuntimeError(f"{self.name}: модель вернула пустой ответ.")
+        return text
 
 
 
@@ -348,7 +353,12 @@ class GigaChatProvider:
         except urllib.error.HTTPError as e:
             body = e.read().decode("utf-8", "replace")[:300]
             raise RuntimeError(f"GigaChat HTTP {e.code}: {body}") from e
-        return out["choices"][0]["message"]["content"].strip()
+        # Разбор общий с «своим ключом»: content бывает null (рассуждающие
+        # модели) или списком кусков, и голое .strip() падало на None.
+        text, _ = text_of(out)
+        if not text:
+            raise RuntimeError(f"{self.name}: модель вернула пустой ответ.")
+        return text
 
 
 _PROVIDERS = {

@@ -340,6 +340,40 @@ def detect(key: str, base_url: str = "", model: str = "") -> dict:
                       "host.docker.internal).")}
 
 
+def text_of(out: dict) -> tuple[str, str]:
+    """Текст ответа и finish_reason из OpenAI-совместимого ответа.
+
+    `choices[0].message.content` бывает не только строкой:
+
+      * СПИСКОМ кусков `[{"type": "text", "text": …}]` — так отвечают
+        некоторые шлюзы;
+      * `null` — у рассуждающих моделей (DeepSeek R1 и родня): текст они
+        кладут в `reasoning_content`, а `content` оставляют пустым; так же
+        выходит, когда лимит токенов кончился прямо в рассуждениях
+        (`finish_reason = "length"`).
+
+    Прямое `["content"].strip()` на этом падало с «'NoneType' object has no
+    attribute 'strip'» — встреча уходила запасному движку, и по такому тексту
+    в шапке протокола понять причину было нельзя.
+    """
+    choices = (out or {}).get("choices") or []
+    if not choices:
+        return "", ""
+    ch = choices[0] or {}
+    finish = str(ch.get("finish_reason") or "")
+    msg = ch.get("message") or ch.get("delta") or {}
+    raw = msg.get("content")
+    if isinstance(raw, list):
+        raw = "".join(part.get("text", "") for part in raw
+                      if isinstance(part, dict))
+    text = str(raw or "").strip()
+    if not text:
+        # Рассуждения — не ответ, но лучше пустоты: протокол там нередко есть,
+        # а разбор JSON всё равно ищет фигурную скобку в любом тексте.
+        text = str(msg.get("reasoning_content") or "").strip()
+    return text, finish
+
+
 class CustomProvider(_KeyProviderMixin):
     """Поставщик, описанный настройками, а не отдельным классом.
 
@@ -395,7 +429,23 @@ class CustomProvider(_KeyProviderMixin):
                 raise
         if should_stop and should_stop():
             raise GenerationCancelled()
-        return out["choices"][0]["message"]["content"].strip()
+        text, finish = text_of(out)
+        if not text and "response_format" in payload:
+            # Строгий JSON-режим часть шлюзов принимает, но отвечает на него
+            # пустотой. Отличить это от настоящей пустоты можно только одним
+            # способом — переспросить без него. Разбор JSON у нас всё равно
+            # свой, так что режим ничего не гарантировал.
+            payload.pop("response_format", None)
+            out = _http_post_json(url, payload, self._headers(), timeout=300,
+                                  max_retries=self._retries)
+            text, finish = text_of(out)
+        if not text:
+            more = " (лимит токенов кончился прямо в ответе)" if finish == "length" else ""
+            raise RuntimeError(
+                f"Модель «{self.model}» вернула пустой ответ{more}. У "
+                "рассуждающих моделей весь лимит уходит в рассуждения — "
+                "возьмите модель без рассуждений или другого поставщика.")
+        return text
 
     def complete_guarded(self, *a, **kw) -> str:
         """complete с запоминанием «модель этому ключу не выдана».
