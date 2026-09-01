@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Video, RefreshCw, Square, Clock, Loader2, Link2, NotebookPen, Radio, ScrollText } from "lucide-react";
 import { Page } from "../components/Layout";
-import { Switch, StatusBadge, Modal, useToast } from "../components/ui";
+import { Ellipsis, Switch, StatusBadge, Modal, useToast } from "../components/ui";
 import { api } from "../lib/api";
 import { Status, Meeting, isToday, fmtDateTime } from "../lib/format";
 
@@ -146,7 +146,7 @@ export default function Meetings() {
                 <Video size={20} color={rec ? "#fca5a5" : "var(--accent)"} />
               </div>
               <div className="min-w-0 flex-1">
-                <div className="font-bold text-[14px] truncate">{m.title}</div>
+                <Ellipsis as="div" className="font-bold text-[14px]">{m.title}</Ellipsis>
                 <div className="flex items-center gap-2 text-[11.5px] mt-1 flex-wrap" style={{ color: "var(--muted)" }}>
                   <span className="flex items-center gap-1"><Clock size={12} /> {fmtDateTime(m.start)}</span>
                   {/* the detail line runs long ("…распознавание+протокол — job 6ca…"),

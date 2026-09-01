@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { UserCircle, Phone, KeyRound, ShieldCheck, Trash2, AlertTriangle, Users, Copy, Check, UserMinus, User, ChevronDown } from "lucide-react";
 import { Page } from "../components/Layout";
-import { Card, Modal, Popover, useToast } from "../components/ui";
+import { Card, Ellipsis, Modal, Popover, useToast } from "../components/ui";
 import { api } from "../lib/api";
 import { formatRuPhone } from "../lib/phone";
 
@@ -116,7 +116,7 @@ export default function Profile() {
                   style={{ cursor: "pointer", borderColor: membersOpen ? "var(--accent)" : undefined }}>
                   <span className="flex items-center gap-2 min-w-0">
                     <Users size={15} color="var(--muted)" className="flex-none" />
-                    <span className="truncate">Логины в команде</span>
+                    <Ellipsis>Логины в команде</Ellipsis>
                     <span className="chip flex-none" style={{ color: "var(--accent)" }}>{info?.team_size ?? 1}</span>
                   </span>
                   <ChevronDown size={16} color="var(--muted)"
@@ -127,7 +127,7 @@ export default function Profile() {
                   {(info?.team_members || []).map((m: any) => (
                     <div key={m.username} className="glass2 rounded-xl px-3 py-2 flex items-center gap-2">
                       <User size={14} color="var(--muted)" className="flex-none" />
-                      <span className="text-[13px] font-semibold truncate">{m.username}</span>
+                      <Ellipsis className="text-[13px] font-semibold">{m.username}</Ellipsis>
                       {m.is_admin
                         ? <span className="chip flex-none" style={{ color: "var(--accent)" }}>админ</span>
                         : <button className="ml-auto btn btn-danger flex-none" onClick={() => kick(m.username)}

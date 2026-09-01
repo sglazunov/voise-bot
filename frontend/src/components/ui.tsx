@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useRef, useState, ReactNode, RefObject } from "react";
+import { createContext, useCallback, useContext, useEffect, useRef, useState, HTMLAttributes, ReactNode, RefObject } from "react";
 import { createPortal } from "react-dom";
 import { ChevronDown, Check } from "lucide-react";
 
@@ -95,6 +95,37 @@ export function Modal({ open, onClose, title, children, wide }:
     </div>, document.body);
 }
 
+/* ---- Ellipsis (обрезанная строка с подсказкой под курсором) ----
+   Обрезанный текст сам по себе ничего не сообщает: «gpt://…/ИДЕ…» и
+   «gpt://…/ИДЕН…» на вид неразличимы, а имена моделей и файлов различаются
+   как раз хвостом. Подсказку ставим ТОЛЬКО когда текст реально не влез —
+   иначе браузер показывал бы всплывашку и над строкой, видимой целиком. */
+export function Ellipsis({ children, as: Tag = "span", className = "", hint, ...rest }: {
+  children: ReactNode; as?: "span" | "div"; className?: string;
+  /** Что показать вместо самого текста (например, полный путь). */
+  hint?: string;
+} & HTMLAttributes<HTMLElement>) {
+  const ref = useRef<HTMLElement>(null);
+  // Список зависимостей намеренно не задан: пересчёт нужен после каждого
+  // рендера, иначе при смене текста без смены ширины осталась бы подсказка
+  // от прошлого значения.
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const sync = () => {
+      const full = hint ?? (el.textContent || "").trim();
+      // +1px — запас на дробные ширины при масштабировании страницы.
+      if (full && el.scrollWidth > el.clientWidth + 1) el.setAttribute("title", full);
+      else el.removeAttribute("title");
+    };
+    sync();
+    const ro = new ResizeObserver(sync);
+    ro.observe(el);
+    return () => ro.disconnect();
+  });
+  return <Tag ref={ref as never} className={`truncate ${className}`} {...rest}>{children}</Tag>;
+}
+
 /* ---- Select (themed dropdown; replaces native <select> app-wide) ----
    Always opens downward, matches the trigger width, and is styled like the rest
    of the UI (rounded, glass, teal accent). Supports flat options and groups. */
@@ -123,7 +154,7 @@ export function Select({ value, onChange, options, placeholder = "—", classNam
         onMouseEnter={(e) => { if (!sel) e.currentTarget.style.background = "rgba(120,180,190,.10)"; }}
         onMouseLeave={(e) => { if (!sel) e.currentTarget.style.background = "transparent"; }}>
         <Check size={14} color="var(--accent)" style={{ flex: "0 0 auto", opacity: sel ? 1 : 0 }} />
-        <span className="truncate">{o.label}</span>
+        <Ellipsis>{o.label}</Ellipsis>
       </button>
     );
   };
@@ -133,8 +164,8 @@ export function Select({ value, onChange, options, placeholder = "—", classNam
       <button type="button" onClick={() => setOpen((v) => !v)}
         className="field flex items-center justify-between gap-2 text-left"
         style={{ cursor: "pointer", borderColor: open ? "var(--accent)" : undefined }}>
-        <span className="truncate" style={current ? {} : { color: "var(--muted)" }}>
-          {current ? current.label : placeholder}</span>
+        <Ellipsis style={current ? {} : { color: "var(--muted)" }}>
+          {current ? current.label : placeholder}</Ellipsis>
         <ChevronDown size={16} color="var(--muted)"
           style={{ flex: "0 0 auto", transition: ".18s", transform: open ? "rotate(180deg)" : "none" }} />
       </button>

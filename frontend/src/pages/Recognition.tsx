@@ -4,7 +4,7 @@ import {
   Download, FileText, X, CalendarDays,
 } from "lucide-react";
 import { Page } from "../components/Layout";
-import { Card, Select, useToast } from "../components/ui";
+import { Card, Ellipsis, Select, useToast } from "../components/ui";
 import { api } from "../lib/api";
 import { EngineSelect, Engine } from "../components/EngineSelect";
 import { fmtDateTime } from "../lib/format";
@@ -439,7 +439,7 @@ export default function Recognition() {
                 <button key={r.job_id} onClick={() => { setSel(r.job_id); setTab("transcript"); }}
                   className="w-full glass2 rounded-2xl px-3.5 py-3 mb-2 text-left transition"
                   style={sel === r.job_id ? { borderColor: "var(--accent)" } : {}}>
-                  <div className="font-semibold text-[13px] truncate">{r.title}</div>
+                  <Ellipsis as="div" className="font-semibold text-[13px]">{r.title}</Ellipsis>
                   <div className="text-[11.5px] mt-0.5" style={{ color: "var(--muted)" }}
                     dangerouslySetInnerHTML={{
                       __html: r.snippet
@@ -455,7 +455,7 @@ export default function Recognition() {
                 <div className="grid place-items-center rounded-xl flex-none" style={{ width: 36, height: 36, background: "rgba(45,212,191,.13)" }}>
                   {isBusy(j.status) ? <Loader2 size={16} className="animate-spin" color="var(--accent)" /> : <FileAudio size={16} color="var(--accent)" />}</div>
                 <div className="min-w-0 flex-1">
-                  <div className="font-semibold text-[13px] truncate">{j.filename}</div>
+                  <Ellipsis as="div" className="font-semibold text-[13px]">{j.filename}</Ellipsis>
                   <div className="text-[11px] mt-0.5" style={{ color: "var(--muted)" }}>{RU_STATUS[j.status] || j.status} · {fmtDateTime(new Date(j.created_at * 1000).toISOString())}</div></div>
                 {isBusy(j.status) && <span className="text-[11px] font-semibold" style={{ color: "var(--accent)" }}>{Math.round((j.progress || 0) * 100)}%</span>}
               </button>
@@ -477,7 +477,7 @@ export default function Recognition() {
             <>
               <div className="flex items-start gap-3 mb-3">
                 <div className="min-w-0 flex-1">
-                  <div className="font-bold text-[15px] truncate">{detail.filename}</div>
+                  <Ellipsis as="div" className="font-bold text-[15px]">{detail.filename}</Ellipsis>
                   <div className="text-[11.5px] mt-0.5" style={{ color: "var(--muted)" }}>
                     {RU_STATUS[detail.status] || detail.status}
                     {detail.speakers ? ` · спикеров: ${detail.speakers}` : ""}

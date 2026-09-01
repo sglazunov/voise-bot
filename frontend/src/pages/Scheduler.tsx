@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { CalendarClock, RefreshCw, Filter, Workflow, Send, ChevronDown } from "lucide-react";
 import { Page } from "../components/Layout";
-import { Card, Switch, Select, useToast } from "../components/ui";
+import { Card, Ellipsis, Switch, Select, useToast } from "../components/ui";
 import { useSettings } from "../lib/useSettings";
 import { api } from "../lib/api";
 import { EngineSelect, Engine } from "../components/EngineSelect";
@@ -112,8 +112,8 @@ export default function Scheduler() {
           <Filter size={17} color="var(--accent)" className="flex-none" />
           <div className="min-w-0 flex-1">
             <div className="font-bold text-[15px]">Окно записи</div>
-            <div className="text-[11.5px] truncate" style={{ color: "var(--muted)" }}>
-              Доп. фильтры · {winSummary()}</div>
+            <Ellipsis as="div" className="text-[11.5px]" style={{ color: "var(--muted)" }}>
+              Доп. фильтры · {winSummary()}</Ellipsis>
           </div>
           <ChevronDown size={16} color="var(--muted)"
             style={{ flex: "0 0 auto", transition: ".18s", transform: winOpen ? "rotate(180deg)" : "none" }} />

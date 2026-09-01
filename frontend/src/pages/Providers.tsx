@@ -3,7 +3,7 @@ import {
   BrainCircuit, Plus, Trash2, CheckCircle2, KeyRound, Cpu, ExternalLink, X, AlertTriangle,
 } from "lucide-react";
 import { Page } from "../components/Layout";
-import { Card, useToast } from "../components/ui";
+import { Card, Ellipsis, useToast } from "../components/ui";
 import { api } from "../lib/api";
 import { plural } from "../lib/format";
 
@@ -155,7 +155,7 @@ function ProviderCard({ p, models, onChange, toast }:
         <div className="grid place-items-center rounded-xl flex-none" style={{ width: 38, height: 38, background: "rgba(45,212,191,.12)" }}>
           <KeyRound size={17} color="var(--accent)" /></div>
         <div className="min-w-0 flex-1">
-          <div className="font-bold text-[14.5px] truncate">{p.label}</div>
+          <Ellipsis as="div" className="font-bold text-[14.5px]">{p.label}</Ellipsis>
           <div className="text-[11.5px]" style={{ color: "var(--muted)" }}>{p.id}</div>
         </div>
         {p.available
@@ -269,7 +269,7 @@ function OllamaCard({ p, ollama, url, models }: { p: Provider; ollama: any; url:
         <div className="grid place-items-center rounded-xl flex-none" style={{ width: 38, height: 38, background: "rgba(45,212,191,.12)" }}>
           <Cpu size={17} color="var(--accent)" /></div>
         <div className="min-w-0 flex-1">
-          <div className="font-bold text-[14.5px] truncate">{p.label}</div>
+          <Ellipsis as="div" className="font-bold text-[14.5px]">{p.label}</Ellipsis>
           <div className="text-[11.5px]" style={{ color: "var(--muted)" }}>локально · без ключа</div>
         </div>
         {running

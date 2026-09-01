@@ -5,7 +5,7 @@ import {
   Radio, ShieldCheck, ArrowRight, Info, CheckCircle2, AlertTriangle,
 } from "lucide-react";
 import { Page } from "../components/Layout";
-import { Card, StatusBadge } from "../components/ui";
+import { Card, Ellipsis, StatusBadge } from "../components/ui";
 import { api } from "../lib/api";
 import { Status, isToday, fmtDateTime, plural } from "../lib/format";
 
@@ -33,7 +33,7 @@ function Mini({ icon: Icon, n, label }: { icon: any; n: React.ReactNode; label: 
       <Icon size={16} color="var(--accent)" className="flex-none" />
       <div className="min-w-0">
         <div className="font-bold text-[15px] leading-tight">{n}</div>
-        <div className="text-[11px] truncate" style={{ color: "var(--muted)" }}>{label}</div>
+        <Ellipsis as="div" className="text-[11px]" style={{ color: "var(--muted)" }}>{label}</Ellipsis>
       </div>
     </div>
   );
@@ -151,7 +151,7 @@ export default function Overview() {
               {st.top.map((t: any) => (
                 <div key={t.title}>
                   <div className="flex justify-between gap-2 text-[12.5px] mb-1">
-                    <span className="truncate">{t.title}</span>
+                    <Ellipsis>{t.title}</Ellipsis>
                     <span className="flex-none" style={{ color: "var(--muted)" }}>{t.hours.toFixed(1)} ч · {t.count}×</span>
                   </div>
                   <div style={{ height: 8, borderRadius: 6, background: "rgba(120,140,150,.16)", overflow: "hidden" }}>
@@ -184,7 +184,7 @@ export default function Overview() {
           </div>
           {recent.length ? recent.map((m) => (
             <div key={String(m.task_id) + m.start} className="glass2 rounded-2xl px-4 py-3 mb-2 flex items-center justify-between gap-3">
-              <div className="min-w-0"><div className="font-semibold text-[13.5px] truncate">{m.title}</div>
+              <div className="min-w-0"><Ellipsis as="div" className="font-semibold text-[13.5px]">{m.title}</Ellipsis>
                 <div className="text-[11.5px] mt-0.5" style={{ color: "var(--muted)" }}>{fmtDateTime(m.start)}{m.detail ? " · " + m.detail : ""}</div></div>
               <StatusBadge state={m.state} />
             </div>

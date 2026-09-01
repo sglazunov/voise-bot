@@ -8,7 +8,7 @@ import {
 import { useTheme } from "../lib/theme";
 import { api, logout } from "../lib/api";
 import { confirmLeave } from "../lib/unsaved";
-import { Switch } from "./ui";
+import { Ellipsis, Switch } from "./ui";
 
 const nav = [
   { to: "/", icon: LayoutGrid, label: "Обзор", end: true },
@@ -71,7 +71,7 @@ function Brand() {
       </span>
       <div className="min-w-0">
         <div className="font-extrabold text-[16px] leading-tight">MeetFlowAI</div>
-        <div className="text-[11px] truncate" style={{ color: "var(--muted)" }}>Автозапись встреч</div>
+        <Ellipsis as="div" className="text-[11px]" style={{ color: "var(--muted)" }}>Автозапись встреч</Ellipsis>
       </div>
     </div>
   );
@@ -195,7 +195,7 @@ export function Layout() {
               className="flex-1 flex flex-col items-center justify-center gap-1 py-2 text-[10.5px] font-semibold"
               style={({ isActive }: any) => ({ color: isActive ? "var(--accent)" : "var(--muted)" })}>
               <t.icon size={19} />
-              <span className="truncate max-w-full px-0.5">{t.label}</span>
+              <Ellipsis className="max-w-full px-0.5">{t.label}</Ellipsis>
             </NavLink>
           ))}
           <button onClick={() => setDrawer(true)}
