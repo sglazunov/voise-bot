@@ -21,7 +21,10 @@ class TestПодсказкаПоВидуКлюча:
     def test_известные_ключи_узнаются(self):
         assert hint_for("nvapi-abc")[0] == "NVIDIA NIM"
         assert hint_for("gsk_abc")[0] == "Groq"
-        assert hint_for("sk-or-abc")[0] == "OpenRouter"
+        assert hint_for("sk-proj-abc")[0] == "OpenAI"
+        # OpenRouter убран из подсказок по решению владельца: ключ sk-or- теперь
+        # ничего не подсказывает, и подключить его можно только с явным адресом.
+        assert hint_for("sk-or-abc")[0] == ""
 
     def test_незнакомый_ключ_не_выдумывает_поставщика(self):
         assert hint_for("abcdef")[0] == ""

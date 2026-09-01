@@ -81,7 +81,11 @@ def _engine_list(user_keys: dict | None = None) -> list[dict]:
             # рядом с ним. Прибивать его в коде нельзя: у каждого поставщика он
             # свой и меняется — ради этого универсальный провайдер и заведён.
             from .llm_custom import is_denied
-            creds = (user_keys or {}).get("custom") or []
+            # Берём подключения из ОБЩЕГО источника: там и ключи из интерфейса,
+            # и заданное переменными окружения (Yandex Cloud). Читая только
+            # user_keys, список молча терял env-подключение.
+            creds = [{"key": k, "extra": ex}
+                     for k, ex in config.provider_creds("custom", user_keys)]
             seen: set[str] = set()
             for cred in creds:
                 try:

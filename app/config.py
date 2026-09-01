@@ -168,7 +168,6 @@ PROVIDER_ORDER += [p for p in PROVIDER_LABELS if p not in PROVIDER_ORDER]
 CUSTOM_KEY_PREFIXES = (
     ("nvapi-", "NVIDIA NIM", "https://integrate.api.nvidia.com/v1"),
     ("gsk_", "Groq", "https://api.groq.com/openai/v1"),
-    ("sk-or-", "OpenRouter", "https://openrouter.ai/api/v1"),
     # OpenAI больше не выпускает «голые» sk-: актуальны три приставки.
     ("sk-proj-", "OpenAI", "https://api.openai.com/v1"),
     ("sk-svcacct-", "OpenAI", "https://api.openai.com/v1"),
@@ -197,7 +196,6 @@ CUSTOM_MANUAL_MODEL_HOSTS = ("ai.api.cloud.yandex.net",)
 CUSTOM_GUESS_URLS = (
     "https://api.deepseek.com",          # канонично без /v1, суффикс допустим
     "https://api.xiaomimimo.com/v1",
-    "https://openrouter.ai/api/v1",
     "https://api.openai.com/v1",
 )
 # Ключи, которые НЕ надо никуда отправлять: у Anthropic другой формат API
@@ -295,6 +293,15 @@ def provider_creds(provider: str, user_keys: dict | None = None) -> list[tuple[s
     {provider: [{'key','extra'}, ...]} from user_creds.load()."""
     entries = (user_keys or {}).get(provider) or []
     creds = [(e.get("key", ""), e.get("extra", "")) for e in entries if e.get("key")]
+    if provider == "custom":
+        # У «своего ключа» подключение из .env — это ЕЩЁ ОДНО подключение, а не
+        # запасное. Раньше оно применялось, только если в интерфейсе не было ни
+        # одного ключа: подключив, скажем, OpenRouter, человек терял заданный в
+        # .env Yandex Cloud и не понимал, почему тот не появляется в списке.
+        env_extra = custom_env_extra()
+        if env_extra and not any(k == YANDEX_CLOUD_API_KEY for k, _ in creds):
+            creds.append((YANDEX_CLOUD_API_KEY, env_extra))
+        return creds
     if creds:
         return creds
     env = {
@@ -307,7 +314,6 @@ def provider_creds(provider: str, user_keys: dict | None = None) -> list[tuple[s
         # Yandex Cloud AI Studio, заданный переменными окружения: подключение
         # собирается само, без карточки в интерфейсе. Имя модели включает
         # каталог — «gpt://<folder>/<model>», так требует их шлюз.
-        "custom": (YANDEX_CLOUD_API_KEY, custom_env_extra()),
     }.get(provider, ("", ""))
     return [env] if env[0] else []
 

@@ -68,3 +68,31 @@ def test_имя_модели_с_двоеточиями_не_рвётся(monkeyp
     e = [x for x in _engines(monkeypatch, keys) if x["provider"] == "custom"][0]
     base, _, tail = e["value"].partition(":")
     assert base == "custom" and tail == model
+
+
+def test_env_подключение_видно_рядом_с_ключами(monkeypatch):
+    """Подключение из .env — ЕЩЁ ОДНО подключение, а не запасное.
+
+    Раньше оно применялось только когда в интерфейсе нет ни одного ключа:
+    подключив свой ключ, человек терял заданный в .env Yandex Cloud и не
+    понимал, почему тот не появляется в списке.
+    """
+    monkeypatch.setattr(config, "YANDEX_CLOUD_API_KEY", "AQVN-ключ")
+    monkeypatch.setattr(config, "YANDEX_CLOUD_FOLDER", "b1g9")
+    monkeypatch.setattr(config, "YANDEX_CLOUD_MODEL", "deepseek-v4-flash/latest")
+    keys = {"custom": [{"key": "свой-ключ", "extra": json.dumps({
+        "base_url": "https://api.example.com/v1", "hint": "Свой сервис",
+        "models": ["их/модель"]})}]}
+
+    groups = {e["group"] for e in _engines(monkeypatch, keys)
+              if e["provider"] == "custom"}
+    assert groups == {"Свой сервис", "Yandex Cloud AI Studio"}, (
+        "видны оба подключения — и из интерфейса, и из .env")
+
+
+def test_openrouter_больше_не_предлагается():
+    """Убран по решению владельца: и из подсказок по виду ключа, и из перебора
+    адресов для незнакомого ключа."""
+    assert not any("openrouter" in url.lower()
+                   for _, _, url in config.CUSTOM_KEY_PREFIXES)
+    assert not any("openrouter" in url.lower() for url in config.CUSTOM_GUESS_URLS)
