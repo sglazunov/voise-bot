@@ -306,7 +306,7 @@ flowchart TB
   end
   subgraph Ext["Внешние сервисы"]
     WEEEK["Weeek API"]; TM["Телемост"]; YD["Я.Диск / Google Drive"]
-    OLL["Ollama (контейнер)"]; CLOUDLLM["NVIDIA/Gemini/Groq/Yandex/GigaChat/Claude"]
+    OLL["Ollama (контейнер)"]; CLOUDLLM["Свой ключ/Gemini/Groq/Yandex/GigaChat/Claude"]
   end
   Browser["Браузер пользователя"] -->|HTTPS| UV
   UV --- VOL

@@ -20,7 +20,7 @@ from . import config, db, security
 
 # Providers that authenticate with an API key (Ollama is keyless). Берём из
 # config, а НЕ дублируем списком: своя копия уже разошлась — в ней не было
-# «nvidia», и counts() возвращал 0 ключей для подключённого провайдера
+# провайдера, и counts() возвращал 0 ключей для подключённого провайдера
 # («0 ключа» на карточке при рабочем ключе).
 KEY_PROVIDERS = tuple(sorted(config.KEY_PROVIDERS))
 
@@ -76,7 +76,7 @@ def load(user: str) -> dict:
             dec.append({"key": security.decrypt_secret(user, e.get("key", "")),
                         "extra": security.decrypt_secret(user, e.get("extra", "")),
                         # Когда ключ добавили. Нужно для срока жизни: бесплатный
-                        # ключ NVIDIA действует полгода, и когда он истекает,
+                        # ключ бывает выдан на срок, и когда он истекает,
                         # протоколы начинают молча собираться запасным движком.
                         # У ключей, добавленных до этой правки, даты нет — 0.
                         "at": float(e.get("at") or 0)})

@@ -339,7 +339,7 @@ def _stream_complete(backend, prompt, max_tokens, on_progress, stage,
                 should_stop=cancel_check, json_schema=json_schema)
         except llm.GenerationCancelled:
             raise AnalysisCancelled()
-    # NVIDIA тоже прерывается ВНУТРИ вызова (потоковый режим), но токенов
+    # Облачный движок тоже может прерываться ВНУТРИ вызова, но токенов
     # наружу не отдаёт, поэтому под условие выше не попадала: «Стоп» не
     # действовал, если в цепочке не было Ollama. Признак accepts_should_stop
     # есть и у самого провайдера, и у обёртки ротации ключей.
@@ -560,8 +560,8 @@ def analyze_transcript(transcript_text: str, provider: str | None = None,
     spoken = speech_words(text)
     if spoken < THIN_SPEECH_WORDS:
         result["_thin_speech"] = spoken
-    # Конкретная модель — рядом с провайдером: у NVIDIA под одним именем
-    # «nvidia» живут и DeepSeek, и Kimi, и Llama, и по «nvidia» не понять,
+    # Конкретная модель — рядом с провайдером: под одним именем провайдера
+    # живут десятки разных моделей, и по имени провайдера не понять,
     # какая из них собрала протокол. Цепочка отката подставляет сюда тот
     # движок, который реально ответил, а не тот, который выбрали.
     result["_model"] = str(getattr(backend, "model", "") or "")

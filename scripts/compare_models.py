@@ -2,7 +2,7 @@
 """Сравнить движки на ОДНОЙ И ТОЙ ЖЕ расшифровке — и выбрать по цифрам.
 
     docker compose exec app python scripts/compare_models.py <логин> [job_id] \
-        [--models nvidia:a,nvidia:b,gemini]
+        [--models custom:модель,gemini]
 
 Берёт расшифровку готовой задачи (по умолчанию — последней завершённой) и
 прогоняет через каждый движок полный путь: сборка протокола плюс grounding.
@@ -73,7 +73,7 @@ def _score(res: dict) -> tuple[int, int, int, int]:
 
 # Ключи, за которыми идёт ЗНАЧЕНИЕ. Без этого списка значение попадало в
 # позиционные аргументы и молча становилось job_id: скрипт искал задачу с
-# идентификатором «gemini,nvidia:…», не находил и отвечал «готовых задач не
+# идентификатором «gemini,custom:…», не находил и отвечал «готовых задач не
 # нашлось» при восьмидесяти восьми готовых задачах в базе.
 _WITH_VALUE = ("--models", "--file")
 
@@ -106,7 +106,7 @@ def main() -> int:
 
     models = [m.strip() for m in (opts.get("--models") or "").split(",") if m.strip()]
     if not models:
-        raise SystemExit("Укажите движки: --models nvidia:модель,gemini")
+        raise SystemExit("Укажите движки: --models custom:модель,gemini")
 
     src = opts.get("--file")
     if src:

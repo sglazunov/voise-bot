@@ -7,7 +7,6 @@ import time
 import pytest
 
 from app import llm
-from app import llm_nvidia
 from app.llm import _RotatingProvider
 
 
@@ -79,8 +78,8 @@ class TestПричинаОтката:
 
     def test_причина_сохраняется_при_успешном_откате(self, monkeypatch):
         class Bad:
-            name = "nvidia"
-            model = "deepseek"
+            name = "groq"
+            model = "llama"
 
             def complete(self, *a, **k):
                 raise RuntimeError("HTTP 429: rate limit")
@@ -94,7 +93,7 @@ class TestПричинаОтката:
 
         chain = llm._FallbackChain([Bad(), Good()])
         assert chain.complete("тест") == "ответ"
-        assert chain.skipped and "nvidia" in chain.skipped[0]
+        assert chain.skipped and "groq" in chain.skipped[0]
         assert "429" in chain.skipped[0]
 
     def test_без_отката_причин_нет(self):
@@ -108,20 +107,3 @@ class TestПричинаОтката:
         chain = llm._FallbackChain([Good(), Good()])
         chain.complete("тест")
         assert chain.skipped == []
-
-
-class TestТаймаутNvidia:
-    """Причина, по которой DeepSeek «не работал»: таймаут 180 с резал
-    генерацию протокола посередине («The read operation timed out»), и работу
-    молча забирал запасной движок. Проверка моделей при этом проходила —
-    она просит один токен и отвечает мгновенно."""
-
-    def test_проба_не_ждёт_долго(self):
-        assert llm_nvidia._nvidia_timeout(1) <= 180
-
-    def test_полному_протоколу_дают_больше_прежних_180(self):
-        assert llm_nvidia._nvidia_timeout(8000) > 180
-
-    def test_потолок_ограничен_из_за_одного_воркера(self):
-        """Повисший запрос задерживает всю очередь распознавания."""
-        assert llm_nvidia._nvidia_timeout(1_000_000) <= 420

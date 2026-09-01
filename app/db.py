@@ -186,7 +186,7 @@ CREATE TABLE IF NOT EXISTS user_creds (
     added_at    DOUBLE PRECISION,
     PRIMARY KEY (username, provider, idx)
 );
--- Когда ключ добавили. Нужно для срока жизни: бесплатный ключ NVIDIA живёт
+-- Когда ключ добавили. Нужно для срока жизни: бесплатный ключ бывает выдан на
 -- полгода, и по истечении протоколы начинают молча собираться запасным
 -- движком. Установки, созданные до появления колонки, добирают её здесь.
 ALTER TABLE user_creds ADD COLUMN IF NOT EXISTS added_at DOUBLE PRECISION;

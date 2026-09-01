@@ -105,26 +105,26 @@ class TestОтключениеПровайдера:
     дописываются обратно — иначе новый провайдер не появился бы в интерфейсе
     вовсе. Поэтому отключение отдельное и явное.
 
-    Понадобилось, когда NVIDIA стала отвечать так медленно, что каждая встреча
-    теряла на ней пять минут, прежде чем уйти к запасному движку.
+    Понадобилось, когда облачный движок стал отвечать так медленно, что встреча
+    теряла на нём пять минут, прежде чем уйти к запасному.
     """
 
     def test_отключённый_не_доступен(self, monkeypatch):
-        monkeypatch.setattr(config, "PROVIDER_DISABLED", {"nvidia"})
-        keys = {"nvidia": [{"key": "k", "extra": ""}],
+        monkeypatch.setattr(config, "PROVIDER_DISABLED", {"groq"})
+        keys = {"groq": [{"key": "k", "extra": ""}],
                 "gemini": [{"key": "k", "extra": ""}]}
-        assert "nvidia" not in config.available_providers(keys)
+        assert "groq" not in config.available_providers(keys)
         assert "gemini" in config.available_providers(keys)
 
     def test_ключи_остаются_на_месте(self, monkeypatch):
         """Отключение обратимо: ключ никуда не делся, вернуть провайдера —
         правка одной строки в .env."""
-        monkeypatch.setattr(config, "PROVIDER_DISABLED", {"nvidia"})
-        keys = {"nvidia": [{"key": "секрет", "extra": ""}]}
-        assert config.provider_creds("nvidia", keys) == [("секрет", "")]
+        monkeypatch.setattr(config, "PROVIDER_DISABLED", {"groq"})
+        keys = {"groq": [{"key": "секрет", "extra": ""}]}
+        assert config.provider_creds("groq", keys) == [("секрет", "")]
 
     def test_отключённого_нет_в_списке_движков(self, monkeypatch):
-        monkeypatch.setattr(config, "PROVIDER_DISABLED", {"nvidia"})
-        keys = {"nvidia": [{"key": "k", "extra": ""}]}
+        monkeypatch.setattr(config, "PROVIDER_DISABLED", {"groq"})
+        keys = {"groq": [{"key": "k", "extra": ""}]}
         assert not [e for e in _engines(monkeypatch, keys)
-                    if e["provider"] == "nvidia"]
+                    if e["provider"] == "groq"]

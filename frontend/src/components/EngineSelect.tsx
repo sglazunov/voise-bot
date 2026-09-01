@@ -2,7 +2,7 @@ import { useMemo } from "react";
 import { Select } from "./ui";
 
 export type Engine = {
-  value: string;            // «custom:gpt://b1g/deepseek…», «nvidia:модель», «gemini»
+  value: string;            // «custom:gpt://b1g/deepseek…», «groq:модель», «gemini»
   label: string;
   group?: string;           // человеческое имя поставщика
   model?: string;           // имя модели без поставщика
@@ -42,7 +42,7 @@ export function EngineSelect({ engines, value, onChange, allowAuto = true }: {
   }
 
   // Выбор указывает на модель, которой в списке уже нет: поставщик её убрал
-  // (так у NVIDIA пропал DeepSeek) или ключ отключили. Молчать нельзя —
+  // (так у поставщика пропадал DeepSeek) или ключ отключили. Молчать нельзя —
   // протокол соберётся не тем движком, и человек узнает об этом из шапки.
   const lost = value && value !== "auto" && !current;
 

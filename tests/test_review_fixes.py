@@ -19,7 +19,7 @@ class TestK2СекретНеУтекает:
         assert safe == "https://example.com/v1/models/x:generate"
 
     def test_адрес_без_query_не_портится(self):
-        url = "https://integrate.api.nvidia.com/v1/chat/completions"
+        url = "https://api.groq.com/openai/v1/chat/completions"
         assert llm._safe_url(url) == url
 
     def test_ключ_не_подставляется_в_адрес(self):
@@ -80,10 +80,9 @@ class TestV5ОтветственныеПриСбоеПроверки:
 class TestV27ПорядокДвижков:
     """Замеры показали, что Groq для протоколов худший, а он стоял первым."""
 
-    def test_nvidia_впереди_groq(self):
+    def test_gemini_впереди_groq(self):
         from app import config
         order = config.PROVIDER_ORDER
-        assert order.index("nvidia") < order.index("groq")
         assert order.index("gemini") < order.index("groq")
 
 
@@ -150,7 +149,7 @@ class TestK3ТесныйДвижокНеТеряется:
 
     def test_цепочка_объявляет_поддержку_прерывания(self):
         class WithStop:
-            name = "nvidia"
+            name = "ollama"
             accepts_should_stop = True
 
             def complete(self, *a, **k):

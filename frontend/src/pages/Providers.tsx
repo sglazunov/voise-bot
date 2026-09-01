@@ -102,7 +102,6 @@ function ProviderCard({ p, models, onChange, toast }:
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState("");
   const [keys, setKeys] = useState<any[] | null>(null);
-  const [verifying, setVerifying] = useState(false);
   const ex = EXTRA[p.id];
 
   async function connect() {
@@ -114,26 +113,6 @@ function ProviderCard({ p, models, onChange, toast }:
       setKey(""); setExtra(""); setNote(r.note || ""); toast(`${p.label}: ключ подключён`);
       onChange(); if (keys !== null) loadKeys();
     } catch (e: any) { toast(e.message, true); } finally { setBusy(false); }
-  }
-  // Перебор идёт 2-3 минуты (пауза между пробами держит нас под лимитом
-  // NVIDIA), поэтому запускаем его в фоне и опрашиваем ход. Раньше запрос
-  // висел всё это время, и кнопка выглядела зависшей.
-  async function verifyNvidia() {
-    setVerifying(true); setNote("Проверяю модели…");
-    try {
-      await api.post("/api/providers/nvidia/verify");
-      for (;;) {
-        await new Promise((r) => setTimeout(r, 3000));
-        const s = await api.get("/api/providers/nvidia/verify");
-        if (s.running) { setNote(`Проверяю модели: ${s.done} из ${s.total}…`); continue; }
-        const n = (s.models || []).length;
-        setNote(n ? `Доступно моделей по вашему ключу: ${n}. Список ниже обновлён.`
-                  : "Ни одна модель не ответила — проверьте, что модели включены в аккаунте NVIDIA.");
-        onChange();
-        break;
-      }
-    } catch (e: any) { toast(e.message, true); setNote(""); }
-    finally { setVerifying(false); }
   }
   async function loadKeys() {
     try { const r = await api.get(`/api/providers/keys?provider=${p.id}`); setKeys(r.keys || []); }
@@ -206,18 +185,12 @@ function ProviderCard({ p, models, onChange, toast }:
             {keys === null ? "Мои ключи" : "Скрыть"}</button>
         )}
         {p.id === "custom" && p.keys > 0 && (
-          // Состав моделей меняется на стороне поставщика: NVIDIA за неделю
-          // убрала десять штук вместе с DeepSeek. Без обновления в списке
+          // Состав моделей меняется на стороне поставщика: бывало, что за
+          // неделю убирали десяток моделей. Без обновления в списке
           // остаются имена, которые уже отвечают 404 — и узнаётся это в момент
           // сборки протокола, когда встреча уже записана.
           <button className="btn btn-ghost" onClick={refreshCustom} disabled={refreshing}>
             {refreshing ? "Обновляю…" : "Обновить список моделей"}</button>
-        )}
-        {p.id === "nvidia" && p.keys > 0 && (
-          // Каталог NVIDIA перечисляет всё опубликованное, а аккаунту выдана
-          // лишь часть — узнать это можно только вызовом каждой модели.
-          <button className="btn btn-ghost" onClick={verifyNvidia} disabled={verifying}>
-            {verifying ? "Проверяю модели…" : "Проверить модели"}</button>
         )}
         {p.keys > 0 && <button className="btn btn-danger" onClick={disconnect}><Trash2 size={14} /> Отключить</button>}
       </div>
@@ -229,7 +202,7 @@ function ProviderCard({ p, models, onChange, toast }:
               <KeyRound size={13} color="var(--muted)" />
               <span className="font-mono">{k.masked}</span>
               {k.extra && <span style={{ color: "var(--muted)" }}>· {k.extra}</span>}
-              {/* Срок жизни: бесплатный ключ NVIDIA действует полгода. Когда он
+              {/* Срок жизни ключа, если поставщик его объявляет. Когда ключ
                   истекает, протоколы начинают молча собираться запасным
                   движком, и причину ищут долго — поэтому она видна заранее. */}
               {k.days_left !== undefined && (
@@ -242,12 +215,6 @@ function ProviderCard({ p, models, onChange, toast }:
               {k.days_left === undefined && k.added_at !== undefined && (
                 <span style={{ color: "var(--muted)" }}>
                   · добавлен {new Date(k.added_at * 1000).toLocaleDateString("ru-RU")}</span>
-              )}
-              {/* Ключи, добавленные до появления даты: показываем не пустоту, а
-                  что именно сделать. Иначе выглядит как неработающая функция. */}
-              {k.added_at === undefined && p.id === "nvidia" && (
-                <span style={{ color: "var(--muted)" }}>
-                  · срок неизвестен — переподключите ключ, чтобы видеть остаток</span>
               )}
               <button className="ml-auto btn-danger grid place-items-center" style={{ width: 26, height: 26, borderRadius: 8 }}
                 onClick={() => removeKey(k.index)} title="Удалить ключ"><X size={13} /></button>

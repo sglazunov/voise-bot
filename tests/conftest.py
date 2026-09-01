@@ -58,7 +58,6 @@ import pytest  # noqa: E402
 from starlette.testclient import TestClient  # noqa: E402
 
 from app import config, llm, security, sms  # noqa: E402
-from app import llm_nvidia
 from app.jobs import store  # noqa: E402
 from app.main import app  # noqa: E402
 
@@ -73,11 +72,6 @@ def _wipe_state() -> None:
     store._jobs.clear()
     security._FAILED.clear()   # brute-force windows must not leak between tests
     sms.sent_messages.clear()  # sent-SMS log (recovery codes) must not leak
-    # Кэши уровня модуля живут весь процесс: без очистки один тест подсовывает
-    # следующему свой ответ. Так и вышло с моделью NVIDIA по умолчанию — она
-    # кэшируется на 10 минут по идентификатору ключа, а ключ в тестах общий.
-    llm_nvidia._nvidia_default_cache.clear()
-    llm_nvidia._nvidia_progress.update(running=False, done=0, total=0)
 
 
 @pytest.fixture(autouse=True)

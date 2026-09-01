@@ -36,7 +36,6 @@ EXPECTED = {
     "GET /api/protocol-delivery/status",
     "GET /api/providers",
     "GET /api/providers/keys",
-    "GET /api/providers/nvidia/verify",
     "GET /api/search",
     "GET /api/setup/auto",
     "GET /api/setup/deps",
@@ -83,7 +82,6 @@ EXPECTED = {
     "POST /api/providers/custom/refresh",
     "POST /api/providers/disconnect",
     "POST /api/providers/keys/remove",
-    "POST /api/providers/nvidia/verify",
 }
 
 

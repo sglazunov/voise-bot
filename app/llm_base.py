@@ -1,7 +1,7 @@
 """Общий фундамент провайдеров: интерфейс, HTTP-обвязка и работа по API-ключу.
 
-Вынесено из llm.py, чтобы блок NVIDIA (llm_nvidia.py) мог опираться на это, не
-замыкая импорт на сам llm.py. Слои: llm_base -> llm_nvidia -> llm.
+Вынесено из llm.py, чтобы отдельные модули провайдеров могли опираться на это,
+не замыкая импорт на сам llm.py. Слои: llm_base -> модули провайдеров -> llm.
 """
 from __future__ import annotations
 
@@ -96,10 +96,10 @@ def _http_post_json(url: str, payload: dict, headers: dict, timeout: int = 180,
                 return json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
             body = e.read().decode("utf-8", "replace")
-            # 529 — «Service temporarily overloaded» у NVIDIA: это временная
-            # перегрузка, ровно как 503. Без неё запрос сразу считался
-            # провалом движка и встреча уходила запасному — по журналу
-            # протоколов за август так потерялись четыре встречи из
+            # 529 — «Service temporarily overloaded»: временная перегрузка,
+            # ровно как 503, так отвечают несколько облаков. Без неё запрос
+            # сразу считался провалом движка и встреча уходила запасному — по
+            # журналу протоколов за август так потерялись четыре встречи из
             # двадцати одной.
             if e.code in (429, 503, 529) and attempt < max_retries:
                 wait = min(_retry_after(e, body, default=8 * (attempt + 1)), 30)
@@ -132,10 +132,10 @@ class _KeyProviderMixin:
 def is_overloaded(e: Exception) -> bool:
     """Сервис перегружен и просит зайти позже (503/529), а не отказывает.
 
-    NVIDIA отвечает 529 «Service temporarily overloaded». Это НЕ исчерпанный
-    лимит ключа и не отсутствие прав: ключ жив, модель доступна, просто их
-    инференс сейчас занят. Отличать важно — по такой ошибке нужно подождать и
-    повторить, а не менять ключ и не объявлять движок отказавшим.
+    529 «Service temporarily overloaded» — это НЕ исчерпанный лимит ключа и не
+    отсутствие прав: ключ жив, модель доступна, просто инференс сейчас занят.
+    Отличать важно — по такой ошибке нужно подождать и повторить, а не менять
+    ключ и не объявлять движок отказавшим.
     """
     s = f"{type(e).__name__} {e}".lower()
     return ("529" in s or "overloaded" in s or "503" in s
@@ -148,3 +148,22 @@ def _is_rate_limit(e: Exception) -> bool:
     return ("429" in s or "too many requests" in s or "rate limit" in s
             or "rate_limit" in s or "ratelimit" in s or "quota" in s
             or "resource_exhausted" in s or "insufficient_quota" in s)
+
+
+def is_key_rejected(e: Exception) -> bool:
+    """Ключ отвергнут насовсем: не авторизован или лишён прав (401/403).
+
+    Отличается и от лимита, и от перегрузки: ждать бессмысленно, повторять по
+    этому же ключу — тоже. А вот СОСЕДНИЙ ключ в пуле к ошибке отношения не
+    имеет, и именно это стоило пользователю протокола: под «своим ключом»
+    лежали два РАЗНЫХ подключения, первое отвечало 401, и весь движок считался
+    отказавшим — до второго, рабочего, дело не доходило.
+    """
+    s = f"{type(e).__name__} {e}".lower()
+    if "429" in s:            # лимит — это не отказ ключа, у него своя обработка
+        return False
+    return ("401" in s or "403" in s or "unauthorized" in s
+            or "missing authentication" in s or "invalid api key"  in s
+            or "invalid_api_key" in s or "api_key_invalid" in s
+            or "permission denied" in s or "permission_denied" in s
+            or "forbidden" in s)

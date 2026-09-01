@@ -78,23 +78,6 @@ ANALYSIS_MODEL = os.getenv("VTX_ANALYSIS_MODEL", "claude-sonnet-4-6")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 GROQ_MODEL = os.getenv("VTX_GROQ_MODEL", "llama-3.3-70b-versatile")
 
-# --- NVIDIA NIM (build.nvidia.com) — бесплатно, без карты ---------------------
-# OpenAI-совместимый API, ключ вида `nvapi-…` с build.nvidia.com/settings/api-keys.
-# Каталог — сотня открытых моделей (Kimi, DeepSeek, Qwen, Llama, Nemotron…),
-# поэтому список моделей НЕ хардкодим: он запрашивается по ключу (llm.nvidia_models).
-# Ограничение: ~40 запросов в минуту на ключ и на все модели сразу — на длинной
-# встрече map-reduce может упереться, тогда помогает второй ключ (ротация).
-NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "")
-# Умолчание — только на случай, когда каталог недоступен: список моделей всё
-# равно приходит по ключу, и выбирают из него. Идентификатор взят из каталога
-# дословно (не «kimi-k2-instruct», которого там нет).
-# ВАЖНО: /v1/models перечисляет ВЕСЬ опубликованный каталог, а не то, что вправе
-# вызывать конкретный аккаунт. Недоступная модель отвечает 404 «Function …: Not
-# found for account …» — на боевом ключе так вела себя kimi-k2.6. Поэтому
-# умолчанием стоит первая по нашему же ранжированию: 1M контекста, то есть час
-# встречи влезает целиком.
-NVIDIA_MODEL = os.getenv("VTX_NVIDIA_MODEL", "deepseek-ai/deepseek-v4-pro")
-
 # --- Google Gemini (free tier; key at https://aistudio.google.com/apikey) ---
 # Pin a CONCRETE model (not the gemini-flash-latest alias) so behaviour and free
 # limits don't silently change when Google re-points the alias — that surprise is
@@ -132,7 +115,6 @@ PROVIDER_LABELS = {
     "custom": "Любой провайдер по ключу (OpenAI-совместимый)",
     "ollama": "Локально · Ollama (бесплатно, оффлайн)",
     "groq": "Groq · Llama (бесплатно, облако)",
-    "nvidia": "NVIDIA NIM · Kimi/DeepSeek/Qwen (бесплатно, ~40 запросов/мин)",
     "gemini": "Google Gemini (по ключу)",
     "yandex": "YandexGPT (ключ + folder id)",
     "gigachat": "GigaChat / Sber (по ключу)",
@@ -140,15 +122,15 @@ PROVIDER_LABELS = {
 }
 # Order = preference for "auto" (free/local first, paid last).
 # «Авто» берёт ПЕРВЫЙ настроенный движок из этого списка.
-# Порядок — по замерам на боевых встречах (см. CLAUDE.md «Выбор движка»):
-# NVIDIA/DeepSeek даёт вдвое более полный протокол, Gemini устойчив и идёт
-# запасным, Groq оказался худшим (дробит темы, теряет задачи, отвечает 413 даже
-# на двадцатиминутной встрече) — поэтому он больше НЕ первый. Ollama последняя:
-# на CPU-сервере локальный протокол считается десятки минут.
-# Переопределяется через VTX_PROVIDER_ORDER="ollama,groq,…".
+# Порядок целиком задаётся переменной VTX_PROVIDER_ORDER в .env — здесь только
+# запасное значение на случай, когда её не задали. Ничего «зашитого» поверх
+# .env нет: если в .env написан свой порядок, работают ровно те движки и ровно
+# в том порядке.
 # «custom» первым: свой ключ подключают намеренно и под конкретную модель,
-# значит он и есть выбор пользователя. Остальные — как раньше.
-_default_order = "custom,nvidia,gemini,groq,yandex,gigachat,anthropic,ollama"
+# значит он и есть выбор пользователя. Дальше Gemini — он устойчив и быстр,
+# Groq хуже (дробит темы, теряет задачи, отвечает 413 даже на двадцатиминутной
+# встрече), Ollama последняя: на CPU-сервере протокол считается десятки минут.
+_default_order = "custom,gemini,groq,yandex,gigachat,anthropic,ollama"
 PROVIDER_ORDER = [p.strip() for p in
                   os.getenv("VTX_PROVIDER_ORDER", _default_order).split(",")
                   if p.strip()]
@@ -164,8 +146,8 @@ PROVIDER_ORDER += [p for p in PROVIDER_LABELS if p not in PROVIDER_ORDER]
 # явное. Ключи при этом остаются на месте: провайдер просто не участвует ни в
 # «авто», ни в выборе движка, и включается обратно правкой одной строки.
 #
-# Зачем понадобилось: NVIDIA стала отвечать так медленно, что каждая встреча
-# теряла на ней пять минут, прежде чем уйти к запасному движку.
+# Зачем понадобилось: облачный движок может начать отвечать так медленно, что
+# каждая встреча теряет на нём минуты, прежде чем уйти к запасному.
 PROVIDER_DISABLED = {p.strip() for p in
                      os.getenv("VTX_PROVIDER_DISABLED", "").split(",") if p.strip()}
 PROVIDER_ORDER = [p for p in PROVIDER_ORDER if p not in PROVIDER_DISABLED]
@@ -178,7 +160,6 @@ PROVIDER_ORDER = [p for p in PROVIDER_ORDER if p not in PROVIDER_DISABLED]
 # Приставка ключа -> (название поставщика, адрес API). Совпадение — подсказка,
 # а не приговор: адрес всё равно подтверждается живым запросом.
 CUSTOM_KEY_PREFIXES = (
-    ("nvapi-", "NVIDIA NIM", "https://integrate.api.nvidia.com/v1"),
     ("gsk_", "Groq", "https://api.groq.com/openai/v1"),
     # OpenAI больше не выпускает «голые» sk-: актуальны три приставки.
     ("sk-proj-", "OpenAI", "https://api.openai.com/v1"),
@@ -256,14 +237,15 @@ PROVIDER_MODELS = {
 }
 
 # Providers configurable from the UI by an API key (+ optional extra field).
-KEY_PROVIDERS = {"anthropic", "groq", "nvidia", "gemini", "yandex", "gigachat",
+KEY_PROVIDERS = {"anthropic", "groq", "gemini", "yandex", "gigachat",
                  "custom"}
 
-# Сколько дней живёт ключ провайдера. Пока известен только у NVIDIA: бесплатный
-# `nvapi-…` выдаётся на полгода. Когда он истекает, протоколы начинают молча
-# собираться запасным движком — в шапке появляется «Выбранный движок не
-# ответил», а причина неочевидна. Интерфейс показывает остаток по этой цифре.
-KEY_TTL_DAYS = {"nvidia": 183}
+# Сколько дней живёт ключ провайдера — если у поставщика такой срок есть.
+# Когда ключ истекает, протоколы начинают молча собираться запасным движком: в
+# шапке появляется «Выбранный движок не ответил», а причина неочевидна.
+# Интерфейс показывает остаток по этой таблице. Сейчас она пуста — ни у одного
+# из подключённых поставщиков объявленного срока нет.
+KEY_TTL_DAYS: dict[str, int] = {}
 
 # Per-minute token budget (TPM) of a provider's free tier, counted per REQUEST as
 # input + the REQUESTED max_tokens. Asking for a big answer can therefore fail on
@@ -319,7 +301,6 @@ def provider_creds(provider: str, user_keys: dict | None = None) -> list[tuple[s
     env = {
         "anthropic": (ANTHROPIC_API_KEY, ""),
         "groq": (GROQ_API_KEY, ""),
-        "nvidia": (NVIDIA_API_KEY, ""),
         "gemini": (GEMINI_API_KEY, ""),
         "yandex": (YANDEX_API_KEY, YANDEX_FOLDER_ID),
         "gigachat": (GIGACHAT_AUTH_KEY, GIGACHAT_SCOPE),

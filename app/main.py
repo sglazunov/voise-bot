@@ -113,46 +113,6 @@ def _engine_list(user_keys: dict | None = None) -> list[dict]:
                                 "provider": "custom", "group": "Свой ключ",
                                 "model": "по умолчанию"})
             continue
-        if p == "nvidia":
-            # Каталог NVIDIA — сотня моделей и он меняется, поэтому список
-            # берётся ПО КЛЮЧУ с сервера, а не из кода: захардкоженные
-            # идентификаторы устарели бы молча. Лучшие под нашу задачу
-            # (Kimi, DeepSeek, Qwen) llm.nvidia_models ставит первыми.
-            key = ""
-            for cred in (user_keys or {}).get("nvidia") or []:
-                key = cred.get("key") or ""
-                if key:
-                    break
-            # Сначала — проверенный по ключу список (что реально вызывается),
-            # и только пока проверка не прошла — весь каталог. Каталог
-            # перечисляет всё опубликованное, а аккаунту выдана лишь часть.
-            models = llm.nvidia_usable_models(key or None)
-            verified = models is not None
-            if models is None:
-                # Проверки ещё нет — запускаем её в фоне и пока показываем
-                # каталог. Иначе список навсегда оставался бы каталогом:
-                # перебор стартовал только при добавлении ключа и не переживал
-                # перезапуск контейнера.
-                llm.nvidia_ensure_verified(key or None)
-                models = llm.nvidia_models(key or None)
-            if models:
-                for m in models:
-                    # Каталог NVIDIA НЕ равен списку того, что ключ может
-                    # вызвать. Пока перебор не прошёл, показывается каталог, и
-                    # выбранная из него модель может ответить 404 «not found
-                    # for account» — уже в момент сборки протокола, когда
-                    # встреча записана. Помечаем, чтобы выбор был осознанным.
-                    engines.append({"value": f"nvidia:{m}",
-                                    "label": (f"NVIDIA · {m}" if verified
-                                              else f"NVIDIA · {m} (доступ не проверен)"),
-                                    "verified": verified, "provider": "nvidia",
-                                    "group": "NVIDIA NIM",
-                                    "model": m if verified else f"{m} (доступ не проверен)"})
-            else:
-                engines.append({"value": "nvidia", "provider": "nvidia",
-                                "group": "NVIDIA NIM", "model": config.NVIDIA_MODEL,
-                                "label": f"NVIDIA · {config.NVIDIA_MODEL} (по умолчанию)"})
-            continue
         tiers = config.PROVIDER_MODELS.get(p)
         if tiers:
             # One entry per model tier so the user picks how powerful it is.
@@ -673,33 +633,6 @@ def list_providers(user: str = Depends(current_user)):
     }
 
 
-_PROBE_MODELS = 4      # столько верхних моделей пробуем, чтобы не ждать минуту
-
-
-def _first_working_model(provider: str, trial: dict, key: str) -> str | None:
-    """Первая модель провайдера, которая реально отвечает по этому ключу.
-
-    Нужна там, где каталог моделей и права аккаунта расходятся (NVIDIA NIM):
-    модель числится опубликованной, а вызов возвращает 404 «Not found for
-    account». Пробуем только верхушку ранжированного списка — это несколько
-    запросов, и лишь на пути, где подключение и так уже дало ошибку.
-    """
-    if provider != "nvidia":
-        return None
-    try:
-        models = llm.nvidia_models(key)
-    except Exception:  # noqa: BLE001 — подсказка не обязана работать
-        return None
-    for mid in models[:_PROBE_MODELS]:
-        try:
-            llm.get_provider(f"{provider}:{mid}", trial).complete(
-                "Ответь одним словом: ok", max_tokens=5, force_json=False)
-            return mid
-        except Exception:  # noqa: BLE001
-            continue
-    return None
-
-
 @app.post("/api/providers/connect")
 def connect_provider(body: ProviderKey, user: str = Depends(current_user)):
     """Save an LLM API key IN THIS USER'S ACCOUNT (encrypted) and verify it.
@@ -722,19 +655,19 @@ def connect_provider(body: ProviderKey, user: str = Depends(current_user)):
     if provider == "custom":
         # Один ключ — и всё остальное выясняется само: адрес API, способ
         # авторизации и список моделей. Так не нужен отдельный класс под
-        # каждого поставщика: их состав моделей меняется, а NVIDIA за неделю
-        # дважды поменяла бесплатный набор и отобрала DeepSeek.
+        # каждого поставщика: состав моделей у них меняется — бывало, что
+        # бесплатный набор менялся дважды за неделю.
         #
         # В `extra` пользователь может передать адрес, если поставщик незнакомый
-        # (по виду ключа угадываются NVIDIA, Groq, OpenRouter и другие).
+        # (Groq, OpenAI, Gemini и другие угадываются по виду ключа).
         from .llm_custom import detect, ping_model
         found = detect(key, extra, body.model)
         if not found.get("ok"):
             raise HTTPException(400, found.get("error") or "Ключ не подошёл.")
         models = found["models"]
         # Модель есть в списке — но выдана ли она ключу? Именно этот разрыв
-        # стоил недели разбирательств: NVIDIA показывала deepseek в каталоге и
-        # отвечала 404 при вызове. Один токен стоит почти ничего, а знать это
+        # стоил недели разбирательств: поставщик показывал модель в каталоге и
+        # отвечал 404 при вызове. Один токен стоит почти ничего, а знать это
         # лучше сейчас, чем в момент сборки протокола.
         default = models[0]
         if found.get("manual"):
@@ -794,63 +727,17 @@ def connect_provider(body: ProviderKey, user: str = Depends(current_user)):
                 or "not available" in es or "not_found" in es:
             # Текст был написан под Gemini и дословно предлагал «выберите
             # другую модель Gemini» — какой бы провайдер ни подключали.
-            #
-            # У NVIDIA этого мало: каталог /v1/models перечисляет ВЕСЬ
-            # опубликованный список, а не то, что доступно аккаунту, поэтому
-            # «выберите другую из списка» — совет наугад. Пробуем несколько
-            # верхних по нашему ранжированию и называем ту, что реально
-            # ответила.
-            alt = _first_working_model(provider, trial, key)
-            if alt:
-                note = (f"Ключ принят. Модель по умолчанию вашему аккаунту не "
-                        f"выдана, но работает «{alt}» — выберите её в «Движке "
-                        f"протокола».")
-            else:
-                note = ("Ключ принят, но модель по умолчанию недоступна для "
-                        "этого аккаунта. Откройте «Движок протокола» и выберите "
-                        "другую модель — в списке показаны опубликованные "
-                        f"модели, но доступны не все. Ответ сервиса: {e}")
+            note = ("Ключ принят, но модель по умолчанию недоступна для "
+                    "этого аккаунта. Откройте «Движок протокола» и выберите "
+                    "другую модель — в списке показаны опубликованные "
+                    f"модели, но доступны не все. Ответ сервиса: {e}")
         else:
             raise HTTPException(400, f"Не удалось подключиться: {e}")
     # Append to the provider's key POOL (several keys rotate on rate limits).
     user_creds.add(user, provider, key, extra)
-    if provider == "nvidia":
-        # Каталог NVIDIA — это не права аккаунта. Перебираем модели в фоне
-        # (десятки секунд, лимит 40 запросов в минуту) и запоминаем рабочие,
-        # чтобы в списке движков остались только они. Пока проверка идёт,
-        # показывается весь каталог — это лучше пустого списка.
-        threading.Thread(target=llm.nvidia_verify_models, args=(key,),
-                         daemon=True, name="vtx-nvidia-probe").start()
     return {"ok": True, "connected": provider, "note": note,
             "keys": user_creds.counts(user).get(provider, 1),
             "providers": _provider_list(user_creds.load(user))}
-
-
-def _nvidia_key_of(user: str) -> str:
-    keys = (user_creds.load(user) or {}).get("nvidia") or []
-    return (keys[0].get("key") if keys else "") or config.NVIDIA_API_KEY
-
-
-@app.post("/api/providers/nvidia/verify")
-def verify_nvidia_models(user: str = Depends(current_user)):
-    """Запустить перебор моделей в фоне и сразу вернуть состояние.
-
-    Синхронно этого делать нельзя: тридцать моделей с паузами под лимит 40
-    запросов в минуту — это две-три минуты. Запрос всё это время висел в
-    «pending», и кнопка выглядела зависшей."""
-    key = _nvidia_key_of(user)
-    if not key:
-        raise HTTPException(400, "Сначала добавьте ключ NVIDIA.")
-    return {"ok": True, **llm.nvidia_start_verify(key)}
-
-
-@app.get("/api/providers/nvidia/verify")
-def nvidia_verify_state(user: str = Depends(current_user)):
-    """Ход перебора — для опроса из интерфейса, пока идёт проверка."""
-    key = _nvidia_key_of(user)
-    return {"ok": True, **llm.nvidia_probe_state(),
-            "models": llm.nvidia_usable_models(key or None),
-            "engines": _engine_list(user_creds.load(user))}
 
 
 class ProviderRef(BaseModel):
@@ -864,8 +751,8 @@ class ProviderRef(BaseModel):
 def refresh_custom_models(user: str = Depends(current_user)):
     """Перечитать список моделей у поставщика сохранённым ключом.
 
-    Состав моделей меняется на их стороне: NVIDIA за неделю убрала десять штук
-    вместе с DeepSeek. Без обновления в выборе движка остаются имена, которые
+    Состав моделей меняется на их стороне: поставщик может за неделю убрать
+    десяток моделей. Без обновления в выборе движка остаются имена, которые
     уже отвечают 404 — и узнаётся это в момент сборки протокола, когда встреча
     уже записана.
     """
@@ -940,10 +827,10 @@ def provider_keys(provider: str, user: str = Depends(current_user)):
         n = len(cfg.get("models") or [])
         return f"{where} · моделей: {n}" if n else str(where)
 
-    # Срок жизни ключа. У NVIDIA бесплатный ключ действует полгода: когда он
+    # Срок жизни ключа — для поставщиков, у которых он объявлен: когда ключ
     # истекает, протоколы начинают молча собираться запасным движком, и без
-    # подсказки причину ищут долго. У остальных провайдеров срока нет — там
-    # отдаём только дату добавления.
+    # подсказки причину ищут долго. Если срока нет, отдаём только дату
+    # добавления.
     ttl = config.KEY_TTL_DAYS.get(prov)
     now = time.time()
 

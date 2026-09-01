@@ -29,23 +29,15 @@ from typing import Protocol
 from . import config
 
 
-# Фундамент и блок NVIDIA вынесены в соседние модули (llm_base, llm_nvidia):
-# вместе это было 550 строк из 1200, причём NVIDIA — целая подсистема с
-# каталогом, проверкой прав ключа и потоковым чтением. Имена ре-экспортируются:
-# снаружи и в тестах обращаются к llm.X.
+# Фундамент вынесен в соседний модуль (llm_base): общий HTTP, разбор лимитов,
+# отмена генерации, протокол провайдера. Имена ре-экспортируются: снаружи и в
+# тестах обращаются к llm.X.
 from .llm_base import (                 # noqa: F401 — часть публичного API
     GenerationCancelled, LLMProvider, _KeyProviderMixin,
-    _http_post_json, _is_rate_limit, _retry_after, _safe_url,
+    _http_post_json, _is_rate_limit, is_key_rejected, _retry_after, _safe_url,
 )
 from .llm_custom import CustomProvider  # noqa: F401 — часть публичного API
-from .llm_nvidia import (               # noqa: F401 — часть публичного API
-    NvidiaProvider, nvidia_models, nvidia_probe_state, nvidia_start_verify,
-    nvidia_usable_models, nvidia_default_model, nvidia_ensure_verified,
-    nvidia_verify_models,
-)
-# Внутренности NVIDIA (кэш, прогресс, потоковое чтение, таймауты) сюда НЕ
-# ре-экспортируются намеренно: подмена такого имени здесь не дошла бы до кода,
-# который читает свой module-global. Обращаться к ним — через llm_nvidia.
+
 
 # ---------------------------------------------------------------------------
 def list_ollama_models() -> list[str]:
@@ -363,7 +355,6 @@ _PROVIDERS = {
     "custom": CustomProvider,
     "ollama": OllamaProvider,
     "groq": GroqProvider,
-    "nvidia": NvidiaProvider,
     "gemini": GeminiProvider,
     "yandex": YandexProvider,
     "gigachat": GigaChatProvider,
@@ -388,13 +379,41 @@ def get_provider(name: str | None, keys: dict | None = None) -> LLMProvider:
     if resolved == "ollama":
         return cls(model=model)
     creds = config.provider_creds(resolved, keys) or [("", "")]
+    if resolved == "custom" and model:
+        # Под «своим ключом» лежат подключения к РАЗНЫМ сервисам, и ключ одного
+        # к моделям другого отношения не имеет: запрос модели Yandex Cloud с
+        # ключом OpenRouter — это гарантированный 401. Берём те подключения,
+        # где запрошенная модель объявлена; если ни в одном её нет (список
+        # моделей мог устареть), работаем как раньше — по всем.
+        creds = _creds_with_model(creds, model) or creds
     if len(creds) == 1:
         k, ex = creds[0]
         return cls(model=model, api_key=k, extra=ex)
     return _RotatingProvider(cls, model, creds)
 
 
+def _creds_with_model(creds: list[tuple[str, str]], model: str) -> list[tuple[str, str]]:
+    """Подключения, у которых объявлена именно эта модель."""
+    out = []
+    for key, extra in creds:
+        try:
+            cfg = json.loads(extra) if extra else {}
+        except ValueError:
+            continue
+        if not isinstance(cfg, dict):
+            continue
+        names = list(cfg.get("models") or [])
+        if cfg.get("model"):
+            names.append(cfg["model"])
+        if model in names:
+            out.append((key, extra))
+    return out
+
+
 _KEY_COOLDOWN_SEC = 60.0   # a rate-limited key rests this long (Groq's TPM window)
+# Отвергнутый ключ (401/403) на встрече уже не оживёт: чинить его надо руками,
+# а до тех пор он только тратит время на каждом вызове map-reduce.
+_DEAD_KEY_SEC = 24 * 3600.0
 # When EVERY key is cooling, wait for the earliest reset (the TPM window is
 # ~a minute) rather than abandoning the engine — the keys' budgets then SUM UP
 # over the whole meeting. Waits longer than KEY_WAIT_SEC per round, or
@@ -432,6 +451,7 @@ class _RotatingProvider:
         self.name = getattr(cls, "name", "llm")
         self._i = 0                             # round-robin cursor (next key to use)
         self._cooldown: dict[int, float] = {}   # key index -> resting until (unix ts)
+        self._dead: dict[int, str] = {}         # key index -> почему отвергнут
         self._instances: dict[int, object] = {}
         # Умеет ли обёрнутый движок прерываться внутри вызова. Без этого при
         # ДВУХ ключах отмена в потоке молча переставала работать: цепочка
@@ -443,9 +463,9 @@ class _RotatingProvider:
         """Модель, которой сейчас работаем.
 
         Обёртка обязана отдавать её наравне с именем: при ДВУХ ключах в шапке
-        протокола оставалось голое «nvidia», и было не понять, DeepSeek его
-        собрал или Kimi. Свойство ЛЕНИВОЕ: у NVIDIA создание провайдера без
-        явной модели лезет в каталог по сети, и делать это при построении
+        протокола оставалось голое имя провайдера, и было не понять, какая
+        модель его собрала. Свойство ЛЕНИВОЕ: у поставщика с каталогом создание
+        провайдера без явной модели лезет в сеть, и делать это при построении
         цепочки не нужно.
         """
         if self._model:
@@ -501,13 +521,30 @@ class _RotatingProvider:
                             # park-and-wait: the window resets in seconds.
                             self._cooldown[i] = time.time() + _cooldown_from(e)
                             continue
+                        if is_key_rejected(e) and n > 1:
+                            # Ключ отвергнут (401/403) — это про НЕГО, а не про
+                            # движок: соседний ключ в пуле может быть от совсем
+                            # другого сервиса. Раньше здесь был безусловный
+                            # raise, и одно протухшее подключение уводило всю
+                            # встречу запасному движку, ни разу не попробовав
+                            # рабочий ключ.
+                            self._dead[i] = str(e)
+                            self._cooldown[i] = time.time() + _DEAD_KEY_SEC
+                            continue
                         raise
+            alive = [i for i in range(n) if i not in self._dead]
+            if not alive:
+                raise RuntimeError(
+                    f"Все {n} ключа(ей) «{self.name}» отвергнуты сервисом: "
+                    + " | ".join(list(self._dead.values())[:3]))
             # Every key is cooling. A rate-limit window is SECONDS — wait it out
             # and keep the protocol on THESE keys (their budgets sum up across
             # the meeting), instead of bailing to another engine. Only a wait
             # that's too long (a real outage / brutal quota) falls through to
             # the provider chain.
-            wait = max(min(self._cooldown.values()) - time.time(), 0.5)
+            # Ждём только живые ключи: отвергнутый лежит сутки, и по нему
+            # ожидание вышло бы бесконечным.
+            wait = max(min(self._cooldown.get(i, 0.0) for i in alive) - time.time(), 0.5)
             if wait > KEY_WAIT_SEC or time.time() + wait > deadline:
                 raise RuntimeError(
                     f"Все {n} ключа(ей) «{self.name}» упёрлись в лимит, сброс "
@@ -542,10 +579,10 @@ class _FallbackChain:
     def accepts_should_stop(self) -> bool:
         """Умеет ли ХОТЬ ОДИН движок цепочки прерываться внутри вызова.
 
-        Без этого признака у самой цепочки «Стоп» не доходил до NVIDIA, если в
-        цепочке не было Ollama: вызывающий код смотрел только на supports_stream
-        (то есть на выдачу токенов наружу), а потоковый режим NVIDIA токенов не
-        отдаёт — прерывание у него есть, а признака не было.
+        Без этого признака «Стоп» не доходил до движка, умеющего прерываться,
+        если в цепочке не было Ollama: вызывающий код смотрел только на
+        supports_stream (то есть на выдачу токенов наружу). Прерывание бывает и
+        без выдачи токенов — это разные вещи.
         """
         return any(getattr(b, "accepts_should_stop", False)
                    for b in self._backends)

@@ -1,8 +1,8 @@
 """Любой провайдер по одному ключу: адрес, авторизация и модели — сами.
 
 Зачем это вообще. Под каждого поставщика писался свой класс, а поставщики
-меняются: NVIDIA за неделю дважды поменяла состав бесплатных моделей и отобрала
-DeepSeek, из-за чего протоколы молча уходили запасному движку. Универсальный
+меняются: у поставщика состав бесплатных моделей менялся дважды за неделю, и
+обкатанная модель исчезала, из-за чего протоколы молча уходили запасному движку. Универсальный
 провайдер снимает саму причину: подключается что угодно OpenAI-совместимое.
 """
 from __future__ import annotations
@@ -19,7 +19,7 @@ class TestПодсказкаПоВидуКлюча:
     """Вид ключа сужает поиск: не перебирать же все известные адреса подряд."""
 
     def test_известные_ключи_узнаются(self):
-        assert hint_for("nvapi-abc")[0] == "NVIDIA NIM"
+        assert hint_for("gsk_abc")[0] == "Groq"
         assert hint_for("gsk_abc")[0] == "Groq"
         assert hint_for("sk-proj-abc")[0] == "OpenAI"
         # OpenRouter убран из подсказок по решению владельца: ключ sk-or- теперь
@@ -225,7 +225,7 @@ class TestФильтрМоделей:
 
     def test_не_чат_модели_отсеиваются(self):
         assert llm_custom.is_chat_model("deepseek-chat")
-        assert llm_custom.is_chat_model("nvidia/nemotron-3-super-120b")
+        assert llm_custom.is_chat_model("meta/llama-3.3-70b-instruct")
         assert not llm_custom.is_chat_model("text-embedding-3-large")
         assert not llm_custom.is_chat_model("bge-reranker-v2")
         assert not llm_custom.is_chat_model("whisper-large-v3")
