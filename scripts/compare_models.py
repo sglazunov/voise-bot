@@ -124,8 +124,11 @@ def main() -> int:
         t = time.time()
         try:
             res = analyze.analyze_transcript(text, provider=m, keys=keys)
-            res["verification"] = analyze.verify_protocol(
-                res, text, provider=m, keys=keys)
+            # verify_protocol возвращает ВЕСЬ протокол, а разметку кладёт в
+            # result["verification"] сам. Присваивание возвращённого обратно в
+            # это поле подменяло разметку списком задач — и «подтверждено»
+            # выходило 0% у любого движка, включая заведомо рабочий Gemini.
+            res = analyze.verify_protocol(res, text, provider=m, keys=keys)
             topics, tasks, ok, total = _score(res)
             share = f"{ok}/{total}" + (f" ({round(100 * ok / total)}%)" if total else "")
             used = res.get("_model") or ""
