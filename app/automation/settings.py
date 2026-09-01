@@ -92,6 +92,9 @@ _DEFAULTS: dict[str, Any] = {
                                       # True = record all (minus ones turned off);
                                       # False = record ONLY ones turned on
     "rec_decisions": {},              # {task_id(str): true=record | false=skip}
+    # Дата последней ночной чистки полей Weeek (ISO). Хранится, чтобы перезапуск
+    # сервиса днём не запустил чистку повторно и не стёр уже свежие ссылки.
+    "last_field_wipe": "",
     # --- after recording: independently toggleable stages ---
     "do_transcribe": True,            # run speech recognition on the recording
     "do_protocol": True,              # build the Word protocol (needs do_transcribe)

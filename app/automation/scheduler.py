@@ -111,6 +111,14 @@ def _free_path(path: Path) -> Path:
     return parent / f"{stem} ({int(time.time())}){suffix}"
 
 
+# Час (по часовому поясу команды), когда чистятся поля «Видео встречи» и
+# «Протокол встречи» у повторяющихся задач Weeek. Ночью — чтобы прошлые ссылки
+# были доступны весь рабочий день и исчезали задолго до новой встречи.
+_WIPE_HOUR = int(os.getenv("VTX_FIELD_WIPE_HOUR", "4"))
+# Сколько часов длится окно чистки. Пропустили (сервис был выключен) — ждём
+# следующей ночи: чистить днём хуже, чем не почистить вовсе.
+_WIPE_WINDOW_H = int(os.getenv("VTX_FIELD_WIPE_WINDOW_H", "2"))
+
 _ROOM_RE = re.compile(r"/j/([a-z0-9_-]+)", re.I)
 
 
@@ -230,6 +238,7 @@ class Scheduler:
                             self._poll(user, cfg)
                             self._last_poll[user] = time.time()
                         self._maybe_trigger(user, cfg)
+                        self._nightly_wipe(user, cfg)
                         self._last_error.pop(user, None)
                     except Exception as e:  # сбой одной команды не валит другие
                         _LOG.warning("Опрос команды %s сорвался", user, exc_info=True)
@@ -237,6 +246,55 @@ class Scheduler:
             except Exception:  # never let the loop die
                 _LOG.error("Сбой в цикле планировщика", exc_info=True)
             self._stop.wait(_TICK_SEC)
+
+    def _nightly_wipe(self, user: str, cfg: dict) -> None:
+        """Раз в сутки очистить в Weeek поля видео и протокола у сегодняшних встреч.
+
+        Повторяющаяся задача Weeek — это ОДНА задача, и её кастомные поля несут
+        ссылки прошлого проведения. Если их не чистить, вчерашнее видео выглядит
+        как сегодняшнее.
+
+        Раньше чистка шла в момент старта записи. Это работало, но прошлые
+        ссылки исчезали ровно тогда, когда встреча начиналась, — а именно в этот
+        момент к ним чаще всего и обращаются («что решили в прошлый раз»).
+        Ночной проход оставляет весь рабочий день на прошлые ссылки и убирает их
+        задолго до новой встречи.
+
+        Отметка о выполнении хранится в настройках: иначе перезапуск сервиса
+        днём запустил бы чистку повторно и стёр УЖЕ СВЕЖИЕ ссылки.
+        """
+        tz = self._tz(cfg)
+        now = datetime.now(tz)
+        # Только НОЧНОЕ окно. Проверять «сегодня ещё не чистили» недостаточно:
+        # сервис, запущенный впервые днём, тут же стёр бы ссылки, записанные
+        # утренней встречей. Окно в пару часов даёт запас на перезапуски, но не
+        # позволяет чистке случиться среди рабочего дня.
+        if not (_WIPE_HOUR <= now.hour < _WIPE_HOUR + _WIPE_WINDOW_H):
+            return
+        today = now.date().isoformat()
+        if cfg.get("last_field_wipe") == today:
+            return
+        token = cfg.get("weeek_token")
+        if not token:
+            return
+        try:
+            meetings = weeek.upcoming_meetings(
+                token, cfg.get("weeek_project_id"), tz)
+        except Exception:               # noqa: BLE001 — чистка не обязана удаться
+            _LOG.warning("Ночная чистка полей: не удалось получить встречи",
+                         exc_info=True)
+            return
+        done = 0
+        for m in meetings:
+            try:
+                delivery.wipe_stale_links(m.task_id, cfg, lambda _m: None)
+                done += 1
+            except Exception:           # noqa: BLE001
+                _LOG.warning("Ночная чистка: задача %s не очищена", m.task_id,
+                             exc_info=True)
+        auto_settings.save(user, {"last_field_wipe": today})
+        _LOG.info("Ночная чистка полей Weeek (%02d:00): очищено задач %d",
+                  _WIPE_HOUR, done)
 
     def _tz(self, cfg: dict):
         try:
@@ -475,14 +533,11 @@ class Scheduler:
                     self._set(st, "recording", msg)
 
             self._set(st, "recording", "Бот заходит на встречу…")
-            # A RECURRING Weeek task carries the PREVIOUS occurrence's links in
-            # its custom fields (the task is duplicated with old values). Wipe
-            # «Видео встречи»/«Протокол встречи» at recording start, so the task
-            # never shows last week's video/protocol as if they were today's;
-            # the fresh links are written below as they become ready.
-            threading.Thread(target=delivery.wipe_stale_links,
-                             args=(st.task_id, cfg, st.logs.append),
-                             daemon=True).start()
+            # Поля «Видео встречи»/«Протокол встречи» у повторяющейся задачи
+            # несут ссылки ПРОШЛОГО проведения — их чистит ночной проход
+            # (_nightly_wipe), а не старт записи. Так у людей остаётся весь день
+            # на прошлые ссылки, и они не пропадают в момент, когда встреча
+            # только началась.
             # Human-readable file name: «ДД.ММ.ГГГГ, ЧЧ:ММ. - <название задачи>»
             # in the workspace timezone.
             when = (st.start.astimezone(self._tz(cfg)) if st.start
