@@ -458,6 +458,12 @@ class Scheduler:
             def log(msg: str) -> None:
                 msg = str(msg)
                 st.logs.append(msg)
+                # И в журнал контейнера тоже. Раньше лог бота жил ТОЛЬКО в
+                # памяти карточки: в `docker compose logs` было видно лишь
+                # «run-now → 200 OK» и тишину, а почему бот не зашёл на встречу
+                # — нигде. Причём после перезапуска карточка обнуляется, и
+                # разбираться становится не по чему.
+                _LOG.info("встреча %s: %s", st.task_id, msg)
                 # Показываем ход записи вместо застывшего «захожу…», но НЕ
                 # переводим состояние. Раньше здесь стояло _set(st,"recording"),
                 # и запоздавшее сообщение из фонового потока (стирание ссылок в
@@ -698,6 +704,7 @@ class Scheduler:
 
         def log(msg: str) -> None:
             st.logs.append(str(msg))
+            _LOG.info("встреча %s: %s", st.task_id, msg)
 
         def report(msg: str) -> None:
             """Log + (best-effort) leave a comment in the task, so the user sees
@@ -945,6 +952,7 @@ class Scheduler:
 
         def log(msg: str) -> None:
             st.logs.append(str(msg))
+            _LOG.info("встреча %s: %s", st.task_id, msg)
 
         log("Запись прервана перезапуском сервиса — файл цел, дообрабатываю.")
         if not st.cloud_url:
