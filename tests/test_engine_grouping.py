@@ -96,3 +96,35 @@ def test_openrouter_больше_не_предлагается():
     assert not any("openrouter" in url.lower()
                    for _, _, url in config.CUSTOM_KEY_PREFIXES)
     assert not any("openrouter" in url.lower() for url in config.CUSTOM_GUESS_URLS)
+
+
+class TestОтключениеПровайдера:
+    """Провайдера надо уметь выключить, не удаляя ключи.
+
+    Убрать его из VTX_PROVIDER_ORDER недостаточно: недостающие провайдеры
+    дописываются обратно — иначе новый провайдер не появился бы в интерфейсе
+    вовсе. Поэтому отключение отдельное и явное.
+
+    Понадобилось, когда NVIDIA стала отвечать так медленно, что каждая встреча
+    теряла на ней пять минут, прежде чем уйти к запасному движку.
+    """
+
+    def test_отключённый_не_доступен(self, monkeypatch):
+        monkeypatch.setattr(config, "PROVIDER_DISABLED", {"nvidia"})
+        keys = {"nvidia": [{"key": "k", "extra": ""}],
+                "gemini": [{"key": "k", "extra": ""}]}
+        assert "nvidia" not in config.available_providers(keys)
+        assert "gemini" in config.available_providers(keys)
+
+    def test_ключи_остаются_на_месте(self, monkeypatch):
+        """Отключение обратимо: ключ никуда не делся, вернуть провайдера —
+        правка одной строки в .env."""
+        monkeypatch.setattr(config, "PROVIDER_DISABLED", {"nvidia"})
+        keys = {"nvidia": [{"key": "секрет", "extra": ""}]}
+        assert config.provider_creds("nvidia", keys) == [("секрет", "")]
+
+    def test_отключённого_нет_в_списке_движков(self, monkeypatch):
+        monkeypatch.setattr(config, "PROVIDER_DISABLED", {"nvidia"})
+        keys = {"nvidia": [{"key": "k", "extra": ""}]}
+        assert not [e for e in _engines(monkeypatch, keys)
+                    if e["provider"] == "nvidia"]

@@ -158,6 +158,18 @@ PROVIDER_ORDER = [p.strip() for p in
 # Молча прятать способ подключиться хуже, чем поставить его последним.
 PROVIDER_ORDER += [p for p in PROVIDER_LABELS if p not in PROVIDER_ORDER]
 
+# Провайдеры, отключённые НАМЕРЕННО. Убрать провайдера из VTX_PROVIDER_ORDER
+# недостаточно: строкой выше недостающие дописываются обратно — иначе новый
+# провайдер не появился бы в интерфейсе вовсе. Поэтому отключение отдельное и
+# явное. Ключи при этом остаются на месте: провайдер просто не участвует ни в
+# «авто», ни в выборе движка, и включается обратно правкой одной строки.
+#
+# Зачем понадобилось: NVIDIA стала отвечать так медленно, что каждая встреча
+# теряла на ней пять минут, прежде чем уйти к запасному движку.
+PROVIDER_DISABLED = {p.strip() for p in
+                     os.getenv("VTX_PROVIDER_DISABLED", "").split(",") if p.strip()}
+PROVIDER_ORDER = [p for p in PROVIDER_ORDER if p not in PROVIDER_DISABLED]
+
 # --------------------------------------------------------------------------- #
 # Универсальное подключение по ключу (провайдер «custom»).
 # Таблицы здесь, а не в логике: поставщики и их адреса меняются, и дополнять
@@ -331,12 +343,14 @@ def available_providers(user_keys: dict | None = None) -> list[str]:
     """Providers configured (and thus selectable) for this user — their own key
     first, then the server env fallback."""
     out = []
-    if OLLAMA_ENABLED:
+    if OLLAMA_ENABLED and "ollama" not in PROVIDER_DISABLED:
         out.append("ollama")
     # Перебираем KEY_PROVIDERS, а не список из литералов: жёсткий перечень уже
     # один раз потерял нового провайдера — он подключался, но нигде не
     # появлялся, потому что его забыли дописать сразу в трёх местах.
     for p in sorted(KEY_PROVIDERS):
+        if p in PROVIDER_DISABLED:
+            continue
         if _has_provider_key(p, user_keys):
             out.append(p)
     return [p for p in PROVIDER_ORDER if p in out]
