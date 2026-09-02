@@ -38,6 +38,14 @@ class TestТаймкодыИМетки:
         assert _norm_t("12:07") == "12:07"
         assert _norm_t("") is None and _norm_t(None) is None
 
+    def test_ложный_час_снимается_по_меткам_расшифровки(self):
+        labels = {"13:01", "21:22", "06:34"}
+        assert _norm_t("01:13:01", labels, 68) == "13:01"
+        assert _norm_t("02:21:22", labels, 68) == "21:22"
+        assert _norm_t("01:13:01", set(), 68) == "13:01"          # 73 > 68 минут
+        assert _norm_t("01:05:03", {"65:03"}, 120) == "65:03"     # настоящий час
+        assert _norm_t("00:40:39", set(), None) == "40:39"
+
     def test_метка_с_трёхзначными_минутами_вырезается(self):
         assert _LABEL_RE.sub("", "[013:01] Зоя Р: текст") == "текст"
 

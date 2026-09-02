@@ -679,12 +679,12 @@ export default function Recognition() {
                           onChange={setDocxProv}
                           options={detail.docx_providers.map((p: string) => ({ value: p, label: p }))} />
                         <a className="btn btn-ghost"
-                          href={`/api/jobs/${detail.id}/result?format=docx&provider=${encodeURIComponent(docxProv || detail.docx_providers[detail.docx_providers.length - 1])}`}>
+                          href={`/api/jobs/${detail.id}/result?format=docx&provider=${encodeURIComponent(docxProv || detail.docx_providers[detail.docx_providers.length - 1])}&v=${Date.now()}`}>
                           <Download size={14} /> Word</a>
                       </>
                     ) : (
                       <a className="btn btn-ghost"
-                        href={`/api/jobs/${detail.id}/result?format=docx&provider=${encodeURIComponent(detail.docx_providers[0])}`}>
+                        href={`/api/jobs/${detail.id}/result?format=docx&provider=${encodeURIComponent(detail.docx_providers[0])}&v=${Date.now()}`}>
                         <Download size={14} /> Word · {detail.docx_providers[0]}</a>
                     )
                   ) : null}

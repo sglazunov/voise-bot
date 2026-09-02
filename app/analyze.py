@@ -998,15 +998,31 @@ _T_RE = re.compile(r"(\d{1,3}):(\d{2})(?::(\d{2}))?")
 _LINE_T_RE = re.compile(r"^\s*\[(\d{1,3}:\d{2}(?::\d{2})?)\]")
 
 
-def _norm_t(t) -> str | None:
-    """Таймкод модели → «мм:сс». В 26 боевых цитатах стояло «[013:01]»,
-    «[021:22]» — модель дописывала ноль часов; «00:40:39» — форма ч:мм:сс."""
+def _norm_t(t, labels: set[str] | None = None, max_min: int | None = None) -> str | None:
+    """Таймкод модели → «мм:сс».
+
+    Модель дописывает ложные часы: «[013:01]», «[021:22]», а на встрече 02.09
+    (68 минут) — «01:13:01» и «02:21:22», то есть 73 и 141 минута там, где
+    было 13:01 и 21:22. Поэтому форма ч:мм:сс НЕ доверяется слепо: из двух
+    прочтений (с часом и без) берётся то, которое есть среди меток
+    расшифровки `labels`, иначе — не выходящее за её длину `max_min`,
+    иначе — без часа."""
     m = _T_RE.search(str(t or ""))
     if not m:
         return None
     a, b, c = m.groups()
-    mins, secs = (int(a) * 60 + int(b), int(c)) if c is not None else (int(a), int(b))
-    return f"{mins:02d}:{secs:02d}"
+    if c is None:
+        return f"{int(a):02d}:{int(b):02d}"
+    with_h = f"{int(a) * 60 + int(b):02d}:{int(c):02d}"
+    no_h = f"{int(b):02d}:{int(c):02d}"
+    if labels:
+        if with_h in labels:
+            return with_h
+        if no_h in labels:
+            return no_h
+    if max_min is not None and int(a) * 60 + int(b) > max_min:
+        return no_h
+    return with_h if int(a) > 0 else no_h
 
 
 def _strip_labels(s: str) -> str:
@@ -1361,6 +1377,9 @@ def verify_protocol(result: dict, transcript_text: str, user_notes: str = "",
     text = _INJECTED_BLOCK_RE.sub(" ", transcript_text or "").strip()
     for i in range(0, len(text), budget_chars):
         sources.append(("transcript", text[i:i + budget_chars]))
+    # Метки расшифровки — чтобы отличить «01:13:01» (73-я минута) от «13:01».
+    labels = {f"{int(a):02d}:{int(b):02d}" for a, b in re.findall(r"\[(\d{1,3}):(\d{2})\]", text)}
+    max_min = max((int(l.split(":")[0]) for l in labels), default=None)
 
     pending = {i: p for i, p in enumerate(points, 1)}
     calls = failed_calls = 0
@@ -1407,7 +1426,7 @@ def verify_protocol(result: dict, transcript_text: str, user_notes: str = "",
                     continue
                 key, idx, _text, _owner = pending.pop(n)
                 ver[key][idx] = {"ok": True, "quote": quote[:300],
-                                 "t": _norm_t(item.get("t")), "source": src_name,
+                                 "t": _norm_t(item.get("t"), labels, max_min), "source": src_name,
                                  "owner_ok": bool(item.get("owner_ok")),
                                  "match": kind}
 

@@ -1352,10 +1352,14 @@ def get_result(job_id: str, format: str = "txt", provider: str = "",
         path = store.docx_path(job_id, prov)
         if not path.exists():
             raise HTTPException(404, "Протокол для этого движка отсутствует")
+        # no-store: адрес у документа один и тот же, а содержимое после
+        # «Пересобрать» новое. Без запрета браузер отдавал СТАРЫЙ Word из
+        # своего кэша (эвристика по Last-Modified) — «скачивается старая версия».
         return FileResponse(
             path,
             media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             filename=f"{_safe_stem(job.filename)}_{prov}_протокол.docx",
+            headers={"Cache-Control": "no-store"},
         )
 
     # Allow download whenever the file exists — covers finished jobs and the
@@ -1370,10 +1374,12 @@ def get_result(job_id: str, format: str = "txt", provider: str = "",
             raise HTTPException(409, f"Задача ещё не готова (статус: {job.status})")
         raise HTTPException(404, "Результат отсутствует")
     if format in ("txt", "plain", "screen"):
-        return PlainTextResponse(path.read_text(encoding="utf-8"))
+        return PlainTextResponse(path.read_text(encoding="utf-8"),
+                                 headers={"Cache-Control": "no-store"})
     media = "application/json" if format == "json" else "text/plain"
     return FileResponse(path, media_type=media,
-                        filename=f"{_safe_stem(job.filename)}.{format}")
+                        filename=f"{_safe_stem(job.filename)}.{format}",
+                        headers={"Cache-Control": "no-store"})
 
 
 def _safe_stem(name: str | None) -> str:
