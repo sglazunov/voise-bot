@@ -24,7 +24,7 @@ import time
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from . import config, llm, protocol_quality
+from . import config, llm, logs, protocol_quality
 
 # Схемы и тексты промптов вынесены в соседние модули: 450 строк деклараций и
 # русского текста без единой ветки логики мешали читать сам конвейер. Имена
@@ -39,6 +39,8 @@ from .analyze_prompts import (          # noqa: F401 — часть публич
     _SCHEMA, _RULES, _PROMPT_TEMPLATE, _MAP_SCHEMA, _MAP_TEMPLATE,
     _MERGE_TEMPLATE, _REDUCE_TEMPLATE, _NOTES_BLOCK, _with_notes,
 )
+
+_LOG = logs.get("vtx.analyze")
 
 # Single-pass threshold. Above this we chunk (map-reduce) so the WHOLE meeting
 # is analysed, not just the first part.
@@ -511,6 +513,48 @@ class _SchemaMiss(ValueError):
         self.raw = raw or ""
 
 
+def _protocol_from(backend, prompt: str, on_progress, stage: str,
+                   cancel_check=None) -> dict:
+    """Финальный протокол: движок отвечает по схеме, иначе — следующий в цепочке.
+
+    Боевой случай 02.09 («Встреча лидеров» 28.08, 67 мин, DeepSeek через
+    Yandex Cloud): карта встречи собрана — деньги уплачены, — а на сведении
+    модель дважды вернула текст без JSON (рассуждения до конца лимита).
+    Цепочка движков этого не видела: ответ пришёл, исключения не было. В
+    карточке — «В ответе модели нет JSON-объекта: line 1 column 1», протокола
+    нет, запасной движок не пробовался, заметки карты выброшены.
+
+    Теперь такой движок снимается с встречи (`demote`), и у следующего
+    запрашивается ТОЛЬКО сведение — заметки не пересчитываются. Начало
+    ответа пишется в лог: по нему видно, что именно пришло.
+    """
+    while True:
+        try:
+            return _complete_validated(backend, prompt, Protocol, 10000,
+                                       on_progress, stage, cancel_check)
+        except _SchemaMiss as e:
+            try:
+                return _lenient_protocol(e.raw)
+            except (ValueError, RuntimeError) as bad:   # JSONDecodeError ⊂ ValueError
+                head = re.sub(r"\s+", " ", (e.raw or "").strip())[:160]
+                failed = str(getattr(backend, "name", "") or "llm")
+                model = str(getattr(backend, "model", "") or "")
+                who = f"{failed} ({model})" if model else failed
+                reason = f"{failed}: дважды ответил не протоколом — «{head[:100]}…»"
+                _LOG.warning("Сведение: %s вернул ответ без протокола (%s); "
+                             "начало ответа: %r", who, bad, (e.raw or "")[:600])
+                demote = getattr(backend, "demote", None)
+                if demote and demote(reason):
+                    if on_progress:
+                        on_progress(f"Движок {failed} не вернул протокол — "
+                                    f"свожу на {backend.name}…", "")
+                    continue
+                raise RuntimeError(
+                    f"Движок «{who}» дважды вернул ответ без протокола: «{head}». "
+                    "Другого движка в цепочке нет — нажмите «Пересобрать», "
+                    "выбрав другую модель.") from bad
+
+
 def analyze_transcript(transcript_text: str, provider: str | None = None,
                        extra_instructions: str = "", custom_prompt: str = "",
                        on_progress=None, cancel_check=None, keys: dict | None = None,
@@ -576,12 +620,8 @@ def analyze_transcript(transcript_text: str, provider: str | None = None,
                 _with_notes(_PROMPT_TEMPLATE.format(transcript=text, context=ctx_full),
                             user_notes),
                 extra_instructions)
-            try:
-                result = _complete_validated(backend, prompt, Protocol, 10000,
-                                             on_progress, "Генерация протокола…",
-                                             cancel_check)
-            except _SchemaMiss as e:
-                result = _lenient_protocol(e.raw)
+            result = _protocol_from(backend, prompt, on_progress,
+                                    "Генерация протокола…", cancel_check)
     else:
         chunks = _split_chunks(text)
         n = len(chunks)
@@ -664,12 +704,8 @@ def analyze_transcript(transcript_text: str, provider: str | None = None,
                 warning = ("Протокол мог потерять детали: у движка "
                            f"«{backend.name}» осталось мало лимита на ответ. "
                            "Попробуйте «Пересобрать» другим движком.")
-            try:
-                result = _complete_validated(backend, prompt, Protocol, 10000,
-                                             on_progress, "Свожу протокол…",
-                                             cancel_check)
-            except _SchemaMiss as e:
-                result = _lenient_protocol(e.raw)
+            result = _protocol_from(backend, prompt, on_progress,
+                                    "Свожу протокол…", cancel_check)
 
     # Normalise — guarantee the shape the rest of the app expects.
     result.setdefault("summary", "")

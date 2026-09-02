@@ -394,10 +394,20 @@ def text_of(out: dict) -> tuple[str, str]:
                       if isinstance(part, dict))
     text = str(raw or "").strip()
     if not text:
-        # Рассуждения — не ответ, но лучше пустоты: протокол там нередко есть,
-        # а разбор JSON всё равно ищет фигурную скобку в любом тексте.
-        text = str(msg.get("reasoning_content") or "").strip()
+        # Рассуждения — не ответ. Берём их ТОЛЬКО если внутри есть объект:
+        # бывает, что модель дописала протокол прямо в них. Голые рассуждения
+        # («Итак, встреча началась с…») отдавать нельзя: наверху они выглядели
+        # как «В ответе модели нет JSON-объекта: line 1 column 1», и по такой
+        # строке причину (лимит токенов кончился в рассуждениях) не понять.
+        reasoning = str(msg.get("reasoning_content") or "").strip()
+        if "{" in reasoning:
+            text = reasoning
     return text, finish
+
+
+# Потолок повтора при пустом ответе по лимиту: удваиваем запрошенное, но не
+# бесконечно — у поставщиков свой предел на выход (у DeepSeek 64k).
+_MAX_TOKENS_RETRY = 32000
 
 
 class CustomProvider(_KeyProviderMixin):
@@ -456,21 +466,32 @@ class CustomProvider(_KeyProviderMixin):
         if should_stop and should_stop():
             raise GenerationCancelled()
         text, finish = text_of(out)
-        if not text and "response_format" in payload:
-            # Строгий JSON-режим часть шлюзов принимает, но отвечает на него
-            # пустотой. Отличить это от настоящей пустоты можно только одним
-            # способом — переспросить без него. Разбор JSON у нас всё равно
-            # свой, так что режим ничего не гарантировал.
+        if not text and (finish == "length" or "response_format" in payload):
+            # Пустой ответ бывает по двум причинам, и обе лечатся ОДНИМ
+            # повтором:
+            #  * строгий JSON-режим часть шлюзов принимает, но отвечает
+            #    пустотой — повторяем без response_format (разбор JSON у нас
+            #    всё равно свой);
+            #  * у рассуждающей модели (DeepSeek и родня) max_tokens считает
+            #    и рассуждения, и ответ: на сведении часовой встречи весь
+            #    лимит уходит в размышления, content пуст, finish = length.
+            #    Повторяем с удвоенным лимитом — это дешевле, чем выбросить
+            #    уже оплаченную карту встречи и уйти к другому движку.
             payload.pop("response_format", None)
+            if finish == "length":
+                payload["max_tokens"] = min(max(max_tokens, 1) * 2, _MAX_TOKENS_RETRY)
             out = _http_post_json(url, payload, self._headers(), timeout=300,
                                   max_retries=self._retries)
             text, finish = text_of(out)
         if not text:
-            more = " (лимит токенов кончился прямо в ответе)" if finish == "length" else ""
+            more = ""
+            if finish == "length":
+                more = (f" — лимит токенов ({payload['max_tokens']}) кончился "
+                        "прямо в ответе: у рассуждающей модели он уходит на "
+                        "рассуждения")
             raise RuntimeError(
-                f"Модель «{self.model}» вернула пустой ответ{more}. У "
-                "рассуждающих моделей весь лимит уходит в рассуждения — "
-                "возьмите модель без рассуждений или другого поставщика.")
+                f"Модель «{self.model}» вернула пустой ответ{more}. "
+                "Возьмите модель без рассуждений или другого поставщика.")
         return text
 
     def complete_guarded(self, *a, **kw) -> str:

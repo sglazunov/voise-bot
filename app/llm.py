@@ -574,6 +574,28 @@ class _FallbackChain:
         self._backends = backends
         self._i = 0     # index of the provider that served the last call
         self.skipped: list[str] = []   # почему пропущены движки выше по списку
+        self._excluded: set[int] = set()   # снятые demote() — больше не пробуем
+
+    def demote(self, reason: str) -> bool:
+        """Снять ТЕКУЩИЙ движок с этой встречи и перейти к следующему.
+
+        Цепочка сама переключается только на исключение из complete() — сбой
+        сети, 5xx, лимит. Ответ, который ПРИШЁЛ, но оказался не JSON (модель
+        рассуждала до конца лимита, вернула прозу), исключением не был: сведение
+        падало дважды, весь протокол — вместе с уже оплаченной картой встречи —
+        выбрасывался, а запасной движок не пробовался ни разу. Теперь
+        вызывающий код снимает такой движок и повторяет ТОЛЬКО сведение.
+
+        Возвращает False, если пробовать больше некого.
+        """
+        self._excluded.add(self._i)
+        rest = [i for i in range(len(self._backends)) if i not in self._excluded]
+        if reason and reason not in self.skipped and len(self.skipped) < 3:
+            self.skipped.append(reason)
+        if not rest:
+            return False
+        self._i = rest[0]
+        return True
 
     @property
     def name(self) -> str:
@@ -619,6 +641,8 @@ class _FallbackChain:
         tight: list = []          # движки, отложенные из-за тесного бюджета
         for k in range(n):
             i = (self._i + k) % n
+            if i in self._excluded:
+                continue
             b = self._backends[i]
             # The caller sized max_tokens for the PRIMARY provider; re-clamp for
             # the one actually being tried, or Groq rejects the request with 413.
