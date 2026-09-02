@@ -8,7 +8,7 @@ import { ChevronRight, ExternalLink, FileText, Loader2, RotateCcw } from "lucide
 import { useToast } from "../../components/ui";
 import { api } from "../../lib/api";
 
-type Verify = { ok?: boolean; quote?: string; t?: string; source?: string; match?: string } | null;
+type Verify = { ok?: boolean; quote?: string; t?: string; source?: string; match?: string; note?: string; owner_source?: string } | null;
 
 function VerifyMark({ v }: { v?: Verify }) {
   // null — пункт не проверялся (проверка оборвалась): молчим, а не пугаем.
@@ -17,15 +17,16 @@ function VerifyMark({ v }: { v?: Verify }) {
     return (
       <span className="ml-1.5 chip whitespace-nowrap text-[10.5px]"
         style={{ color: "var(--warn)", background: "rgba(251,191,36,.12)" }}
-        title="В расшифровке не нашлось дословного подтверждения — проверьте пункт">
-        ⚠ проверьте</span>
+        title={v.note || "В расшифровке не нашлось дословного подтверждения — проверьте пункт"}>
+        ⚠ {v.note ? v.note : "проверьте"}</span>
     );
   }
   if (!v.quote) return null;
   return (
     <details className="mt-0.5">
       <summary className="text-[11px] cursor-pointer" style={{ color: "var(--muted)" }}>
-        основание{v.t ? ` · ${v.t}` : ""}{v.source === "notes" ? " · из заметок" : ""}{v.match === "approx" ? " · ≈" : ""}</summary>
+        основание{v.t ? ` · ${v.t}` : ""}{v.source === "notes" ? " · из заметок" : ""}{v.match === "approx" ? " · ≈" : ""}
+        {v.note ? ` · ${v.note}` : ""}{v.owner_source === "обращение" ? " · ответственный из обращения" : ""}</summary>
       <div className="text-[11.5px] italic mt-0.5 pl-2" style={{ color: "var(--muted)", borderLeft: "2px solid var(--line)" }}>
         «{v.quote}»</div>
     </details>
@@ -388,6 +389,11 @@ export function Protocol({ a, jobId }: { a: any; jobId?: string }) {
   const engine = [a._provider, a._model].filter(Boolean).join(" · ");
   return (
     <div>
+      {Array.isArray(a._fallback) && a._fallback.length > 0 && (
+        <div className="glass2 rounded-2xl p-3 mb-4 text-[12.5px] font-semibold" style={{ color: "var(--warn)" }} role="status">
+          ЧЕРНОВИК: выбранный движок не ответил, протокол собран запасным и может быть неполным — пересоберите позже.
+          <span className="font-normal"> {String(a._fallback[0]).slice(0, 160)}</span></div>
+      )}
       {a._warning && (
         <div className="glass2 rounded-2xl p-3 mb-4 text-[12.5px]" style={{ color: "var(--warn)" }} role="status">⚠ {a._warning}</div>
       )}
@@ -420,11 +426,30 @@ export function Protocol({ a, jobId }: { a: any; jobId?: string }) {
         <h3 className="font-bold text-[13.5px] mb-1.5" style={{ color: "var(--accent-text, var(--accent))" }}>Кратко</h3>
         <div className="text-[13px] leading-relaxed">{a.summary}</div></section>)}
       <List title="Решения" items={a.decisions} verify={ver.decisions} />
-      <List title="Задачи" items={a.tasks} verify={ver.tasks} />
+      <List title="Задачи" items={(a.tasks || []).filter((t: any) => t.owner && t.owner !== "—")}
+        verify={(a.tasks || []).map((t: any, i: number) => [t, ver.tasks?.[i]]).filter(([t]: any) => t.owner && t.owner !== "—").map(([, v]: any) => v)} />
+      <List title="Задачи без ответственного — назначьте исполнителя"
+        items={(a.tasks || []).filter((t: any) => !t.owner || t.owner === "—")}
+        verify={(a.tasks || []).map((t: any, i: number) => [t, ver.tasks?.[i]]).filter(([t]: any) => !t.owner || t.owner === "—").map(([, v]: any) => v)} />
       {jobId && <WeeekTasks jobId={jobId} tasksCount={(a.tasks?.length || 0) + (a.minor_tasks?.length || 0)} />}
       <List title="Мелкие задачи" items={a.minor_tasks} verify={ver.minor_tasks} />
       <List title="Уже сделано" items={a.done_tasks} verify={ver.done_tasks} />
       <StatusList items={a.statuses} />
+      {a._carried?.items?.length ? (
+        <section className="mb-4" aria-label="Задачи прошлой встречи">
+          <h3 className="font-bold text-[13.5px] mb-1.5" style={{ color: "var(--accent-text, var(--accent))" }}>
+            Задачи прошлой встречи ({a._carried.date || "?"}): что с ними</h3>
+          <ul className="space-y-1.5">
+            {a._carried.items.map((x: any, i: number) => (
+              <li key={i} className="text-[13px] leading-relaxed flex gap-2">
+                <ChevronRight size={14} className="flex-none mt-0.5" color="var(--muted)" aria-hidden="true" />
+                <span className="min-w-0">{x.task}{x.owner ? ` — ${x.owner}` : ""}
+                  <span className="chip ml-1.5" style={{ color: x.status === "без упоминания" ? "var(--warn)" : "var(--txt)" }}>{x.status}</span></span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
       <List title="Выводы и открытые вопросы" items={a.conclusions} />
       {a.detailed?.length ? (
         <details className="mb-4" open={!a.decisions?.length && !a.tasks?.length}>
@@ -432,7 +457,11 @@ export function Protocol({ a, jobId }: { a: any; jobId?: string }) {
             По темам ({a.detailed.length})</summary>
           {a.detailed.map((t: any, i: number) => (
             <div key={i} className="glass2 rounded-xl p-3 mb-2">
-              <h4 className="font-semibold text-[13px] mb-1">{t.topic}</h4>
+              <h4 className="font-semibold text-[13px] mb-1">{t.topic}
+                {t._unsupported !== undefined && t._unsupported !== null ? (
+                  <span className="chip ml-1.5 text-[10.5px]" style={{ color: "var(--warn)" }}
+                    title="Часть сведений этого раздела не нашлась в расшифровке">⚠ частично без опоры</span>
+                ) : null}</h4>
               <div className="text-[12.5px] leading-relaxed" style={{ color: "var(--muted)" }}>{t.details}</div>
             </div>
           ))}

@@ -428,8 +428,11 @@ _DEAD_KEY_SEC = 24 * 3600.0
 # ~a minute) rather than abandoning the engine — the keys' budgets then SUM UP
 # over the whole meeting. Waits longer than KEY_WAIT_SEC per round, or
 # KEY_TOTAL_WAIT_SEC per request, mean a real outage → fall to the next engine.
-KEY_WAIT_SEC = float(os.getenv("VTX_KEY_WAIT_SEC", "90"))
-KEY_TOTAL_WAIT_SEC = float(os.getenv("VTX_KEY_TOTAL_WAIT_SEC", "300"))
+# Ревью 128 протоколов (02.09): каждый третий протокол августа собран
+# запасным движком после 429 у Gemini — и заметно хуже. Лучше подождать
+# несколько минут, чем получить пустой протокол: окно ожидания расширено.
+KEY_WAIT_SEC = float(os.getenv("VTX_KEY_WAIT_SEC", "240"))
+KEY_TOTAL_WAIT_SEC = float(os.getenv("VTX_KEY_TOTAL_WAIT_SEC", "900"))
 
 
 def _cooldown_from(e: Exception, default: float = _KEY_COOLDOWN_SEC) -> float:

@@ -28,7 +28,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import db, security
+from . import db, protocol_quality, security
 
 # Ограничения — чтобы память серии не съела бюджет промпта.
 _MAX_CONTEXT = 8_000          # текст карточки серии (пишет человек)
@@ -377,6 +377,56 @@ def remember(user: str, title: str | None, analysis: dict | None,
         data[hit] = e
         _write(team, data)
     return hit
+
+
+def carry_over(user: str, title: str | None, analysis: dict | None,
+               job_id: str = "") -> dict | None:
+    """Сверка задач ПРОШЛОЙ встречи серии с этим протоколом.
+
+    Ревью 128 протоколов: бот знал серию, но задачи прошлого протокола ни с
+    чем не сверялись — а это главная польза серийности. Для каждой прошлой
+    задачи: «закрыта» (нашлась в «Сделано» или в статусах как сделанная),
+    «в работе» (снова стоит в задачах / статус «в работе»), иначе «без
+    упоминания». Зовётся ДО remember(), пока память ещё о прошлой встрече;
+    память, записанная этим же протоколом (пересборка), не сверяется.
+    """
+    if not analysis or not isinstance(analysis, dict):
+        return None
+    _key, e = find(user, title)
+    last = (e or {}).get("last") or {}
+    prev = last.get("tasks") or []
+    if not prev or (job_id and last.get("job_id") == job_id):
+        return None
+
+    def stems(t: str) -> set[str]:
+        return protocol_quality._stems(t)
+
+    done = [stems(_task_text(x)[0]) for x in analysis.get("done_tasks") or []]
+    still = [stems(_task_text(x)[0]) for lst in ("tasks", "minor_tasks")
+             for x in analysis.get(lst) or []]
+    st_done, st_work = [], []
+    for st in analysis.get("statuses") or []:
+        if not isinstance(st, dict):
+            continue
+        s_ = stems(str(st.get("item") or ""))
+        status = str(st.get("status") or "")
+        (st_done if status == "сделано" else st_work).append(s_)
+
+    def hit(a: set[str], pool: list[set[str]]) -> bool:
+        return bool(a) and len(a) >= 2 and any(len(a & b) / len(a) >= 0.5 for b in pool)
+
+    items = []
+    for t in prev:
+        txt, owner = _task_text(t)
+        a = stems(txt)
+        if hit(a, done) or hit(a, st_done):
+            status = "закрыта"
+        elif hit(a, still) or hit(a, st_work):
+            status = "в работе"
+        else:
+            status = "без упоминания"
+        items.append({"task": txt, "owner": owner, "status": status})
+    return {"date": last.get("date") or "", "items": items}
 
 
 def _date_key(d: str) -> tuple:

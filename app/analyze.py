@@ -24,7 +24,7 @@ import time
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from . import config, llm, logs, protocol_quality
+from . import config, llm, logs, names, protocol_quality
 
 # Схемы и тексты промптов вынесены в соседние модули: 450 строк деклараций и
 # русского текста без единой ветки логики мешали читать сам конвейер. Имена
@@ -725,6 +725,7 @@ def analyze_transcript(transcript_text: str, provider: str | None = None,
     for list_key in ("done_tasks", "tasks", "minor_tasks"):
         result[list_key] = _normalise_tasks(result.get(list_key, []))
     result["statuses"] = _normalise_statuses(result.get("statuses", []))
+    _drop_noise_tasks(result)
     result["detailed"] = merge_similar_topics(_normalise_detailed(result["detailed"]))
     result["_provider"] = backend.name
     spoken = speech_words(text)
@@ -991,7 +992,20 @@ def _stems(text: str) -> set[str]:
 # Метка реплики: «[12:40] Кирилл Бубнов: » — структура, а не речь. Цитата,
 # скопированная через границу двух реплик, метку не содержит; вырезаем её из
 # фрагмента ПЕРЕД сравнением, иначе такая цитата «не дословна».
-_LABEL_RE = re.compile(r"\[\d{1,2}:\d{2}(?::\d{2})?\]\s*(?:[^:\n]{0,40}:)?\s*")
+_LABEL_RE = re.compile(r"\[\d{1,3}:\d{2}(?::\d{2})?\]\s*(?:[^:\n]{0,40}:)?\s*")
+_T_RE = re.compile(r"(\d{1,3}):(\d{2})(?::(\d{2}))?")
+_LINE_T_RE = re.compile(r"^\s*\[(\d{1,3}:\d{2}(?::\d{2})?)\]")
+
+
+def _norm_t(t) -> str | None:
+    """Таймкод модели → «мм:сс». В 26 боевых цитатах стояло «[013:01]»,
+    «[021:22]» — модель дописывала ноль часов; «00:40:39» — форма ч:мм:сс."""
+    m = _T_RE.search(str(t or ""))
+    if not m:
+        return None
+    a, b, c = m.groups()
+    mins, secs = (int(a) * 60 + int(b), int(c)) if c is not None else (int(a), int(b))
+    return f"{mins:02d}:{secs:02d}"
 
 
 def _strip_labels(s: str) -> str:
@@ -1055,6 +1069,218 @@ class _Fragment:
         return None
 
 
+# Шаблонные фразы, которые модель раз за разом оформляет задачами (ревью 128
+# протоколов): оргфраза ведущего про доступ «напишите Виктору», возня с
+# микрофоном, реплики про самого бота («добавь в контекст бота слово „утка“»
+# — тест бота, а не задача встречи). Свои — VTX_TASK_STOPLIST, шаблоны через
+# «;;».
+_TASK_NOISE = [re.compile(pat, re.I) for pat in (
+    r"\b(написать|напишите|попросить|обратиться|запросить|написав)\b.{0,50}"
+    r"\b(виктор\w*|руководител\w*)\b.{0,50}\bдоступ",
+    r"\bдоступ\w*\b.{0,50}\b(виктор\w*|руководител\w*)",
+    r"\b(включ|выключ|настро|провер|поправ)\w*\s+(микрофон|камер|звук|наушник|гарнитур)",
+    r"(протокол-?бот\w*|\bбот[ауе]?\b).{0,60}\b(контекст|стоп-?слов|тест\w*|утк\w*)",
+    r"\b(контекст|стоп-?слов|тест\w*)\b.{0,60}(протокол-?бот\w*|\bбот[ауе]?\b)",
+    r"\bстоп-?слов",
+)]
+
+
+def _task_noise() -> list[re.Pattern]:
+    extra = [x.strip() for x in os.getenv("VTX_TASK_STOPLIST", "").split(";;") if x.strip()]
+    out = list(_TASK_NOISE)
+    for pat in extra:
+        try:
+            out.append(re.compile(pat, re.I))
+        except re.error:
+            continue
+    return out
+
+
+def _drop_noise_tasks(result: dict) -> None:
+    """Убрать шаблонный шум из списков задач; что убрано — в result["_dropped"]."""
+    rules = _task_noise()
+    dropped: list[str] = []
+    for key in ("tasks", "minor_tasks", "done_tasks"):
+        keep = []
+        for item in result.get(key) or []:
+            txt = str(item.get("task") or "") if isinstance(item, dict) else str(item)
+            if any(rx.search(txt) for rx in rules):
+                dropped.append(txt)
+            else:
+                keep.append(item)
+        result[key] = keep
+    if dropped:
+        result["_dropped"] = dropped
+
+
+# Опора описательных разделов. Проверка цитатой есть только у задач и решений,
+# а выдуманное живёт в «Подробном разборе»: протокол «Аналитика тренажёров»
+# 01.09 получил разделы про «8 программистов, 3 веб-дизайнера, импорт из
+# Asana/Trello», которых в расшифровке нет. Считаем, какая доля «якорей» темы
+# (числа, латиница, имена, длинные слова) есть в речи.
+_TOPIC_DROP = 0.35
+_TOPIC_FLAG = 0.6
+
+
+def _anchors(text: str) -> set[str]:
+    out: set[str] = set()
+    for w in re.findall(r"\w+", (text or "").replace("ё", "е")):
+        low = w.lower()
+        if low.isdigit():
+            out.add(low)
+        elif re.fullmatch(r"[a-z][a-z0-9.\-]{2,}", low):
+            out.add(low)
+        elif len(low) >= 7 or (w[:1].isupper() and len(low) >= 4):
+            out.add(_stem(low))
+    return out
+
+
+def _speech_index(text: str) -> tuple[set[str], set[str]]:
+    """(основы слов, числа) речи и текста с экрана — без блоков контекста."""
+    screen = "\n".join(m.group(0) for m in re.finditer(
+        r"===\s*ТЕКСТ С ЭКРАНА[\s\S]*?(?=\n\s*===|\Z)", text or "", re.I))
+    speech = _strip_labels(_INJECTED_BLOCK_RE.sub(" ", text or "") + "\n" + screen)
+    # Числа — из речи, а не из таймкодов: иначе «8 программистов» находит
+    # опору в метке [08:15].
+    return _stems(speech), set(re.findall(r"\d+", speech))
+
+
+def topic_support(details: str, index: tuple[set[str], set[str]]) -> float | None:
+    """Доля якорей темы, найденных в речи; None — якорей слишком мало."""
+    stems, nums = index
+    anc = _anchors(details)
+    if len(anc) < 5:
+        return None
+    hit = sum(1 for a in anc if (a in nums if a.isdigit() else a in stems))
+    return hit / len(anc)
+
+
+def check_topics(result: dict, transcript_text: str) -> dict:
+    """Второй проход по «Подробному разбору»: тема без опоры в речи удаляется
+    (result["_dropped_topics"]), тема с частичной — помечается `_unsupported`."""
+    topics = result.get("detailed") or []
+    if not topics:
+        return result
+    index = _speech_index(transcript_text)
+    if len(index[0]) < 30:
+        return result            # речи почти нет — сравнивать не с чем
+    keep, dropped = [], []
+    for t in topics:
+        if not isinstance(t, dict):
+            continue
+        sup = topic_support(f"{t.get('topic') or ''} {t.get('details') or ''}", index)
+        if sup is not None and sup < _TOPIC_DROP:
+            dropped.append(str(t.get("topic") or "")[:120])
+            continue
+        if sup is not None and sup < _TOPIC_FLAG:
+            t["_unsupported"] = round(sup, 2)
+        keep.append(t)
+    result["detailed"] = keep
+    if dropped:
+        result["_dropped_topics"] = dropped
+        _LOG.warning("Удалены темы без опоры в расшифровке: %s", dropped)
+    return result
+
+
+def _find_support(point_text: str, text: str) -> dict | None:
+    """Опора для пункта, когда модель цитату не нашла или переврала: окно в три
+    реплики, где есть ≥60 % основ слов пункта. Ревью 128 протоколов: «Обновить
+    сервер и закрыть задачу по конструктору» ушло в «требуют проверки», хотя в
+    речи на 04:46–04:57 это сказано почти дословно."""
+    pw = _stems(point_text)
+    if len(pw) < 3:
+        return None
+    lines = [ln for ln in (text or "").splitlines() if ln.strip()]
+    best, best_i = 0.0, -1
+    for i in range(len(lines)):
+        ws: set[str] = set()
+        for j in range(i, min(len(lines), i + 3)):
+            ws |= _stems(_strip_labels(lines[j]))
+        score = len(pw & ws) / len(pw)
+        if score > best:
+            best, best_i = score, i
+    if best < 0.6 or best_i < 0:
+        return None
+    window = lines[best_i:best_i + 3]
+    line = max(window, key=lambda ln: len(pw & _stems(_strip_labels(ln))))
+    m = _LINE_T_RE.match(line)
+    return {"quote": _strip_labels(line).strip()[:300],
+            "t": _norm_t(m.group(1)) if m else None}
+
+
+def _lines_after(text: str, quote: str, k: int = 3) -> list[str]:
+    """k реплик после той, где стоит цитата (по первым словам цитаты)."""
+    qn = _norm_for_match(_strip_labels(quote))
+    head = " ".join(qn.split()[:6])
+    if not head:
+        return []
+    lines = [ln for ln in (text or "").splitlines() if ln.strip()]
+    for i, ln in enumerate(lines):
+        if head in _norm_for_match(_strip_labels(ln)):
+            return lines[i + 1:i + 1 + k]
+    return []
+
+
+_CONTRA_RE = re.compile(
+    r"^(нет|не надо|не нужно|не будем|не стоит|отмен\w*|давай(те)? не|нет[,.]? не|"
+    r"не[,.]? не надо|это не нужно)\b", re.I)
+_PAST_RE = re.compile(
+    r"\b(я|мы)\s+(уже\s+)?(добавил|сделал|поставил|отправил|скинул|написал|починил|"
+    r"выложил|закрыл|обновил|настроил|подключил|проверил|исправил|залил|создал|поправил|"
+    r"переименовал|удалил|доделал|выкатил)[аио]?\b|\bуже\s+(сделан|готов|добавлен|"
+    r"поставлен|починен|закрыт|исправлен)\w*", re.I)
+_FUTURE_RE = re.compile(
+    r"\b(надо|нужно|сделаю|сделаем|добавлю|добавим|буду|будем|поставлю|давай|скину|"
+    r"напишу|попробую|планиру\w*|предлагаю|осталось|ещё не|еще не)\b", re.I)
+
+
+def _known_people(result: dict, text: str) -> list[str]:
+    """Участники протокола + имена из меток реплик — для обращений."""
+    out: list[str] = []
+    for p in result.get("participants") or []:
+        n = str(p.get("name") or "").strip() if isinstance(p, dict) else str(p).strip()
+        if n:
+            out.append(n)
+    for m in re.finditer(r"\[\d{1,3}:\d{2}(?::\d{2})?\]\s*([^:\n]{2,40}):", text or ""):
+        n = m.group(1).strip()
+        if n and names.looks_like_name(n) and n not in out:
+            out.append(n)
+    return out
+
+
+def _refine_tasks(result: dict, ver: dict, text: str) -> None:
+    """Дочитать подтверждённые задачи: ответственный из обращения, отмена в
+    следующих репликах, прошедшее время = уже сделано."""
+    known = _known_people(result, text)
+    for key in ("tasks", "minor_tasks"):
+        items = result.get(key) or []
+        keep_items, keep_ver = [], []
+        for idx, item in enumerate(items):
+            v = ver[key][idx] if idx < len(ver.get(key) or []) else None
+            if isinstance(item, dict) and isinstance(v, dict) and v.get("ok"):
+                q = str(v.get("quote") or "")
+                who = names.addressee(q, known)
+                owner = str(item.get("owner") or "")
+                if who and (not owner or names.key(who) != names.key(owner)):
+                    item["owner"] = who
+                    v["owner_ok"] = True
+                    v["owner_source"] = "обращение"
+                contra = next((ln for ln in _lines_after(text, q)
+                               if _CONTRA_RE.match(_strip_labels(ln).strip())), None)
+                if contra:
+                    v["ok"] = False
+                    v["note"] = "дальше в разговоре: «" + _strip_labels(contra).strip()[:120] + "»"
+                elif _PAST_RE.search(_strip_labels(q)) and not _FUTURE_RE.search(q):
+                    v["note"] = "по цитате — уже сделано"
+                    result.setdefault("done_tasks", []).append(item)
+                    ver.setdefault("done_tasks", []).append(v)
+                    continue
+            keep_items.append(item)
+            keep_ver.append(v)
+        result[key] = keep_items
+        ver[key] = keep_ver
+
+
 def _collect_points(result: dict) -> list[tuple[str, int, str, str]]:
     """[(list_key, index, text, owner)] — all statements needing evidence."""
     points = []
@@ -1083,6 +1309,7 @@ def verify_protocol(result: dict, transcript_text: str, user_notes: str = "",
     Old protocols without this key keep working — every consumer treats it as
     optional. Never raises: on engine failure the protocol ships unverified
     with verification.error explaining why."""
+    check_topics(result, transcript_text)
     points = _collect_points(result)
     ver: dict = {"mode": "strict"}
     for key in _VERIFIED_LISTS:
@@ -1160,9 +1387,22 @@ def verify_protocol(result: dict, transcript_text: str, user_notes: str = "",
                     continue
                 key, idx, _text, _owner = pending.pop(n)
                 ver[key][idx] = {"ok": True, "quote": quote[:300],
-                                 "t": item.get("t"), "source": src_name,
+                                 "t": _norm_t(item.get("t")), "source": src_name,
                                  "owner_ok": bool(item.get("owner_ok")),
                                  "match": kind}
+
+    # Модель цитату не нашла или переврала — ищем опору сами, по основам слов
+    # в окне из трёх реплик. Иначе честно сказанное уходит в «требуют проверки».
+    if not ver.get("error"):
+        for n in list(pending):
+            key, idx, ptext, _owner = pending[n]
+            hit = _find_support(ptext, text)
+            if hit:
+                pending.pop(n)
+                ver[key][idx] = {"ok": True, "quote": hit["quote"], "t": hit["t"],
+                                 "source": "transcript", "owner_ok": False,
+                                 "match": "approx"}
+        _refine_tasks(result, ver, text)
 
     ver["stats"] = {"checked": len(points), "confirmed": len(points) - len(pending),
                     "calls": calls, "failed_calls": failed_calls}

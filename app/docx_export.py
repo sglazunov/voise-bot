@@ -48,14 +48,16 @@ def _apply_verification(par, v, RGBColor) -> None:
     if not v.get("ok"):
         for r in par.runs:
             r.font.color.rgb = RGBColor(*_GRAY)
-        warn = par.add_run(_UNVERIFIED_MARK)
+        warn = par.add_run(("  ⚠ " + v["note"]) if v.get("note") else _UNVERIFIED_MARK)
         warn.italic = True
         warn.font.color.rgb = RGBColor(*_GRAY)
     elif v.get("quote"):
         t = f" [{v['t']}]" if v.get("t") else ""
         src = " (из заметок участника)" if v.get("source") == "notes" else ""
         approx = " ≈" if v.get("match") == "approx" else ""
-        note = par.add_run(f"\nОснование{t}{src}{approx}: «{v['quote']}»")
+        extra = f" — {v['note']}" if v.get("note") else ""
+        who = " (ответственный — из обращения в реплике)" if v.get("owner_source") == "обращение" else ""
+        note = par.add_run(f"\nОснование{t}{src}{approx}: «{v['quote']}»{extra}{who}")
         note.italic = True
         note.font.color.rgb = RGBColor(*_GRAY)
 
@@ -102,7 +104,9 @@ def generate_report(
     normal.font.size = Pt(11)
 
     # ---- title block --------------------------------------------------------
-    title_p = doc.add_heading("Протокол встречи", level=0)
+    fb = analysis.get("_fallback")
+    is_draft = isinstance(fb, list) and bool(fb)
+    title_p = doc.add_heading("Протокол встречи" + (" — ЧЕРНОВИК" if is_draft else ""), level=0)
     title_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
     sub = doc.add_paragraph()
@@ -128,14 +132,18 @@ def generate_report(
 
     # Сработал откат на другой движок — говорим об этом прямо: выбор движка
     # иначе выглядит проигнорированным.
-    fb = analysis.get("_fallback")
-    if isinstance(fb, list) and fb:
+    if is_draft:
+        # Ревью 128 протоколов: каждый третий за август собран запасным
+        # движком и заметно беднее. Пометка — крупно, в заголовке и здесь:
+        # мелкая строка ошибки не читалась.
         fbp = doc.add_paragraph()
         fbp.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        fr = fbp.add_run("Выбранный движок не ответил, протокол собран запасным. "
+        fr = fbp.add_run("ЧЕРНОВИК: выбранный движок не ответил, протокол собран запасным "
+                         "и может быть неполным — пересоберите позже. "
                          + "; ".join(str(x)[:160] for x in fb[:2]))
+        fr.bold = True
         fr.font.color.rgb = RGBColor(0xB0, 0x50, 0x00)
-        fr.font.size = Pt(9)
+        fr.font.size = Pt(10)
 
     # Мало речи — предупреждаем в самом верху. Иначе протокол на 240 слов,
     # собранный по 118 словам разговора, выглядит как полноценный итог встречи,
@@ -224,6 +232,12 @@ def generate_report(
             or not _verification_complete(analysis):
         sure, unsure = [(i, t) for i, t in enumerate(tasks)], []
 
+    # Ревью 128 протоколов: 40 % задач в основной таблице были без
+    # исполнителя — их всё равно никто не заведёт. Основная таблица — только
+    # с ответственным; остальные подтверждённые — отдельным блоком с прямым
+    # призывом назначить.
+    no_owner = [(i, t) for i, t in sure if not _task_parts(t)[1]]
+    sure = [(i, t) for i, t in sure if _task_parts(t)[1]]
     doc.add_heading("Задачи (нужно сделать)", level=1)
     if sure:
         has_due = any(isinstance(t, dict) and t.get("due") for _i, t in sure)
@@ -244,9 +258,26 @@ def generate_report(
                 row[3].paragraphs[0].add_run(
                     str(item.get("due") or "—") if isinstance(item, dict) else "—")
         doc.add_paragraph().paragraph_format.space_after = Pt(6)
-    else:
+    elif not no_owner:
         doc.add_paragraph("Задач с дословным подтверждением не найдено."
                           ).paragraph_format.space_after = Pt(6)
+
+    if no_owner:
+        doc.add_heading("Задачи без ответственного — назначьте исполнителя", level=1)
+        p = doc.add_paragraph()
+        r = p.add_run("Эти задачи подтверждены расшифровкой, но на встрече не прозвучало, "
+                      "кто их делает. Без исполнителя задача не попадёт в работу.")
+        r.italic = True
+        r.font.size = Pt(10)
+        r.font.color.rgb = RGBColor(0x80, 0x80, 0x80)
+        for i, item in no_owner:
+            text, _owner = _task_parts(item)
+            bp = doc.add_paragraph(style="List Bullet")
+            bp.add_run(f"☐ {text}")
+            if isinstance(item, dict) and item.get("due"):
+                bp.add_run(f" (срок: {item['due']})")
+            _apply_verification(bp, _vinfo(analysis, "tasks", i), RGBColor)
+        doc.add_paragraph().paragraph_format.space_after = Pt(6)
 
     if unsure:
         doc.add_heading("Требуют проверки", level=1)
@@ -267,6 +298,11 @@ def generate_report(
                 ro = bp.add_run(f"  — {owner}")
                 ro.italic = True
                 ro.font.color.rgb = RGBColor(0x60, 0x60, 0x60)
+            vn = (_vinfo(analysis, "tasks", i) or {}).get("note")
+            if vn:
+                rn = bp.add_run(f"  ⚠ {vn}")
+                rn.italic = True
+                rn.font.color.rgb = RGBColor(0xB0, 0x50, 0x00)
         doc.add_paragraph().paragraph_format.space_after = Pt(6)
 
     # ---- Мелкие задачи и доработки -----------------------------------------
@@ -320,6 +356,26 @@ def generate_report(
             row[2].paragraphs[0].add_run(str(st.get("note") or ""))
         doc.add_paragraph().paragraph_format.space_after = Pt(6)
 
+    # ---- Задачи прошлой встречи серии --------------------------------------
+    carried = analysis.get("_carried") or {}
+    c_items = [x for x in (carried.get("items") or []) if isinstance(x, dict) and x.get("task")]
+    if c_items:
+        doc.add_heading(f"Задачи прошлой встречи ({carried.get('date') or '?'}): что с ними",
+                        level=1)
+        table = doc.add_table(rows=1, cols=3)
+        table.style = "Table Grid"
+        for cell, title in zip(table.rows[0].cells, ("Задача", "Ответственный", "Статус")):
+            cell.paragraphs[0].add_run(title).bold = True
+        for x in c_items:
+            row = table.add_row().cells
+            row[0].paragraphs[0].add_run(str(x.get("task") or ""))
+            row[1].paragraphs[0].add_run(str(x.get("owner") or "—"))
+            sr = row[2].paragraphs[0].add_run(str(x.get("status") or ""))
+            if x.get("status") == "без упоминания":
+                sr.font.color.rgb = RGBColor(0xB0, 0x60, 0x00)
+                sr.bold = True
+        doc.add_paragraph().paragraph_format.space_after = Pt(6)
+
     # ---- Выводы и открытые вопросы -----------------------------------------
     conclusions = analysis.get("conclusions", [])
     if conclusions:
@@ -340,6 +396,10 @@ def generate_report(
             if details:
                 dp = doc.add_paragraph(details)
                 dp.paragraph_format.space_after = Pt(10)
+                if block.get("_unsupported") is not None:
+                    um = dp.add_run("  ⚠ часть сведений этого раздела не нашлась в расшифровке")
+                    um.italic = True
+                    um.font.color.rgb = RGBColor(*_GRAY)
 
     # ---- Ключевые мысли -----------------------------------------------------
     thoughts = analysis.get("key_thoughts", [])

@@ -624,6 +624,10 @@ class JobStore:
             title = job.context_hint or job.filename
             date = meeting_series.date_from_title(title) or time.strftime(
                 "%d.%m.%Y", time.localtime(job.created_at))
+            # Сначала сверка с прошлой встречей (память ещё о ней), потом запись.
+            carried = meeting_series.carry_over(job.owner, title, result, job_id=job.id)
+            if carried:
+                result["_carried"] = carried
             key = meeting_series.remember(job.owner, title, result,
                                           job_id=job.id, date=date)
             if key:
