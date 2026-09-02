@@ -1012,7 +1012,20 @@ def _norm_t(t, labels: set[str] | None = None, max_min: int | None = None) -> st
         return None
     a, b, c = m.groups()
     if c is None:
-        return f"{int(a):02d}:{int(b):02d}"
+        mins, secs = int(a), int(b)
+        # «96:34» на встрече в 68 минут — модель уже сложила ложный час в
+        # минуты (36:34 + 60). Снимаем часы, пока не попадём в метки или в
+        # длину встречи.
+        if max_min is not None and mins > max_min:
+            while mins > max_min and mins >= 60:
+                mins -= 60
+        elif labels and f"{mins:02d}:{secs:02d}" not in labels:
+            m2 = mins
+            while m2 >= 60 and f"{m2:02d}:{secs:02d}" not in labels:
+                m2 -= 60
+            if f"{m2:02d}:{secs:02d}" in labels:
+                mins = m2
+        return f"{mins:02d}:{secs:02d}"
     with_h = f"{int(a) * 60 + int(b):02d}:{int(c):02d}"
     no_h = f"{int(b):02d}:{int(c):02d}"
     if labels:
