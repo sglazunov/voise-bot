@@ -32,6 +32,14 @@ _GRAY = (0x8A, 0x8A, 0x8A)
 _UNVERIFIED_MARK = "  ⚠ проверьте — не нашлось дословного подтверждения"
 
 
+def _verification_complete(analysis: dict) -> bool:
+    """Проверка по расшифровке отработала целиком. При сбое (движок упал,
+    лимит) её записи неполны — пункты печатаются как непроверенные, а не как
+    опровергнутые."""
+    ver = analysis.get("verification") or {}
+    return bool(ver) and not ver.get("error")
+
+
 def _apply_verification(par, v, RGBColor) -> None:
     """Gray-out an unverified bullet and add the grounding quote of a verified
     one as a small footnote line under the item."""
@@ -46,7 +54,8 @@ def _apply_verification(par, v, RGBColor) -> None:
     elif v.get("quote"):
         t = f" [{v['t']}]" if v.get("t") else ""
         src = " (из заметок участника)" if v.get("source") == "notes" else ""
-        note = par.add_run(f"\nОснование{t}{src}: «{v['quote']}»")
+        approx = " ≈" if v.get("match") == "approx" else ""
+        note = par.add_run(f"\nОснование{t}{src}{approx}: «{v['quote']}»")
         note.italic = True
         note.font.color.rgb = RGBColor(*_GRAY)
 
@@ -131,6 +140,16 @@ def generate_report(
     # Мало речи — предупреждаем в самом верху. Иначе протокол на 240 слов,
     # собранный по 118 словам разговора, выглядит как полноценный итог встречи,
     # которая на деле не состоялась.
+    ver_err = (analysis.get("verification") or {}).get("error")
+    if ver_err:
+        vp = doc.add_paragraph()
+        vp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        vr = vp.add_run("Проверка пунктов по расшифровке выполнена не полностью: "
+                        + str(ver_err)[:200]
+                        + ". Пункты без пометки «Основание» не проверялись.")
+        vr.font.color.rgb = RGBColor(0xB0, 0x50, 0x00)
+        vr.font.size = Pt(9)
+
     thin = analysis.get("_thin_speech")
     if isinstance(thin, int):
         warn = doc.add_paragraph()
@@ -233,7 +252,8 @@ def generate_report(
         (sure if (_vinfo(analysis, "tasks", i) or {}).get("ok") else unsure).append((i, item))
     # Пока grounding не отработал (старые протоколы) — verification пуст, и всё
     # попадёт в «требуют проверки». Это неверно: там просто нет проверки.
-    if not (analysis.get("verification") or {}).get("tasks"):
+    if not (analysis.get("verification") or {}).get("tasks") \
+            or not _verification_complete(analysis):
         sure, unsure = [(i, t) for i, t in enumerate(tasks)], []
 
     doc.add_heading("Задачи (нужно сделать)", level=1)

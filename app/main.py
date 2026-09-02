@@ -189,7 +189,13 @@ async def _auth_gate(request: Request, call_next):
     user = security.session_user(request.cookies.get(security.SESSION_COOKIE))
     request.state.user = user
     path = request.url.path
-    if user or path in _PUBLIC_PATHS:
+    if user and _cross_site_write(request):
+        # CSRF: до сих пор защита держалась только на SameSite=Lax у куки.
+        # Sec-Fetch-Site ставит сам браузер, со страницы атакующего его не
+        # подделать; запросы со своего сайта и навигация проходят.
+        resp = JSONResponse({"detail": "Запрос с чужого сайта отклонён."},
+                            status_code=403)
+    elif user or path in _PUBLIC_PATHS:
         resp = await call_next(request)
     elif path.startswith("/api/"):
         resp = JSONResponse({"detail": "Требуется вход."}, status_code=401)
@@ -199,10 +205,46 @@ async def _auth_gate(request: Request, call_next):
     resp.headers.setdefault("X-Frame-Options", "DENY")           # clickjacking
     resp.headers.setdefault("X-Content-Type-Options", "nosniff")
     resp.headers.setdefault("Referrer-Policy", "same-origin")
+    # CSP: SPA собирается локально, внешних CDN нет — достаточно 'self'.
+    # Инлайн-стили нужны React (style={{…}}) и Tailwind; инлайн-скрипт —
+    # только один, в index.html (тема до загрузки), поэтому 'unsafe-inline'
+    # у script-src нет: тема выставляется тем же скриптом через хэш ниже.
+    resp.headers.setdefault("Content-Security-Policy", _CSP)
     if _SECURE_COOKIE:  # only meaningful once TLS is in front
         resp.headers.setdefault("Strict-Transport-Security",
                                 "max-age=31536000; includeSubDomains")
     return resp
+
+
+# Хэш инлайн-скрипта из frontend/index.html (выставляет тему до загрузки
+# бандла). Пересчитать при изменении скрипта: sha256 тела <script> в base64.
+_CSP = ("default-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; "
+        "style-src 'self' 'unsafe-inline'; font-src 'self' data:; "
+        "script-src 'self' 'sha256-{theme_hash}'; connect-src 'self'; "
+        "frame-ancestors 'none'; object-src 'none'; base-uri 'self'; "
+        "form-action 'self'").format(theme_hash=os.getenv(
+            "VTX_CSP_THEME_HASH", "RvyXR+TwrsIaxYQ4S5hUjStMbeLO2T0Xv8kK1EgOAjc="))
+
+
+def _cross_site_write(request: Request) -> bool:
+    """Меняющий состояние запрос к API, пришедший с ЧУЖОГО сайта."""
+    if request.method not in ("POST", "PUT", "PATCH", "DELETE"):
+        return False
+    if not request.url.path.startswith("/api/"):
+        return False
+    site = (request.headers.get("sec-fetch-site") or "").lower()
+    if site and site not in ("same-origin", "same-site", "none"):
+        return True
+    origin = request.headers.get("origin")
+    if origin and not site:
+        # Старый браузер без Sec-Fetch-Site: сверяем Origin с Host.
+        host = request.headers.get("host", "")
+        try:
+            from urllib.parse import urlsplit
+            return urlsplit(origin).netloc.lower() != host.lower()
+        except ValueError:
+            return True
+    return False
 
 
 def _client_ip(request: Request) -> str:

@@ -110,21 +110,50 @@ def known_names(user: str, limit: int = 30) -> list[str]:
     return names[:limit]
 
 
+_WORD_RE = re.compile(r"[\w-]+", re.UNICODE)
+
+
+def _words(s: str) -> list[str]:
+    return [w.lower().replace("ё", "е") for w in _WORD_RE.findall(s or "")]
+
+
+def project_matches(name: str, hint: str) -> bool:
+    """Подходит ли проект «name» к встрече «hint».
+
+    Раньше — подстрока: «ОД» находился внутри «прОДукта» и «гОДа», а «ОД: сайт и
+    магазин» не находил «ОД сайт, редизайн, магазин». Теперь сравниваются
+    ЦЕЛЫЕ слова: все значимые слова имени (или два из них, если их три и
+    больше) должны быть словами подсказки. Поддерживаются псевдонимы через
+    «|»: «ОД | оптовые дилеры | od-shop».
+    """
+    hw = set(_words(hint))
+    if not hw:
+        return False
+    for alias in (name or "").split("|"):
+        nw = [w for w in _words(alias) if len(w) >= 2]
+        if not nw:
+            continue
+        hits = sum(1 for w in nw if w in hw)
+        need = len(nw) if len(nw) <= 2 else max(2, len(nw) - 1)
+        if hits >= need:
+            return True
+    return False
+
+
 def block_for(user: str, hint: str = "") -> str:
     """The context block to prepend to a protocol's analysis input.
 
     Always includes the global context; includes a project's context when its
-    name occurs in `hint` (meeting title / file name / explicitly picked project).
-    Returns "" when there's nothing to add.
+    name matches `hint` (meeting title / file name / explicitly picked project)
+    by whole words — see project_matches. Returns "" when there's nothing to add.
     """
     data = load(user)
     parts: list[tuple[str, str]] = []
     if data["global"]:
         parts.append(("Общее", data["global"]))
-    hint_low = (hint or "").lower()
     for p in data["projects"]:
-        if p["text"] and p["name"].lower() in hint_low:
-            parts.append((p["name"], p["text"]))
+        if p["text"] and project_matches(p["name"], hint):
+            parts.append((p["name"].split("|")[0].strip(), p["text"]))
     if not parts:
         return ""
     out = ["=== ПОСТОЯННЫЙ КОНТЕКСТ (участники, роли, суть проектов — заданы "

@@ -89,7 +89,15 @@ def _request(method: str, path: str, token: str,
                     f"воркспейса. {detail}") from e
             if e.code in (429, 500, 502, 503, 504) and attempt < 3:
                 last_err = e
-                time.sleep(0.7 * (attempt + 1))
+                # 429: Weeek говорит, сколько ждать — слушаемся (в разумных
+                # пределах), иначе три быстрых повтора только продлевают бан.
+                wait = 0.7 * (attempt + 1)
+                if e.code == 429:
+                    try:
+                        wait = min(30.0, max(wait, float(e.headers.get("Retry-After") or 0)))
+                    except (TypeError, ValueError):
+                        pass
+                time.sleep(wait)
                 continue
             raise WeeekError(f"Weeek API {e.code}: {detail}") from e
         except (http.client.IncompleteRead, urllib.error.URLError,
@@ -135,13 +143,16 @@ def list_tasks(token: str, project_id: Any = None,
             return out.get("tasks") or []
         return out if isinstance(out, list) else []
 
-    if n_pages == 1:
-        return fetch(0)
+    first = fetch(0)
+    if n_pages == 1 or len(first) < per:
+        # Короткая первая страница = задач меньше сотни; остальные четыре
+        # запроса на каждом опросе были бы впустую (и кормили 429).
+        return first
     from concurrent.futures import ThreadPoolExecutor
-    offsets = [i * per for i in range(n_pages)]
-    with ThreadPoolExecutor(max_workers=min(n_pages, 6)) as ex:
+    offsets = [i * per for i in range(1, n_pages)]
+    with ThreadPoolExecutor(max_workers=min(len(offsets), 6)) as ex:
         pages = list(ex.map(fetch, offsets))
-    collected: list[dict] = []
+    collected: list[dict] = list(first)
     for pg in pages:                 # keep order; stop at the first short page
         collected.extend(pg)
         if len(pg) < per:

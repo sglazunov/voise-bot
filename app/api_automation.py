@@ -195,9 +195,9 @@ def automation_meeting_links(inp: MeetingLinksIn, user: str = Depends(current_us
     token = cfg.get("weeek_token")
     if not token:
         raise HTTPException(400, "Сначала подключите Weeek в «Автоматизации».")
-    task_id = (inp.task_id or "").strip()
+    task_id = _clean_task_id(inp.task_id)
     if not task_id:
-        raise HTTPException(400, "Не указана задача Weeek.")
+        raise HTTPException(400, "Не указана задача Weeek (нужен номер или ссылка).")
     pairs = []   # (человекочитаемое имя, поле Weeek, url, эмодзи)
     for label, field_key, default, url, emoji in (
             ("видео", "weeek_video_field", "Видео встречи", inp.video_url, "🎥"),
@@ -333,16 +333,19 @@ def automation_login_open(user: str = Depends(current_user)):
     from .automation.recorder import browser
     if not browser.playwright_available():
         raise HTTPException(400, "Playwright не установлен.")
-    ses = browser.login_open(auto_settings.load(user))
+    try:
+        ses = browser.login_open(auto_settings.load(user), security.team_of(user))
+    except RuntimeError as e:
+        raise HTTPException(409, str(e))
     return {"ok": True, "width": ses.size[0], "height": ses.size[1]}
 
 
 @router.get("/recorder/login/screen")
 def automation_login_screen(user: str = Depends(current_user)):
-    """Текущий экран браузера входа (PNG)."""
+    """Текущий экран браузера входа (PNG) — только своей команды."""
     from .automation.recorder import browser
-    ses = browser.login_session
-    if ses is None or not ses.alive():
+    ses = browser.login_get(security.team_of(user))
+    if ses is None:
         raise HTTPException(409, "Сессия входа не запущена.")
     shot = ses.screenshot()
     if not shot:
@@ -353,11 +356,14 @@ def automation_login_screen(user: str = Depends(current_user)):
 
 @router.post("/recorder/login/action")
 def automation_login_action(body: LoginAction, user: str = Depends(current_user)):
-    """Клик, ввод текста, клавиша или переход — внутрь браузера входа."""
+    """Клик, ввод текста, клавиша или переход — внутрь браузера входа своей
+    команды. Переход (`goto`) — только на страницы паспорта Яндекса."""
     from .automation.recorder import browser
-    ses = browser.login_session
-    if ses is None or not ses.alive():
+    ses = browser.login_get(security.team_of(user))
+    if ses is None:
         raise HTTPException(409, "Сессия входа не запущена.")
+    if body.kind == "goto" and not browser._allowed_login_url(body.url or ""):
+        raise HTTPException(400, "Переход разрешён только на страницы входа Яндекса.")
     ses.send(body.kind, x=body.x, y=body.y, text=body.text,
              key=body.key, dy=body.dy, url=body.url)
     return {"ok": True}
@@ -365,10 +371,11 @@ def automation_login_action(body: LoginAction, user: str = Depends(current_user)
 
 @router.post("/recorder/login/close")
 def automation_login_close(user: str = Depends(current_user)):
-    """Закрыть окно входа в Яндекс на сервере."""
+    """Закрыть окно входа в Яндекс на сервере (своей команды)."""
     from .automation.recorder import browser
-    if browser.login_session is not None:
-        browser.login_session.close()
+    ses = browser.login_sessions.get(security.team_of(user))
+    if ses is not None:
+        ses.close()
     return {"ok": True}
 
 
@@ -424,7 +431,18 @@ def automation_weeek_probe(task_id: str, user: str = Depends(current_user)):
     token = auto_settings.get(user, "weeek_token")
     if not token:
         raise HTTPException(400, "Сначала задайте токен Weeek в настройках.")
+    task_id = _clean_task_id(task_id)
+    if not task_id:
+        raise HTTPException(400, "Нужен номер задачи Weeek или ссылка на неё.")
     try:
         return weeek.probe_task(token, task_id)
     except weeek.WeeekError as e:
         raise HTTPException(502, str(e))
+
+
+def _clean_task_id(raw: str) -> str:
+    """Номер задачи Weeek из номера или ссылки; '' если это не номер. Значение
+    уходит в путь запроса к API — произвольная строка туда попадать не должна."""
+    from .jobs import _weeek_task_id
+    tid = _weeek_task_id(raw or "")
+    return tid if tid.isdigit() else ""

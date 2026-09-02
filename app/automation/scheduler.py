@@ -301,7 +301,14 @@ class Scheduler:
                          exc_info=True)
             return
         done = 0
+        today_date = now.date()
         for m in meetings:
+            # ТОЛЬКО сегодняшние проведения. Раньше чистились ВСЕ задачи со
+            # ссылкой на Телемост — и разовая встреча прошлой недели теряла
+            # прикреплённые (в том числе руками) ссылки на видео и протокол.
+            start = getattr(m, "start", None)
+            if start is not None and start.astimezone(tz).date() != today_date:
+                continue
             try:
                 delivery.wipe_stale_links(m.task_id, cfg, lambda _m: None)
                 done += 1
@@ -1113,11 +1120,20 @@ class Scheduler:
         for st in mine:
             if st.state in self._ACTIVE_STATES:
                 return st
-        # 2) иначе самая поздняя по времени начала (сегодняшняя, а не прошлая);
+        # 2) иначе самая поздняя из УЖЕ НАЧАВШИХСЯ. Weeek передвигает дату
+        #    повторяющейся задачи сразу после встречи, и карточка следующей
+        #    недели появляется раньше, чем человек допишет заметки: «самая
+        #    поздняя вообще» отдавала будущий слот, и заметки уезжали в протокол
+        #    следующего проведения;
+        now = datetime.now(timezone.utc)
         dated = [st for st in mine if st.start is not None]
+        started = [st for st in dated if st.start <= now]
+        if started:
+            return max(started, key=lambda st: st.start)
+        # 3) ничего не начиналось — ближайшая будущая;
         if dated:
-            return max(dated, key=lambda st: st.start)
-        # 3) на крайний случай — хоть какая-то (у встреч без времени).
+            return min(dated, key=lambda st: st.start)
+        # 4) на крайний случай — хоть какая-то (у встреч без времени).
         return mine[0]
 
     def live_view(self, user: str, task_id) -> dict:

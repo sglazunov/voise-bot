@@ -34,7 +34,9 @@ services:
       # ВАЖНО: ufw опубликованный Docker порт НЕ закрывает — Docker пишет свои
       # правила в iptables раньше. Единственный надёжный способ убрать порт из
       # интернета — не публиковать его (или закрыть в группе безопасности ВМ).
-      - "${APP_BIND:-0.0.0.0}:${APP_PORT:-8000}:8000"
+      # По умолчанию — только localhost: наружу порт публикуется осознанно
+      # (APP_BIND=0.0.0.0 в .env), иначе сайт без TLS торчит в интернет.
+      - "${APP_BIND:-127.0.0.1}:${APP_PORT:-8000}:8000"
     env_file:
       - .env
     environment:
@@ -46,7 +48,7 @@ services:
       OLLAMA_URL: "${OLLAMA_URL:-http://host.docker.internal:11434}"
       # Structured state (users, sessions, jobs, settings, …) lives in Postgres.
       # Media files still go to ./data. Override credentials via .env if needed.
-      DATABASE_URL: "${DATABASE_URL:-postgresql://voise:voise@db:5432/voise}"
+      DATABASE_URL: "${DATABASE_URL:-postgresql://${POSTGRES_USER:-voise}:${POSTGRES_PASSWORD:?задайте POSTGRES_PASSWORD в .env}@db:5432/${POSTGRES_DB:-voise}}"
       VTX_DIARIZATION: "${DIARIZATION:-0}"
     # Lets host.docker.internal reach a service on the Docker host (Linux too).
     extra_hosts:
@@ -62,7 +64,8 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: "${POSTGRES_USER:-voise}"
-      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-voise}"
+      # Без умолчания: предсказуемый пароль «voise» уезжал на каждый сервер.
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?задайте POSTGRES_PASSWORD в .env}"
       POSTGRES_DB: "${POSTGRES_DB:-voise}"
     # A Docker-managed named volume (NOT under ./data) — the app container's
     # entrypoint chowns all of /data to its own user, which would break

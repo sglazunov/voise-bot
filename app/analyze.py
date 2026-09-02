@@ -31,7 +31,7 @@ from . import config, llm, protocol_quality
 # ре-экспортируются, потому что снаружи (и в тестах) обращаются к analyze.X.
 from .analyze_schemas import (          # noqa: F401 — часть публичного API
     TopicNote, DecisionNote, TaskNote, MapNotes,
-    ProtoParticipant, ProtoTopic, ProtoTask, Protocol,
+    ProtoParticipant, ProtoTopic, ProtoTask, Protocol, norm_owner,
 )
 from .analyze_prompts import (          # noqa: F401 — часть публичного API
     PROTOCOL_PRESETS, EXPERT_PROMPT_DEFAULT,
@@ -52,13 +52,28 @@ _CHUNK_OVERLAP = 800
 # beyond this we grow the chunk size instead.
 _MAX_CHUNKS = 16
 
-def _extract_json(raw: str) -> dict:
+class TruncatedAnswer(json.JSONDecodeError):
+    """Ответ модели оборван: JSON начат, но верхний объект так и не закрыт.
+
+    Раньше такой ответ НЕ был ошибкой: перебор «с каждой скобки» находил первый
+    ВЛОЖЕННЫЙ объект ({"name": "Аня", "role": …}), снисходительная схема его
+    пропускала, и наружу уходил протокол со всеми пустыми полями — без единого
+    признака, что модель просто не дописала. На бою это выглядело как «ноль
+    задач» или «все пункты без подтверждения».
+    """
+
+
+def _extract_json(raw: str, expected_keys=None) -> dict:
     """Разобрать ответ модели в словарь, стерпев ограду кода и лишний текст.
 
     Лишнее бывает и ПОСЛЕ объекта: пояснение «Вот ваш протокол…», второй JSON,
     следы размышлений. Раньше такой ответ падал с «Extra data», хотя сам
     протокол в нём был целым, — и готовая работа модели выбрасывалась. Поэтому
     берём ПЕРВЫЙ полный объект через raw_decode, а хвост игнорируем.
+
+    Объект, начинающийся НЕ с первой скобки, принимается только если в нём есть
+    хотя бы одно из `expected_keys` — иначе это вложенный кусок оборванного
+    ответа, и честнее поднять TruncatedAnswer.
     """
     raw = raw.strip()
     raw = re.sub(r"^```(?:json)?\s*", "", raw)
@@ -67,6 +82,10 @@ def _extract_json(raw: str) -> dict:
         return json.loads(raw)
     except json.JSONDecodeError:
         pass
+    first = raw.find("{")
+    if first < 0:
+        raise json.JSONDecodeError("В ответе модели нет JSON-объекта", raw, 0)
+    expected = set(expected_keys or ())
     dec = json.JSONDecoder()
     # Пробуем с каждой открывающей скобки: перед объектом тоже бывает текст.
     for i, ch in enumerate(raw):
@@ -76,14 +95,22 @@ def _extract_json(raw: str) -> dict:
             obj, _end = dec.raw_decode(raw, i)
         except json.JSONDecodeError:
             continue
-        if isinstance(obj, dict):
+        if not isinstance(obj, dict):
+            continue
+        if i == first or (expected and expected & set(obj)):
             return obj
+        # Вложенный объект внутри оборванного ответа — не результат.
     # Последняя попытка — жадный поиск от первой скобки до последней: так
     # разбирается объект, внутри которого модель наделала мелких огрех.
     match = re.search(r"\{.*\}", raw, re.DOTALL)
-    if not match:
-        raise json.JSONDecodeError("В ответе модели нет JSON-объекта", raw, 0)
-    return json.loads(match.group(0))
+    if match:
+        try:
+            return json.loads(match.group(0))
+        except json.JSONDecodeError:
+            pass
+    raise TruncatedAnswer(
+        "Ответ модели оборван: JSON начат, но не закрыт (кончился лимит токенов)",
+        raw, first)
 
 
 def _split_chunks(text: str) -> list[str]:
@@ -130,6 +157,34 @@ def _parse_ts(t) -> float | None:
 # with slightly different wording. Close in time + near-identical text = dup.
 _DEDUP_WINDOW_SEC = 120
 _DEDUP_RATIO = 0.85
+# Без таймкода окно времени не работает — тогда дублем считается только почти
+# буквальное совпадение, иначе склейка идёт через всю встречу.
+_DEDUP_RATIO_NO_TIME = 0.97
+
+
+def _is_duplicate(txt: str, sec, it: dict, prev_txt: str, s2, prev: dict) -> bool:
+    """Одна и та же задача из зоны перекрытия — или две РАЗНЫЕ похожие?
+
+    Посимвольная похожесть целых строк не отличает «на синий» от «на красный»
+    и «Ивану» от «Марии» (0.85–0.90) — на бою такие пары склеивались, причём
+    ответственный второй переезжал на первую. Поэтому, кроме похожести:
+    у обеих сторон не должно быть СВОИХ значимых слов (замена объекта/адресата —
+    это разные задачи; уточнение с одной стороны — та же), а два разных
+    ответственных — всегда две задачи.
+    """
+    both = sec is not None and s2 is not None
+    if both and abs(sec - s2) > _DEDUP_WINDOW_SEC:
+        return False
+    ratio = difflib.SequenceMatcher(None, txt.lower(), prev_txt.lower()).ratio()
+    if ratio < (_DEDUP_RATIO if both else _DEDUP_RATIO_NO_TIME):
+        return False
+    o1, o2 = norm_owner(it.get("owner")), norm_owner(prev.get("owner"))
+    if o1 and o2 and o1.lower() != o2.lower():
+        return False
+    a, b = _stems(txt), _stems(prev_txt)
+    if (a - b) and (b - a):
+        return False
+    return True
 
 
 def _dedup_maps(maps: list[dict]) -> list[dict]:
@@ -148,23 +203,19 @@ def _dedup_maps(maps: list[dict]) -> list[dict]:
                 sec = _parse_ts(it.get("t"))
                 dup = None
                 if txt:
-                    low = txt.lower()
-                    for s2, low2, prev in seen:
-                        close = (sec is None or s2 is None
-                                 or abs(sec - s2) <= _DEDUP_WINDOW_SEC)
-                        if close and difflib.SequenceMatcher(
-                                None, low, low2).ratio() >= _DEDUP_RATIO:
+                    for s2, prev_txt, prev in seen:
+                        if _is_duplicate(txt, sec, it, prev_txt, s2, prev):
                             dup = prev
                             break
                 if dup is not None:
-                    if not dup.get("owner") and it.get("owner"):
+                    if not norm_owner(dup.get("owner")) and norm_owner(it.get("owner")):
                         dup["owner"] = it["owner"]
                         dup["owner_evidence"] = it.get("owner_evidence")
                     if it.get("done"):
                         dup["done"] = True
                     continue
                 kept.append(it)
-                seen.append((sec, txt.lower(), it))
+                seen.append((sec, txt, it))
             m[key] = kept
     return maps
 
@@ -400,18 +451,55 @@ def _complete_validated(backend, prompt, model_cls, max_tokens, on_progress,
     raw = _stream_complete(backend, prompt, max_tokens, on_progress, stage,
                            cancel_check=cancel_check, json_schema=schema)
     try:
-        return model_cls.model_validate(_extract_json(raw)).model_dump()
+        return _parse_for(model_cls, raw)
+    except TruncatedAnswer:
+        # Оборванный ответ — просить «исправить схему» бессмысленно: модель
+        # снова упрётся в лимит. Просим то же, но короче в описаниях.
+        retry = (prompt + "\n\nТвой прошлый ответ ОБОРВАЛСЯ на середине — кончился "
+                 "лимит токенов. Верни ПОЛНЫЙ и корректно закрытый JSON: сократи "
+                 "описания тем (details) вдвое, но списки решений и задач выпиши "
+                 "полностью. Без markdown и пояснений.")
     except (ValidationError, ValueError) as e:
         err = str(e)[:600]
-    retry = (prompt + "\n\nТвой прошлый ответ не прошёл проверку схемы: "
-             + err + "\nВерни ИСПРАВЛЕННЫЙ ответ строго по требуемой JSON-схеме, "
-             "без markdown и пояснений.")
+        retry = (prompt + "\n\nТвой прошлый ответ не прошёл проверку схемы: "
+                 + err + "\nВерни ИСПРАВЛЕННЫЙ ответ строго по требуемой JSON-схеме, "
+                 "без markdown и пояснений.")
     raw = _stream_complete(backend, retry, max_tokens, on_progress, stage,
                            cancel_check=cancel_check, json_schema=schema)
     try:
-        return model_cls.model_validate(_extract_json(raw)).model_dump()
+        return _parse_for(model_cls, raw)
     except (ValidationError, ValueError) as e:
         raise _SchemaMiss(f"Ответ модели не прошёл валидацию схемы: {e}", raw) from e
+
+
+def _parse_for(model_cls, raw: str) -> dict:
+    """Разбор + проверка, что это ответ ПО ЭТОЙ схеме, а не случайный словарь.
+
+    Снисходительные схемы (все поля со значениями по умолчанию) принимали любой
+    объект — даже {"name": …} из оборванного ответа — и отдавали пустой
+    результат без ошибки. Хотя бы одно ожидаемое поле обязано присутствовать.
+    """
+    fields = set(model_cls.model_fields)
+    obj = _extract_json(raw, expected_keys=fields)
+    if not isinstance(obj, dict) or not (set(obj) & fields):
+        got = ", ".join(list(obj)[:5]) if isinstance(obj, dict) else type(obj).__name__
+        raise ValueError(f"в ответе нет ни одного ожидаемого поля "
+                         f"({', '.join(sorted(fields)[:4])}…); пришло: {got}")
+    return model_cls.model_validate(obj).model_dump()
+
+
+def _lenient_protocol(raw: str) -> dict:
+    """Запасной разбор после двух неудачных валидаций: берём что есть, но
+    ТОЛЬКО если это похоже на протокол. Раньше сюда проходил любой словарь, и
+    «пустой протокол» уходил в docx как готовый (В8)."""
+    fields = set(Protocol.model_fields)
+    obj = _extract_json(raw, expected_keys=fields)
+    if not isinstance(obj, dict) or not (set(obj) & fields):
+        raise RuntimeError(
+            "Модель дважды вернула ответ не по схеме протокола — протокол не "
+            "собран. Нажмите «Пересобрать», лучше другим движком.")
+    obj["_schema_miss"] = True
+    return obj
 
 
 class _SchemaMiss(ValueError):
@@ -493,7 +581,7 @@ def analyze_transcript(transcript_text: str, provider: str | None = None,
                                              on_progress, "Генерация протокола…",
                                              cancel_check)
             except _SchemaMiss as e:
-                result = _extract_json(e.raw)  # lenient legacy path
+                result = _lenient_protocol(e.raw)
     else:
         chunks = _split_chunks(text)
         n = len(chunks)
@@ -581,7 +669,7 @@ def analyze_transcript(transcript_text: str, provider: str | None = None,
                                              on_progress, "Свожу протокол…",
                                              cancel_check)
             except _SchemaMiss as e:
-                result = _extract_json(e.raw)  # lenient legacy path
+                result = _lenient_protocol(e.raw)
 
     # Normalise — guarantee the shape the rest of the app expects.
     result.setdefault("summary", "")
@@ -671,8 +759,14 @@ def merge_similar_topics(topics: list[dict]) -> list[dict]:
                 k2 = _topic_key(kept.get("topic", ""))
                 if not k2:
                     continue
+                # Вхождение — признак двойника только для содержательного
+                # заголовка: «Сроки» ⊂ «Сроки релиза» ⊂ «Сроки оплаты
+                # подрядчику» — три разные темы, а не одна.
+                short = min(key, k2, key=len)
+                contains = ((key in k2 or k2 in key)
+                            and (len(short) >= 6 or len(_stems(short)) >= 2))
                 if (difflib.SequenceMatcher(None, key, k2).ratio() >= _TOPIC_SIM
-                        or key in k2 or k2 in key):
+                        or contains):
                     target = kept
                     break
         if target is None:
@@ -715,11 +809,9 @@ def _normalise_tasks(tasks) -> list[dict]:
     for item in tasks:
         if isinstance(item, dict):
             text = str(item.get("task") or item.get("title") or item.get("text") or "").strip()
-            owner = str(item.get("owner") or item.get("assignee") or "").strip()
+            owner = norm_owner(item.get("owner") or item.get("assignee"))
         else:
             text, owner = str(item).strip(), ""
-        if owner in ("—", "-", "не назначен", "неизвестно", "?"):
-            owner = ""
         if text:
             out.append({"task": text, "owner": owner})
     return out
@@ -786,26 +878,65 @@ _VERIFY_TEMPLATE = (
 
 _VERIFIED_LISTS = ("tasks", "minor_tasks", "done_tasks", "decisions")
 _MIN_QUOTE_CHARS = 10
-_STEM_LEN = 5   # crude RU stemming: compare word prefixes, so «фильтры»≈«фильтров»
+# Пунктов в одном запросе проверки. Раньше все 30-40 шли одним запросом с
+# потолком 3000 токенов — ответ обрезался, и ВСЕ пункты выходили «без
+# подтверждения» (К2).
+_VERIFY_BATCH = 15
+# Мягкая дословность: цитата, в которой модель «починила» ошибку распознавания
+# или пропустила метку говорящего между репликами, — всё ещё цитата.
+_APPROX_RATIO = 0.85
+
+# Грубое снятие русских окончаний. Раньше сравнивались первые 5 букв слов не
+# короче 4 — и «теги»≠«тегов», «срок»≠«сроки», «цвет»≠«цвета»: честные цитаты
+# отбрасывались как «не о том». Основа не короче 3 букв; список — от длинных
+# окончаний к коротким.
+_SUFFIXES = sorted((
+    "иями", "ями", "ами", "ого", "его", "ому", "ему", "ыми", "ими", "ться",
+    "ешь", "ете", "ить", "ать", "ять", "еть", "уть", "ыть", "ими", "ыми",
+    "ах", "ях", "ов", "ев", "ей", "ой", "ий", "ый", "ая", "яя", "ое", "ее",
+    "ые", "ие", "ам", "ям", "ом", "ем", "ия", "ию", "ии", "ет", "ут", "ют",
+    "ат", "ят", "ил", "ла", "ли", "ло",
+    "ы", "и", "а", "я", "у", "ю", "е", "о", "ь",
+), key=len, reverse=True)
+
+
+def _stem(w: str) -> str:
+    for s in _SUFFIXES:
+        if w.endswith(s) and len(w) - len(s) >= 3:
+            return w[: len(w) - len(s)]
+    return w
 
 
 def _stems(text: str) -> set[str]:
-    return {w[:_STEM_LEN] for w in _norm_for_match(text).split() if len(w) >= 4}
+    return {_stem(w) for w in _norm_for_match(text).split() if len(w) >= 3}
+
+
+# Метка реплики: «[12:40] Кирилл Бубнов: » — структура, а не речь. Цитата,
+# скопированная через границу двух реплик, метку не содержит; вырезаем её из
+# фрагмента ПЕРЕД сравнением, иначе такая цитата «не дословна».
+_LABEL_RE = re.compile(r"\[\d{1,2}:\d{2}(?::\d{2})?\]\s*(?:[^:\n]{0,40}:)?\s*")
+
+
+def _strip_labels(s: str) -> str:
+    return _LABEL_RE.sub(" ", s or "")
 
 
 def _quote_relevant(point_text: str, quote: str, fragment: str) -> bool:
     """A verbatim quote must also be ABOUT the point: a weak model happily
     attaches a real quote to an invented task, and verbatimness alone passes it.
     Demand a shared significant word (by stem) between the point and the quote
-    or its line in the fragment (the line catches anaphoric «я возьму это»)."""
+    or its surroundings in the fragment (±2 строки ловят анафору «я возьму это
+    на себя», когда тема названа в предыдущей реплике)."""
     pw = _stems(point_text)
     if not pw:
         return True
     ctx = _stems(quote)
-    qn = _norm_for_match(quote)
-    for line in fragment.splitlines():
-        if qn in _norm_for_match(line):
-            ctx |= _stems(line)
+    qn = _norm_for_match(_strip_labels(quote))
+    lines = fragment.splitlines()
+    for i, line in enumerate(lines):
+        if qn and qn in _norm_for_match(_strip_labels(line)):
+            for j in range(max(0, i - 2), min(len(lines), i + 3)):
+                ctx |= _stems(_strip_labels(lines[j]))
             break
     return bool(pw & ctx)
 
@@ -815,6 +946,36 @@ def _norm_for_match(s: str) -> str:
     источника после нормализации (регистр/пробелы/пунктуация/ё)."""
     s = re.sub(r"[^\w\s]", " ", (s or "").lower().replace("ё", "е"))
     return re.sub(r"\s+", " ", s).strip()
+
+
+class _Fragment:
+    """Нормализованный фрагмент расшифровки + индекс слов для мягкого поиска."""
+
+    def __init__(self, text: str):
+        self.norm = _norm_for_match(_strip_labels(text))
+        self.tokens = self.norm.split()
+        self.index: dict[str, list[int]] = {}
+        for i, t in enumerate(self.tokens):
+            self.index.setdefault(t, []).append(i)
+
+    def match(self, quote: str) -> str | None:
+        """'verbatim' — подстрока; 'approx' — та же последовательность слов с
+        небольшими расхождениями; None — цитаты в фрагменте нет."""
+        qn = _norm_for_match(_strip_labels(quote))
+        if len(qn) < _MIN_QUOTE_CHARS:
+            return None
+        if qn in self.norm:
+            return "verbatim"
+        qt = qn.split()
+        if len(qt) < 4:
+            return None
+        starts: set[int] = set(self.index.get(qt[0], ()))
+        starts |= {i - 1 for i in self.index.get(qt[1], ()) if i > 0}
+        for s in starts:
+            window = self.tokens[s:s + len(qt) + 1]
+            if difflib.SequenceMatcher(None, qt, window).ratio() >= _APPROX_RATIO:
+                return "approx"
+        return None
 
 
 def _collect_points(result: dict) -> list[tuple[str, int, str, str]]:
@@ -878,51 +1039,70 @@ def verify_protocol(result: dict, transcript_text: str, user_notes: str = "",
         sources.append(("transcript", text[i:i + budget_chars]))
 
     pending = {i: p for i, p in enumerate(points, 1)}
+    calls = failed_calls = 0
     for si, (src_name, fragment) in enumerate(sources, 1):
-        if not pending:
+        if not pending or ver.get("error"):
             break
-        if cancel_check and cancel_check():
-            raise AnalysisCancelled()
-        listing = "\n".join(
-            f"{n}) [{key}] {text}" + (f" (ответственный: {owner})" if owner else "")
-            for n, (key, idx, text, owner) in sorted(pending.items()))
-        prompt = _VERIFY_TEMPLATE.format(points=listing, fragment=fragment)
-        stage = f"Проверяю протокол по расшифровке ({si}/{len(sources)})…"
-        try:
-            out = _complete_validated(backend, prompt, EvidenceList, 3000,
-                                      on_progress, stage, cancel_check)
-        except AnalysisCancelled:
-            raise
-        except Exception as e:  # noqa: BLE001 — verification must not kill the job
-            ver["error"] = f"Проверка не завершена: {e}"
-            break
-        frag_norm = _norm_for_match(fragment)
-        for item in out.get("items") or []:
-            n = item.get("i")
-            if n not in pending:
+        frag = _Fragment(fragment)
+        items = sorted(pending.items())
+        for bi in range(0, len(items), _VERIFY_BATCH):
+            batch = [(n, p) for n, p in items[bi:bi + _VERIFY_BATCH] if n in pending]
+            if not batch:
                 continue
-            quote = str(item.get("quote") or "").strip()
-            # The quote must ACTUALLY be verbatim — an LLM paraphrase is not
-            # evidence. This mechanical check is what makes the pass honest.
-            if (len(quote) < _MIN_QUOTE_CHARS
-                    or _norm_for_match(quote) not in frag_norm):
-                continue
-            # ...and it must be about THIS point, not just any real phrase.
-            if not _quote_relevant(pending[n][2], quote, fragment):
-                continue
-            key, idx, _text, _owner = pending.pop(n)
-            ver[key][idx] = {"ok": True, "quote": quote[:300],
-                             "t": item.get("t"), "source": src_name,
-                             "owner_ok": bool(item.get("owner_ok"))}
+            if cancel_check and cancel_check():
+                raise AnalysisCancelled()
+            listing = "\n".join(
+                f"{n}) [{key}] {text}" + (f" (ответственный: {owner})" if owner else "")
+                for n, (key, idx, text, owner) in batch)
+            prompt = _VERIFY_TEMPLATE.format(points=listing, fragment=fragment)
+            stage = (f"Проверяю протокол по расшифровке ({si}/{len(sources)}, "
+                     f"пункты {batch[0][0]}–{batch[-1][0]})…")
+            calls += 1
+            try:
+                out = _complete_validated(backend, prompt, EvidenceList,
+                                          min(4000, 150 * len(batch) + 300),
+                                          on_progress, stage, cancel_check)
+            except AnalysisCancelled:
+                raise
+            except Exception as e:  # noqa: BLE001 — verification must not kill the job
+                failed_calls += 1
+                ver["error"] = f"Проверка не завершена: {e}"
+                break
+            for item in out.get("items") or []:
+                n = item.get("i")
+                if n not in pending:
+                    continue
+                quote = str(item.get("quote") or "").strip()
+                # The quote must ACTUALLY be in the transcript — an LLM paraphrase
+                # is not evidence. This mechanical check keeps the pass honest.
+                kind = frag.match(quote)
+                if not kind:
+                    continue
+                # ...and it must be about THIS point, not just any real phrase.
+                if not _quote_relevant(pending[n][2], quote, fragment):
+                    continue
+                key, idx, _text, _owner = pending.pop(n)
+                ver[key][idx] = {"ok": True, "quote": quote[:300],
+                                 "t": item.get("t"), "source": src_name,
+                                 "owner_ok": bool(item.get("owner_ok")),
+                                 "match": kind}
 
+    ver["stats"] = {"checked": len(points), "confirmed": len(points) - len(pending),
+                    "calls": calls, "failed_calls": failed_calls}
     # Acceptance rule: no owner without verbatim grounds. Unverified point →
     # flagged; verified point whose quote doesn't support the owner → owner «—».
     #
     # НО: если проверка сорвалась (движок недоступен, отмена, лимит), она ничего
-    # не сказала о пунктах — снимать ответственных нельзя. Раньше сбой на первом
-    # же фрагменте оставлял все пункты ok=False, и протокол выходил вообще без
-    # ответственных, хотя они были определены корректно.
-    if not ver.get("error"):
+    # не сказала о ещё не проверенных пунктах — снимать ответственных нельзя,
+    # а помечать их «не нашлось подтверждения» — ложь. Такие пункты остаются
+    # БЕЗ записи (None): интерфейс и Word показывают их как непроверенные, а не
+    # как опровергнутые. Раньше сбой на первом же фрагменте оставлял все пункты
+    # ok=False, и весь протокол уходил серым с «⚠ проверьте» на каждой строке.
+    if ver.get("error"):
+        ver["mode"] = "partial"
+        for key, idx, _t, _o in pending.values():
+            ver[key][idx] = None
+    else:
         _strip_unfounded_owners(result, ver)
     result["verification"] = ver
     return result

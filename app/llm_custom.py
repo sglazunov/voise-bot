@@ -84,6 +84,31 @@ def _is_private_host(host: str) -> bool:
     return bool(ip.is_private or ip.is_loopback)
 
 
+def _resolves_to_service_address(host: str) -> str:
+    """Имя или адрес, ведущий на служебный/локальный адрес → строка-причина,
+    иначе ''. Приватные сети (192.168.…) разрешены — там живут свои серверы
+    Ollama/vLLM, как и loopback (Ollama на этой же машине); запрещены
+    link-local (метаданные облака), reserved, multicast и «нулевые» адреса."""
+    try:
+        ips = [ipaddress.ip_address(host)]
+    except ValueError:
+        try:
+            infos = socket.getaddrinfo(host, None)
+        except OSError:
+            return ""          # не резолвится — запрос всё равно не пройдёт
+        ips = []
+        for info in infos:
+            try:
+                ips.append(ipaddress.ip_address(info[4][0]))
+            except ValueError:
+                continue
+    for ip in ips:
+        if (ip.is_link_local or ip.is_reserved or ip.is_multicast
+                or ip.is_unspecified):
+            return f"{host} → {ip}"
+    return ""
+
+
 def check_url(raw: str) -> str:
     """Проверить адрес ДО того, как послать туда ключ. Вернуть текст ошибки.
 
@@ -97,15 +122,16 @@ def check_url(raw: str) -> str:
     host = (parts.hostname or "").lower()
     if not host:
         return "Адрес не похож на URL — нужен вид https://сервер/v1."
-    try:
-        ip = ipaddress.ip_address(host)
-    except ValueError:
-        ip = None
-    if ip is not None and (ip.is_link_local or ip.is_reserved or ip.is_multicast):
-        return ("Этот адрес служебный, запросы туда запрещены: по нему облачные "
-                "машины отдают собственные учётные данные.")
     if parts.scheme not in ("http", "https"):
         return "Поддерживаются только адреса http:// и https://."
+    # Служебные адреса проверяются и для IP-литерала, и для ДОМЕННОГО имени:
+    # имя, которое резолвится в 169.254.169.254 или 127.0.0.1, проходило
+    # фильтр — а запрос с сервера по такому адресу отдаёт учётные данные самой
+    # машины (SSRF). Проверяем ВСЕ адреса, в которые резолвится имя.
+    bad = _resolves_to_service_address(host)
+    if bad:
+        return ("Этот адрес служебный, запросы туда запрещены: по нему облачные "
+                f"машины отдают собственные учётные данные ({bad}).")
     if parts.scheme == "http" and not _is_private_host(host):
         return ("Для публичного адреса нужен https://. Открытый http:// "
                 "разрешён только для своих серверов в локальной сети — иначе "

@@ -12,6 +12,7 @@ so a missing dependency only disables the feature, never breaks transcription.
 from __future__ import annotations
 
 import difflib
+import os
 import re
 from typing import List
 
@@ -158,7 +159,6 @@ def extract_screen_text(path: str, lang: str = "rus+eng",
     _point_pytesseract_at_binary()
 
     out: List[dict] = []
-    prev = ""
     for t, img in _sample_frames(path, every_sec, max_frames):
         if should_stop and should_stop():
             break                    # отдаём то, что успели распознать
@@ -169,15 +169,57 @@ def extract_screen_text(path: str, lang: str = "rus+eng",
         text = _clean(raw)
         if len(text) < 15:               # skip near-empty screens
             continue
-        if _similar(text, prev) > 0.85:  # skip unchanged slide
+        # Дедуп по ПОСЛЕДНИМ ПРИНЯТЫМ экранам, а не только по предыдущему:
+        # переключение между двумя окнами (A→B→A→B) давало новую запись на
+        # каждый кадр, и один и тот же документ уезжал в промпт десятки раз.
+        if any(_similar(text, p["text"]) > 0.85 for p in out[-20:]):
             continue
         out.append({"time": round(t, 1), "text": text})
-        prev = text
     return out
 
 
-def to_block(items: List[dict]) -> str:
-    """Render screen-text items into a labelled text block for the protocol."""
+# Потолок блока «ТЕКСТ С ЭКРАНА». Без него часовая демонстрация кода/таблиц
+# давала 0.5–1 МБ текста — в разы больше речи: OCR порождал собственные
+# фрагменты анализа, окно регенерации темы ложилось на экран, а «спросить по
+# встрече» цитировал экран как сказанное.
+MAX_BLOCK_CHARS = int(os.getenv("VTX_OCR_MAX_CHARS", "12000"))
+_MIN_BLOCK_CHARS = 2000
+
+
+def limit_items(items: List[dict], max_chars: int | None = None,
+                speech_chars: int | None = None) -> List[dict]:
+    """Ужать список экранов под бюджет: не больше `max_chars` и не больше 40 %
+    от объёма речи (но не меньше _MIN_BLOCK_CHARS). Экраны прореживаются
+    РАВНОМЕРНО по времени, а не обрезаются с конца — иначе вторая половина
+    встречи оставалась без слайдов."""
+    limit = int(max_chars or MAX_BLOCK_CHARS)
+    if speech_chars:
+        limit = min(limit, max(_MIN_BLOCK_CHARS, int(0.4 * speech_chars)))
+    items = [it for it in items if it.get("text")]
+    if sum(len(it["text"]) for it in items) <= limit:
+        return items
+    # Каждый экран режем до средней доли бюджета; если экранов слишком много —
+    # оставляем каждый k-й.
+    per = max(300, limit // max(1, len(items)))
+    if per < 300 or len(items) * 300 > limit:
+        keep_n = max(1, limit // 300)
+        step = max(1, len(items) // keep_n)
+        items = items[::step][:keep_n]
+        per = max(300, limit // max(1, len(items)))
+    out = []
+    for it in items:
+        txt = it["text"]
+        if len(txt) > per:
+            txt = txt[:per].rsplit(" ", 1)[0] + " …"
+        out.append({"time": it["time"], "text": txt})
+    return out
+
+
+def to_block(items: List[dict], speech_chars: int | None = None,
+             max_chars: int | None = None) -> str:
+    """Render screen-text items into a labelled text block for the protocol,
+    limited by budget (see limit_items)."""
+    items = limit_items(items, max_chars=max_chars, speech_chars=speech_chars)
     if not items:
         return ""
     lines = ["=== ТЕКСТ С ЭКРАНА (показ экрана: слайды/код/документы) ==="]

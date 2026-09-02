@@ -10,6 +10,23 @@ from __future__ import annotations
 from pydantic import BaseModel, ConfigDict, Field
 
 
+# Пустой ответственный в ответах модели пишется десятком способов: «—», «-»,
+# null, «не назначен», «TBD»… Раньше каждое место (нормализация протокола,
+# дедуп заметок, экспорт, eval) держало свой список, и «null» проходил как имя.
+_NO_OWNER = {
+    "", "-", "—", "–", "null", "none", "nil", "n/a", "na", "tbd", "?", "нет",
+    "не назначен", "не назначено", "не назначена", "неизвестно", "не указан",
+    "не указано", "не определен", "не определена", "без ответственного",
+    "не ясно", "неясно",
+}
+
+
+def norm_owner(value) -> str:
+    """Имя ответственного или '' — ЕДИНСТВЕННОЕ правило на весь проект."""
+    s = str(value or "").strip()
+    return "" if s.lower().replace("ё", "е") in _NO_OWNER else s
+
+
 # --------------------------------------------------------------------------- #
 # Pydantic contract for the LLM answers. One schema serves every provider:
 # Ollama gets it as a structured-output grammar (can't produce invalid JSON),

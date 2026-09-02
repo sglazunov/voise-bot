@@ -149,8 +149,7 @@ def _login_busy() -> bool:
     """Открыто ли сейчас окно входа. Chromium не даёт двум процессам держать
     один каталог профиля, поэтому проверять вход, пока окно живо, бессмысленно:
     запуск просто падает."""
-    ses = login_session
-    return bool(ses is not None and ses.alive())
+    return any(ses.alive() for ses in list(login_sessions.values()))
 
 
 def login_status(cfg: dict) -> dict:
@@ -873,17 +872,54 @@ class _LoginSession:
         elif kind == "scroll":
             page.mouse.wheel(0, float(kw.get("dy", 240)))
         elif kind == "goto":
-            page.goto(str(kw.get("url") or _LOGIN_URL),
-                      wait_until="domcontentloaded", timeout=45000)
+            url = str(kw.get("url") or _LOGIN_URL)
+            if not _allowed_login_url(url):
+                # Окно входа — не браузер общего назначения: через него
+                # серверный Chromium открывал бы что угодно (localhost, облачные
+                # метаданные, file://). Только паспорт Яндекса.
+                raise ValueError(f"переход запрещён: {url[:80]}")
+            page.goto(url, wait_until="domcontentloaded", timeout=45000)
 
 
-login_session: _LoginSession | None = None
+_LOGIN_HOSTS = ("passport.yandex.ru", "passport.yandex.com", "passport.ya.ru",
+                "id.yandex.ru", "oauth.yandex.ru")
 
 
-def login_open(cfg: dict) -> "_LoginSession":
-    """Запустить (или вернуть уже идущую) сессию входа."""
-    global login_session
-    if login_session is None or not login_session.alive():
-        login_session = _LoginSession(cfg)
-        login_session.start()
-    return login_session
+def _allowed_login_url(url: str) -> bool:
+    from urllib.parse import urlsplit
+    try:
+        p = urlsplit(url)
+    except ValueError:
+        return False
+    return p.scheme == "https" and (p.hostname or "").lower() in _LOGIN_HOSTS
+
+
+# Сессии входа — ПО КОМАНДАМ. Одна глобальная сессия на процесс означала, что
+# любой вошедший пользователь другой команды мог получить скриншот чужого окна
+# входа в Яндекс и слать в него клики и ввод.
+login_sessions: dict[str, _LoginSession] = {}
+_login_lock = threading.Lock()
+
+
+def login_get(team: str) -> "_LoginSession | None":
+    """Живая сессия входа ЭТОЙ команды или None."""
+    ses = login_sessions.get(team)
+    return ses if (ses is not None and ses.alive()) else None
+
+
+def login_open(cfg: dict, team: str = "") -> "_LoginSession":
+    """Запустить (или вернуть уже идущую) сессию входа команды `team`."""
+    with _login_lock:
+        ses = login_sessions.get(team)
+        if ses is None or not ses.alive():
+            # Профиль браузера один на процесс (каталог профиля не делится):
+            # пока открыто окно другой команды, второе не поднять.
+            other = next((s for t, s in login_sessions.items()
+                          if t != team and s.alive()), None)
+            if other is not None:
+                raise RuntimeError("Окно входа сейчас занято другой командой. "
+                                   "Попробуйте через несколько минут.")
+            ses = _LoginSession(cfg)
+            ses.start()
+            login_sessions[team] = ses
+        return ses

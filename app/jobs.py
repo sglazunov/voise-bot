@@ -1094,7 +1094,8 @@ class JobStore:
                         items = screen_ocr.extract_screen_text(
                             job.audio_path,
                             should_stop=lambda: bool(ctrl.get("cancel")))
-                        screen_block = screen_ocr.to_block(items)
+                        screen_block = screen_ocr.to_block(
+                            items, speech_chars=len(txt_content))
                         screen_segs = len(items)
                         # Ключи и пароли с показанного экрана — не содержание
                         # встречи: маскируем ДО модели и ДО записи на диск.
