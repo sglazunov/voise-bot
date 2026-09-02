@@ -234,6 +234,10 @@ CREATE TABLE IF NOT EXISTS ai_context_projects (
     text         TEXT,
     PRIMARY KEY (username, idx)
 );
+CREATE TABLE IF NOT EXISTS meeting_series (
+    username    TEXT PRIMARY KEY,
+    data        JSONB NOT NULL
+);
 """
 
 
@@ -581,13 +585,33 @@ def aicontext_save(user: str, data: dict) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# meeting_series  {series_key: {title, context, preset, priority, last, history}}
+# — память серий встреч команды одним JSON-документом (см. app/meeting_series.py)
+# --------------------------------------------------------------------------- #
+def series_load(user: str) -> dict | None:
+    with _conn() as conn, _cur(conn) as cur:
+        cur.execute("SELECT data FROM meeting_series WHERE username=%s", (user,))
+        row = cur.fetchone()
+        return row["data"] if row else None
+
+
+def series_save(user: str, data: dict) -> None:
+    with _conn() as conn, _cur(conn) as cur:
+        cur.execute(
+            """INSERT INTO meeting_series (username, data) VALUES (%s,%s)
+               ON CONFLICT (username) DO UPDATE SET data=EXCLUDED.data""",
+            (user, _json(data)))
+
+
+# --------------------------------------------------------------------------- #
 # Account deletion — wipe every per-user row (users/sessions/recovery are
 # handled by security's own save paths; here we clear the rest in one txn).
 # --------------------------------------------------------------------------- #
 def delete_user_data(user: str) -> None:
     with _conn() as conn, _cur(conn) as cur:
         for table in ("user_settings", "user_creds", "meetings",
-                      "ai_context_projects", "ai_context", "search_docs"):
+                      "ai_context_projects", "ai_context", "search_docs",
+                      "meeting_series"):
             cur.execute(f"DELETE FROM {table} WHERE username=%s", (user,))
         cur.execute("DELETE FROM meeting_stats WHERE team=%s", (user,))
 

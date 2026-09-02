@@ -330,6 +330,52 @@ def save_context(body: ContextBody, user: str = Depends(current_user)):
     return ai_context.save(user, {"global": body.global_, "projects": body.projects})
 
 
+# ---- Серии встреч: карточка повторяющейся встречи + память о прошлой -------
+@app.get("/api/series")
+def list_series(user: str = Depends(current_user)):
+    """Все серии команды: карточка, закреплённый тип, приоритет, итоги прошлой."""
+    from . import meeting_series
+    return {"series": meeting_series.list_for_ui(user),
+            "priorities": list(meeting_series.PRIORITIES)}
+
+
+class SeriesBody(BaseModel):
+    key: str = ""               # ключ серии или название встречи (нормализуется)
+    title: str | None = None
+    context: str | None = None
+    preset: str | None = None
+    priority: str | None = None
+    weeek_project_id: str | int | None = None
+
+
+@app.post("/api/series")
+def save_series(body: SeriesBody, user: str = Depends(current_user)):
+    """Создать/обновить карточку серии встреч."""
+    from . import meeting_series
+    fields = {k: v for k, v in body.model_dump().items() if k != "key" and v is not None}
+    try:
+        return meeting_series.upsert(user, body.key or body.title or "", fields)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.delete("/api/series/{key}")
+def delete_series(key: str, user: str = Depends(current_user)):
+    from . import meeting_series
+    if not meeting_series.delete(user, key):
+        raise HTTPException(404, "Серия не найдена")
+    return {"ok": True}
+
+
+@app.post("/api/series/{key}/forget-last")
+def series_forget_last(key: str, user: str = Depends(current_user)):
+    """Стереть память о прошлой встрече серии (карточка остаётся)."""
+    from . import meeting_series
+    if not meeting_series.forget_last(user, key):
+        raise HTTPException(404, "Серия не найдена")
+    return {"ok": True}
+
+
 # ---- Password recovery by phone (public, heavily throttled) ---------------
 @app.get("/recover", response_class=HTMLResponse)
 def recover_page(request: Request):

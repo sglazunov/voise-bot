@@ -228,8 +228,42 @@ def _with_extra(prompt: str, extra: str) -> str:
 #
 # So the gate measures ONLY the speech, with those blocks stripped out.
 _INJECTED_BLOCK_RE = re.compile(
-    r"\n*===\s*(УЧАСТНИКИ ЗВОНКА|ПОСТОЯННЫЙ КОНТЕКСТ|ТЕКСТ С ЭКРАНА)"
+    r"\n*===\s*(УЧАСТНИКИ ЗВОНКА|ПОСТОЯННЫЙ КОНТЕКСТ|ТЕКСТ С ЭКРАНА"
+    r"|КОНТЕКСТ СЕРИИ ВСТРЕЧ|ПРОШЛАЯ ВСТРЕЧА ЭТОЙ СЕРИИ)"
     r"[\s\S]*?(?=\n\s*===|\Z)", re.IGNORECASE)
+
+
+# Контекст (участники звонка, постоянный контекст команды, карточка серии,
+# итоги прошлой встречи) идёт ОТДЕЛЬНЫМ параметром и ставится ПЕРЕД текстом в
+# каждом запросе. Раньше он дописывался в конец расшифровки: на длинной
+# встрече при нарезке на части он попадал только в ПОСЛЕДНИЙ фрагмент, а
+# финальное сведение (оно видит лишь заметки) не получало его вовсе — то есть
+# именно на часовых встречах, где контекст нужнее всего, его не было.
+_CTX_MAP_BLOCK_CHARS = int(os.getenv("VTX_CTX_MAP_BLOCK_CHARS", "2500"))
+
+
+def _ctx_prefix(context: str) -> str:
+    ctx = (context or "").strip()
+    return (ctx + "\n\n") if ctx else ""
+
+
+def _context_for_map(context: str) -> str:
+    """Контекст для шага чтения фрагментов: без итогов прошлой встречи (они
+    нужны только при сведении) и с потолком на каждый блок — иначе часовая
+    встреча из 12 фрагментов возит по 40 КБ контекста в каждом запросе."""
+    ctx = (context or "").strip()
+    if not ctx:
+        return ""
+    blocks = re.split(r"\n(?=\s*===)", ctx)
+    out = []
+    for b in blocks:
+        b = b.strip()
+        if not b or b.startswith("=== ПРОШЛАЯ ВСТРЕЧА ЭТОЙ СЕРИИ"):
+            continue
+        if len(b) > _CTX_MAP_BLOCK_CHARS:
+            b = b[:_CTX_MAP_BLOCK_CHARS].rsplit("\n", 1)[0] + "\n…"
+        out.append(b)
+    return "\n\n".join(out)
 # Timecodes are structure, not content: "[00:12]" must not count as speech.
 _TIMECODE_RE = re.compile(r"\[\d{1,2}:\d{2}(?::\d{2})?\]")
 # Minimum genuinely spoken words before a protocol may be generated. A meeting
@@ -392,8 +426,12 @@ class _SchemaMiss(ValueError):
 def analyze_transcript(transcript_text: str, provider: str | None = None,
                        extra_instructions: str = "", custom_prompt: str = "",
                        on_progress=None, cancel_check=None, keys: dict | None = None,
-                       user_notes: str = "") -> dict:
+                       user_notes: str = "", context: str = "") -> dict:
     """Send the transcript to the chosen LLM provider and return structured analysis.
+
+    `context` — служебные блоки (участники звонка, постоянный контекст,
+    карточка серии, итоги прошлой встречи): ставятся ПЕРЕД текстом в каждом
+    запросе, в речи не считаются и цитатами для проверки не служат.
 
     `provider` is one of "ollama" | "groq" | "gemini" | "yandex" | "gigachat" |
     "anthropic" | "auto" | None.
@@ -435,16 +473,20 @@ def analyze_transcript(transcript_text: str, provider: str | None = None,
     _ck()
     warning = None
     result = None
+    ctx_full = _ctx_prefix(context)
+    ctx_map = _ctx_prefix(_context_for_map(context))
     if len(text) <= _MAX_CHARS:
         if custom:
-            prompt = _with_notes(custom + "\n\nТранскрипция:\n" + text, user_notes)
+            prompt = _with_notes(custom + "\n\n" + ctx_full + "Транскрипция:\n" + text,
+                                 user_notes)
             raw = _stream_complete(backend, _with_extra(prompt, extra_instructions),
                                    10000, on_progress, "Генерация протокола…",
                                    cancel_check=cancel_check)
             result = _extract_json(raw)
         else:
             prompt = _with_extra(
-                _with_notes(_PROMPT_TEMPLATE.format(transcript=text), user_notes),
+                _with_notes(_PROMPT_TEMPLATE.format(transcript=text, context=ctx_full),
+                            user_notes),
                 extra_instructions)
             try:
                 result = _complete_validated(backend, prompt, Protocol, 10000,
@@ -461,7 +503,7 @@ def analyze_transcript(transcript_text: str, provider: str | None = None,
             stage = f"Читаю встречу: часть {i} из {n}…"
             try:
                 m = _complete_validated(
-                    backend, _MAP_TEMPLATE.format(i=i, n=n, chunk=chunk),
+                    backend, _MAP_TEMPLATE.format(i=i, n=n, chunk=chunk, context=ctx_map),
                     MapNotes, 3500, on_progress, stage, cancel_check)
             except _SchemaMiss as e:
                 # The model's notes didn't fit the schema even after a retry —
@@ -517,7 +559,8 @@ def analyze_transcript(transcript_text: str, provider: str | None = None,
         _ck()  # cancel before the final merge
         if custom:
             prompt = _with_notes(
-                custom + "\n\nНиже — структурированные заметки (JSON) по "
+                custom + "\n\n" + ctx_full
+                + "Ниже — структурированные заметки (JSON) по "
                 "последовательным частям встречи, в хронологическом порядке; "
                 "объедини их в итог по требованиям выше:\n" + notes, user_notes)
             raw = _stream_complete(backend, _with_extra(prompt, extra_instructions),
@@ -526,7 +569,8 @@ def analyze_transcript(transcript_text: str, provider: str | None = None,
             result = _extract_json(raw)
         else:
             prompt = _with_extra(
-                _with_notes(_REDUCE_TEMPLATE.format(notes=notes), user_notes),
+                _with_notes(_REDUCE_TEMPLATE.format(notes=notes, context=ctx_full),
+                            user_notes),
                 extra_instructions)
             if _fit_max_tokens(backend, prompt, 10000) < 4000:
                 warning = ("Протокол мог потерять детали: у движка "

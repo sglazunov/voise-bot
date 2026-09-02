@@ -19,7 +19,7 @@ from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import Dict, Optional
 
-from . import config, db, formats, glossary, logs, names
+from . import config, db, formats, glossary, logs, meeting_series, names, redact
 from .transcribe import transcribe_file
 
 log = logs.get("vtx.jobs")
@@ -572,16 +572,42 @@ class JobStore:
         return result
 
     def _preset_extra(self, job: Job) -> str:
-        """Д11: the preset's emphasis rules + the user's own instructions."""
+        """Д11: the preset's emphasis rules + the user's own instructions.
+
+        Тип протокола, закреплённый в карточке серии, побеждает автоопределение
+        по названию (и «универсальный»), но не явный выбор другого типа руками.
+        """
         try:
-            from .analyze import preset_rules
+            from .analyze import preset_rules, preset_for_title
             from .automation import settings as auto_settings
             custom = auto_settings.load(job.owner).get("custom_presets") or {}
-            rules = preset_rules(job.preset, custom)
+            preset = job.preset or ""
+            title = job.context_hint or job.filename
+            pinned = meeting_series.pinned_preset(job.owner, title)
+            if pinned and preset in ("", "universal", "auto", preset_for_title(title)):
+                preset = pinned
+            rules = preset_rules(preset, custom)
         except Exception:  # noqa: BLE001
             rules = ""
         parts = [p for p in (rules, job.analysis_instructions) if (p or "").strip()]
         return "\n\n".join(parts)
+
+    def _remember_series(self, job: Job, result: dict | None) -> None:
+        """Память серии: решения и задачи этой встречи станут справкой для
+        следующей встречи с тем же названием. Не ломает задачу."""
+        if not result:
+            return
+        try:
+            title = job.context_hint or job.filename
+            date = meeting_series.date_from_title(title) or time.strftime(
+                "%d.%m.%Y", time.localtime(job.created_at))
+            key = meeting_series.remember(job.owner, title, result,
+                                          job_id=job.id, date=date)
+            if key:
+                result["_series"] = {"key": key,
+                                     "title": meeting_series.display_title(title)}
+        except Exception:  # noqa: BLE001
+            log.warning("Память серии не обновлена (%s)", job.id, exc_info=True)
 
     def _maybe_verify(self, job: Job, result: dict, transcript: str) -> dict:
         """Д5: grounding pass over the fresh protocol (strict mode, on by
@@ -607,10 +633,18 @@ class JobStore:
             return result
 
     def _do_reanalyze(self, job: Job, txt: str) -> None:
-        if "УЧАСТНИКИ ЗВОНКА" not in txt:
-            txt += _participants_block(job)
-        if "ПОСТОЯННЫЙ КОНТЕКСТ" not in txt:
-            txt += _context_block(job)
+        # Текст с экрана при пересборке раньше терялся: читался только txt.
+        # Подмешиваем сохранённый OCR (уже маскированный) — как в первом прогоне.
+        if "ТЕКСТ С ЭКРАНА" not in txt:
+            sp = self.result_path(job.id, "screen.txt")
+            if sp.exists():
+                try:
+                    blk = redact.redact_text(sp.read_text(encoding="utf-8")).strip()
+                    if blk:
+                        txt += "\n\n" + blk
+                except OSError:
+                    pass
+        context = _participants_block(job) + _context_block(job)
         self._analysis[job.id] = {"stage": "Готовлю анализ…", "text": "", "chars": 0}
         self._set(job, status=STATUS_ANALYZING, analysis_error=None)
         try:
@@ -624,9 +658,10 @@ class JobStore:
                 on_progress=self._on_analysis(job.id),
                 cancel_check=lambda: self._control.get(job.id, {}).get("cancel"),
                 keys=_owner_keys(job.owner),
-                user_notes=job.user_notes)
+                user_notes=job.user_notes, context=context)
             result = self._maybe_verify(job, result, txt)
             result = self._enforce_participants(job, result)
+            self._remember_series(job, result)
             prov = result.get("_provider") or job.provider
             segs = []
             jp = self.result_path(job.id, "json")
@@ -1061,6 +1096,13 @@ class JobStore:
                             should_stop=lambda: bool(ctrl.get("cancel")))
                         screen_block = screen_ocr.to_block(items)
                         screen_segs = len(items)
+                        # Ключи и пароли с показанного экрана — не содержание
+                        # встречи: маскируем ДО модели и ДО записи на диск.
+                        screen_block, n_red = redact.redact(screen_block)
+                        if n_red:
+                            meta["screen_redacted"] = n_red
+                            log.info("Задача %s: скрыто секретов с экрана: %d",
+                                     job.id, n_red)
                         if screen_block:
                             self.result_path(job.id, "screen.txt").write_text(
                                 screen_block, encoding="utf-8")
@@ -1075,8 +1117,9 @@ class JobStore:
             # the map-reduce keep the meeting's chronology and dedup overlap-zone
             # tasks; the prompts instruct the model not to leak them into output.
             analysis_input = txt_content + (("\n\n" + screen_block) if screen_block else "")
-            analysis_input += _participants_block(job)
-            analysis_input += _context_block(job)
+            # Контекст — ОТДЕЛЬНО от текста: он ставится перед каждым запросом
+            # к модели, а не дописывается в хвост (см. analyze_transcript).
+            analysis_context = _participants_block(job) + _context_block(job)
 
             # AI analysis + Word document (optional, requires ANTHROPIC_API_KEY)
             analysis_result = None
@@ -1096,10 +1139,11 @@ class JobStore:
                         on_progress=self._on_analysis(job.id),
                         cancel_check=lambda: self._control.get(job.id, {}).get("cancel"),
                         keys=_owner_keys(job.owner),
-                        user_notes=job.user_notes)
+                        user_notes=job.user_notes, context=analysis_context)
                     analysis_result = self._maybe_verify(
                         job, analysis_result, analysis_input)
                     analysis_result = self._enforce_participants(job, analysis_result)
+                    self._remember_series(job, analysis_result)
                     prov = analysis_result.get("_provider") or job.provider
                     segs_dicts = [
                         {"start": s.start, "end": s.end,
@@ -1199,15 +1243,24 @@ class JobStore:
 
 
 def _context_block(job: "Job") -> str:
-    """The user's standing AI context (global + projects matching this meeting),
-    prepended to the analysis so the AI knows roles / project essence up front."""
+    """Постоянный контекст команды (общий + проекты, подходящие к этой встрече)
+    и карточка серии встреч с итогами прошлой встречи этой серии."""
+    parts: list[str] = []
     try:
         from . import ai_context
         hint = f"{job.context_hint} {job.filename}"
         blk = ai_context.block_for(job.owner, hint)
-        return ("\n\n" + blk) if blk else ""
+        if blk:
+            parts.append(blk)
     except Exception:
-        return ""
+        log.debug("Постоянный контекст не собран", exc_info=True)
+    try:
+        blk = meeting_series.block_for(job.owner, job.context_hint or job.filename)
+        if blk:
+            parts.append(blk)
+    except Exception:
+        log.debug("Контекст серии не собран", exc_info=True)
+    return "".join("\n\n" + p for p in parts)
 
 
 _name_key = names.key      # общий ключ дедупликации, см. app/names.py

@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .. import config, db, logs, security
+from .. import config, db, logs, meeting_series, security
 from . import (clouds, delivery, recorder, settings as auto_settings,
                snapshots, weeek)
 
@@ -120,6 +120,22 @@ _WIPE_HOUR = int(os.getenv("VTX_FIELD_WIPE_HOUR", "4"))
 _WIPE_WINDOW_H = int(os.getenv("VTX_FIELD_WIPE_WINDOW_H", "2"))
 
 _ROOM_RE = re.compile(r"/j/([a-z0-9_-]+)", re.I)
+
+
+def _protocol_wanted(cfg: dict, owner: str, title: str, log=None) -> bool:
+    """Собирать ли протокол этой встречи: общий тумблер do_protocol И приоритет
+    серии — карточка серии с «только запись» отключает протокол (экономия
+    лимитов движка на встречах, где нужна лишь запись)."""
+    if not cfg.get("do_protocol", True):
+        return False
+    try:
+        if meeting_series.priority_of(owner, title) == "record_only":
+            if log:
+                log("Серия встреч помечена «только запись» — протокол не собираю.")
+            return False
+    except Exception:  # noqa: BLE001 — карточка серии не должна ломать запись
+        _LOG.debug("Приоритет серии не прочитан", exc_info=True)
+    return True
 
 
 def room_key(url: str) -> str:
@@ -619,7 +635,7 @@ class Scheduler:
             # Recording always happens; transcription and protocol are separate
             # toggles so the user records only what they need.
             do_transcribe = bool(cfg.get("do_transcribe", True))
-            do_protocol = bool(cfg.get("do_protocol", True))
+            do_protocol = _protocol_wanted(cfg, user, st.title, log)
             job = None
             if do_transcribe:
                 stage = ("Распознаю речь и собираю протокол…" if do_protocol
@@ -998,16 +1014,17 @@ class Scheduler:
         """A recording the crash orphaned: run the same post-recording pipeline
         the normal path would have — upload the video, queue transcription with
         delivery flags, start the waiter and the Weeek link write."""
-        do_protocol = bool(cfg.get("do_protocol", True))
         do_transcribe = bool(cfg.get("do_transcribe", True))
-        deliver = bool(do_protocol and cfg.get("upload_protocol", True))
-        from ..analyze import preset_for_title
-        preset_cfg = str(cfg.get("analyze_preset") or "auto")
-        preset = preset_for_title(st.title) if preset_cfg == "auto" else preset_cfg
 
         def log(msg: str) -> None:
             st.logs.append(str(msg))
             _LOG.info("встреча %s: %s", st.task_id, msg)
+
+        do_protocol = _protocol_wanted(cfg, st.owner, st.title, log)
+        deliver = bool(do_protocol and cfg.get("upload_protocol", True))
+        from ..analyze import preset_for_title
+        preset_cfg = str(cfg.get("analyze_preset") or "auto")
+        preset = preset_for_title(st.title) if preset_cfg == "auto" else preset_cfg
 
         log("Запись прервана перезапуском сервиса — файл цел, дообрабатываю.")
         if not st.cloud_url:
