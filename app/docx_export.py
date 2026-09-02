@@ -180,64 +180,31 @@ def generate_report(
                 r.italic = True
                 r.font.color.rgb = RGBColor(0x60, 0x60, 0x60)
 
-    # ---- О чём шёл разговор -------------------------------------------------
+    # ---- Кратко -------------------------------------------------------------
+    # Порядок разделов — для руководителя: кратко → решения → задачи → сделано →
+    # выводы и открытые вопросы → разбор по темам → ключевые мысли. Раньше
+    # решения и задачи шли ПОСЛЕ подробного разбора, то есть на третьей-четвёртой
+    # странице — «простыня текста», из-за которой протокол не читали.
+    series = analysis.get("_series") or {}
+    if series.get("title"):
+        sp = doc.add_paragraph()
+        sr = sp.add_run(f"Серия встреч: {series['title']}")
+        sr.italic = True
+        sr.font.color.rgb = RGBColor(0x60, 0x60, 0x60)
+        sr.font.size = Pt(10)
+
     doc.add_heading("О чём шёл разговор", level=1)
     p = doc.add_paragraph(analysis.get("summary", ""))
     p.paragraph_format.space_after = Pt(12)
-
-    # ---- Подробный разбор по темам -----------------------------------------
-    detailed = analysis.get("detailed", [])
-    if detailed:
-        doc.add_heading("Подробный разбор", level=1)
-        for block in detailed:
-            topic = (block.get("topic") or "").strip()
-            details = (block.get("details") or "").strip()
-            if topic:
-                doc.add_heading(topic, level=2)
-            if details:
-                dp = doc.add_paragraph(details)
-                dp.paragraph_format.space_after = Pt(10)
-
-    # ---- Ключевые мысли -----------------------------------------------------
-    doc.add_heading("Ключевые мысли", level=1)
-    thoughts = analysis.get("key_thoughts", [])
-    if thoughts:
-        for thought in thoughts:
-            bp = doc.add_paragraph(style="List Bullet")
-            bp.add_run(thought)
-    else:
-        doc.add_paragraph("—").paragraph_format.space_after = Pt(6)
-
-    # ---- Выводы -------------------------------------------------------------
-    conclusions = analysis.get("conclusions", [])
-    if conclusions:
-        doc.add_heading("Выводы", level=1)
-        for c in conclusions:
-            bp = doc.add_paragraph(style="List Bullet")
-            bp.add_run(c)
 
     # ---- Решения / договорённости ------------------------------------------
     decisions = analysis.get("decisions", [])
     if decisions:
         doc.add_heading("Решения и договорённости", level=1)
         for di, d in enumerate(decisions):
-            bp = doc.add_paragraph(style="List Bullet")
+            bp = doc.add_paragraph(style="List Number")
             bp.add_run(d)
             _apply_verification(bp, _vinfo(analysis, "decisions", di), RGBColor)
-
-    # ---- Сделано (выполненные задачи) --------------------------------------
-    done_tasks = analysis.get("done_tasks", [])
-    if done_tasks:
-        doc.add_heading("Сделано (выполненные задачи)", level=1)
-        for ti, item in enumerate(done_tasks):
-            text, owner = _task_parts(item)
-            bp = doc.add_paragraph(style="List Bullet")
-            bp.add_run(f"☑ {text}")
-            if owner:
-                r = bp.add_run(f"  — {owner}")
-                r.italic = True
-                r.font.color.rgb = RGBColor(0x60, 0x60, 0x60)
-            _apply_verification(bp, _vinfo(analysis, "done_tasks", ti), RGBColor)
 
     # ---- Задачи (нужно сделать) --------------------------------------------
     # Подтверждённые цитатой и неподтверждённые разведены по разным блокам.
@@ -250,17 +217,20 @@ def generate_report(
     sure, unsure = [], []
     for i, item in enumerate(tasks):
         (sure if (_vinfo(analysis, "tasks", i) or {}).get("ok") else unsure).append((i, item))
-    # Пока grounding не отработал (старые протоколы) — verification пуст, и всё
-    # попадёт в «требуют проверки». Это неверно: там просто нет проверки.
+    # Пока grounding не отработал (старые протоколы) или сорвался — verification
+    # неполон, и всё попало бы в «требуют проверки». Это неверно: там просто
+    # нет проверки.
     if not (analysis.get("verification") or {}).get("tasks") \
             or not _verification_complete(analysis):
         sure, unsure = [(i, t) for i, t in enumerate(tasks)], []
 
     doc.add_heading("Задачи (нужно сделать)", level=1)
     if sure:
-        table = doc.add_table(rows=1, cols=3)
+        has_due = any(isinstance(t, dict) and t.get("due") for _i, t in sure)
+        cols = ("№", "Задача", "Ответственный") + (("Срок",) if has_due else ())
+        table = doc.add_table(rows=1, cols=len(cols))
         table.style = "Table Grid"
-        for cell, title in zip(table.rows[0].cells, ("№", "Задача", "Ответственный")):
+        for cell, title in zip(table.rows[0].cells, cols):
             cell.paragraphs[0].add_run(title).bold = True
         for n, (i, item) in enumerate(sure, 1):
             text, owner = _task_parts(item)
@@ -270,6 +240,9 @@ def generate_report(
             tp.add_run(text)
             _apply_verification(tp, _vinfo(analysis, "tasks", i), RGBColor)
             row[2].paragraphs[0].add_run(owner or "—")
+            if has_due:
+                row[3].paragraphs[0].add_run(
+                    str(item.get("due") or "—") if isinstance(item, dict) else "—")
         doc.add_paragraph().paragraph_format.space_after = Pt(6)
     else:
         doc.add_paragraph("Задач с дословным подтверждением не найдено."
@@ -288,6 +261,8 @@ def generate_report(
             text, owner = _task_parts(item)
             bp = doc.add_paragraph(style="List Bullet")
             bp.add_run(f"☐ {text}")
+            if isinstance(item, dict) and item.get("due"):
+                bp.add_run(f" (срок: {item['due']})")
             if owner:
                 ro = bp.add_run(f"  — {owner}")
                 ro.italic = True
@@ -302,11 +277,56 @@ def generate_report(
             text, owner = _task_parts(item)
             bp = doc.add_paragraph(style="List Bullet")
             bp.add_run(f"☐ {text}")
+            if isinstance(item, dict) and item.get("due"):
+                bp.add_run(f" (срок: {item['due']})")
             _apply_verification(bp, _vinfo(analysis, "minor_tasks", mi), RGBColor)
             if owner:
                 r = bp.add_run(f"  — {owner}")
                 r.italic = True
                 r.font.color.rgb = RGBColor(0x60, 0x60, 0x60)
+
+    # ---- Сделано (выполненные задачи) --------------------------------------
+    done_tasks = analysis.get("done_tasks", [])
+    if done_tasks:
+        doc.add_heading("Сделано (выполненные задачи)", level=1)
+        for ti, item in enumerate(done_tasks):
+            text, owner = _task_parts(item)
+            bp = doc.add_paragraph(style="List Bullet")
+            bp.add_run(f"☑ {text}")
+            if owner:
+                r = bp.add_run(f"  — {owner}")
+                r.italic = True
+                r.font.color.rgb = RGBColor(0x60, 0x60, 0x60)
+            _apply_verification(bp, _vinfo(analysis, "done_tasks", ti), RGBColor)
+
+    # ---- Выводы и открытые вопросы -----------------------------------------
+    conclusions = analysis.get("conclusions", [])
+    if conclusions:
+        doc.add_heading("Выводы и открытые вопросы", level=1)
+        for c in conclusions:
+            bp = doc.add_paragraph(style="List Bullet")
+            bp.add_run(c)
+
+    # ---- Подробный разбор по темам -----------------------------------------
+    detailed = analysis.get("detailed", [])
+    if detailed:
+        doc.add_heading("Подробный разбор", level=1)
+        for block in detailed:
+            topic = (block.get("topic") or "").strip()
+            details = (block.get("details") or "").strip()
+            if topic:
+                doc.add_heading(topic, level=2)
+            if details:
+                dp = doc.add_paragraph(details)
+                dp.paragraph_format.space_after = Pt(10)
+
+    # ---- Ключевые мысли -----------------------------------------------------
+    thoughts = analysis.get("key_thoughts", [])
+    if thoughts:
+        doc.add_heading("Ключевые мысли", level=1)
+        for thought in thoughts:
+            bp = doc.add_paragraph(style="List Bullet")
+            bp.add_run(thought)
 
     # ---- Full transcript on new page ----------------------------------------
     doc.add_page_break()
