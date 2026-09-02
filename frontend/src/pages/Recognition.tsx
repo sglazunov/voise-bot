@@ -124,10 +124,19 @@ export default function Recognition() {
       inFlight.current = false;
     }
   };
-  // Список для показа: либо все встречи, либо только выбранный в календаре день.
+  // Список для показа. По умолчанию — ТОЛЬКО сегодняшние встречи: история за
+  // месяц растягивала страницу на десятки карточек, а нужны в 9 случаях из 10
+  // сегодняшние. Старые — по кнопке «Показать ещё», по 10 за нажатие.
+  // Выбранный в календаре день показывается целиком.
+  const HISTORY_STEP = 10;
+  const [extra, setExtra] = useState(0);   // сколько старых встреч раскрыто
+  const todayKey = dayKey(Date.now());
+  const todayJobs = jobs.filter((j: any) => dayKey((j.created_at || 0) * 1000) === todayKey);
+  const olderJobs = jobs.filter((j: any) => dayKey((j.created_at || 0) * 1000) !== todayKey);
   const shownJobs = dayFilter
     ? jobs.filter((j: any) => dayKey((j.created_at || 0) * 1000) === dayFilter)
-    : jobs;
+    : [...todayJobs, ...olderJobs.slice(0, extra)];
+  const moreLeft = dayFilter ? 0 : Math.max(0, olderJobs.length - extra);
   useEffect(() => { loadJobs(); const t = setInterval(loadJobs, 4000); return () => clearInterval(t); }, []);
   useEffect(() => { api.get("/api/providers").then((d) => setEngines(d.engines || [])).catch(() => {}); }, []);
 
@@ -432,8 +441,11 @@ export default function Recognition() {
             </div>
             {showCal && (
               <HistoryCalendar jobs={jobs} value={dayFilter}
-                onPick={(k) => { setDayFilter(k); setSearchQ(""); }} />
+                onPick={(k) => { setDayFilter(k); setSearchQ(""); setExtra(0); }} />
             )}
+            {/* Прокрутка — внутри блока истории, а не всей страницы: правая
+                колонка с протоколом остаётся на месте. */}
+            <div className="pr-1" style={{ maxHeight: "min(640px, 70vh)", overflowY: "auto" }}>
             {searchQ.trim().length >= 2 ? (
               searchRes.length ? searchRes.map((r) => (
                 <button key={r.job_id} onClick={() => { setSel(r.job_id); setTab("transcript"); }}
@@ -461,8 +473,16 @@ export default function Recognition() {
               </button>
             )) : (
               <div className="text-[13px] py-2" style={{ color: "var(--muted)" }}>
-                {dayFilter ? "В этот день встреч не было." : "Пока нет задач."}</div>
+                {dayFilter ? "В этот день встреч не было."
+                  : jobs.length ? "Сегодня встреч ещё не было." : "Пока нет задач."}</div>
             )}
+            {searchQ.trim().length < 2 && moreLeft > 0 && (
+              <button className="btn btn-ghost w-full mt-1" onClick={() => setExtra((n) => n + HISTORY_STEP)}
+                title={`Показать ещё ${Math.min(HISTORY_STEP, moreLeft)} из ${moreLeft} прошлых встреч`}>
+                Показать ещё {Math.min(HISTORY_STEP, moreLeft)} · осталось {moreLeft}
+              </button>
+            )}
+            </div>
           </Card>
         </div>
 
