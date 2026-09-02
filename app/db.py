@@ -75,7 +75,7 @@ JOB_SCALAR_COLS = [
     "speaker_error", "screen_error", "protocol_cloud_url", "delivery_error",
     "screen_segments", "analysis_error", "transcribe_sec",
 ]
-JOB_JSON_COLS = ["video_participants", "analysis", "docx_providers"]
+JOB_JSON_COLS = ["video_participants", "analysis", "docx_providers", "weeek_tasks"]
 JOB_COLS = JOB_SCALAR_COLS + JOB_JSON_COLS
 
 _SCHEMA = """
@@ -163,6 +163,8 @@ ALTER TABLE jobs ADD COLUMN IF NOT EXISTS preset TEXT;
 -- пересборка протокола сдвигает конец, а начало остаётся от первого прогона,
 -- и час встречи выглядел как семь часов работы.
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS transcribe_sec DOUBLE PRECISION;
+-- Черновики задач для Weeek из протокола (см. app/weeek_tasks.py).
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS weeek_tasks JSONB;
 CREATE TABLE IF NOT EXISTS search_docs (
     job_id     TEXT PRIMARY KEY,
     username   TEXT,

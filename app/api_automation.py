@@ -424,6 +424,79 @@ def automation_weeek_projects(user: str = Depends(current_user)):
         raise HTTPException(502, str(e))
 
 
+@router.get("/weeek/members")
+def automation_weeek_members(refresh: int = 0, user: str = Depends(current_user)):
+    """Участники воркспейса Weeek (кэш на сутки в настройках команды) — для
+    выбора исполнителя задачи из протокола."""
+    from .automation import settings as auto_settings, weeek
+    cfg = auto_settings.load(user)
+    token = cfg.get("weeek_token")
+    if not token:
+        raise HTTPException(400, "Сначала подключите Weeek.")
+    cache = cfg.get("weeek_members_cache") or {}
+    fresh = time.time() - float(cache.get("at") or 0) < 86400
+    if cache.get("members") and fresh and not refresh:
+        return {"members": cache["members"], "cached": True}
+    try:
+        members = weeek.list_members(token)
+    except weeek.WeeekError as e:
+        if cache.get("members"):
+            return {"members": cache["members"], "cached": True, "error": str(e)}
+        raise HTTPException(502, str(e))
+    auto_settings.save(user, {"weeek_members_cache": {"at": time.time(), "members": members}})
+    return {"members": members, "cached": False}
+
+
+@router.get("/weeek/boards")
+def automation_weeek_boards(project_id: str = "", user: str = Depends(current_user)):
+    from .automation import settings as auto_settings, weeek
+    token = auto_settings.get(user, "weeek_token")
+    if not token:
+        raise HTTPException(400, "Сначала подключите Weeek.")
+    if not project_id.strip().isdigit():
+        raise HTTPException(400, "Нужен числовой id проекта.")
+    try:
+        return {"boards": weeek.list_boards(token, project_id.strip())}
+    except weeek.WeeekError as e:
+        raise HTTPException(502, str(e))
+
+
+@router.get("/weeek/board-columns")
+def automation_weeek_board_columns(board_id: str = "", user: str = Depends(current_user)):
+    from .automation import settings as auto_settings, weeek
+    token = auto_settings.get(user, "weeek_token")
+    if not token:
+        raise HTTPException(400, "Сначала подключите Weeek.")
+    if not board_id.strip().isdigit():
+        raise HTTPException(400, "Нужен числовой id доски.")
+    try:
+        return {"columns": weeek.list_board_columns(token, board_id.strip())}
+    except weeek.WeeekError as e:
+        raise HTTPException(502, str(e))
+
+
+class UserMapBody(BaseModel):
+    name: str
+    user_id: str = ""          # пусто = убрать соответствие
+
+
+@router.post("/weeek/user-map")
+def automation_weeek_user_map(body: UserMapBody, user: str = Depends(current_user)):
+    """Запомнить «имя в протоколе → участник Weeek» для всей команды."""
+    from .automation import settings as auto_settings
+    name = (body.name or "").strip()[:120]
+    if not name:
+        raise HTTPException(400, "Пустое имя.")
+    cfg = auto_settings.load(user)
+    m = dict(cfg.get("weeek_user_map") or {})
+    if body.user_id.strip():
+        m[name] = body.user_id.strip()[:80]
+    else:
+        m.pop(name, None)
+    auto_settings.save(user, {"weeek_user_map": m})
+    return {"weeek_user_map": m}
+
+
 @router.get("/weeek/probe")
 def automation_weeek_probe(task_id: str, user: str = Depends(current_user)):
     """Return the raw JSON of one Weeek task — used to pin date/link field names."""

@@ -135,6 +135,7 @@ class Job:
     analysis: Optional[dict] = None        # structured analysis result (latest)
     analysis_error: Optional[str] = None   # error message if analysis failed
     docx_providers: list = field(default_factory=list)  # engines a Word doc exists for
+    weeek_tasks: list = field(default_factory=list)     # черновики задач для Weeek
 
     def to_public(self) -> dict:
         d = asdict(self)
@@ -458,10 +459,32 @@ class JobStore:
         a.pop("_warning", None)
         a["_edited"] = True
         job.analysis = a
+        self.prepare_weeek_tasks(job)
         self._rebuild_docx(job)
         self._save(job)
         self.index_search(job)
         return job
+
+    def prepare_weeek_tasks(self, job: Job, members: list | None = None) -> list:
+        """Черновики задач для Weeek из текущего протокола (без сети: участники
+        берутся из кэша настроек). Статусы созданных переносятся."""
+        try:
+            from . import meeting_series, weeek_tasks
+            from .automation import settings as auto_settings
+            cfg = auto_settings.load(job.owner)
+            if not cfg.get("weeek_tasks_enabled", True) or not job.analysis:
+                return job.weeek_tasks
+            if members is None:
+                members = (cfg.get("weeek_members_cache") or {}).get("members") or []
+            title = job.context_hint or job.filename
+            _key, series = meeting_series.find(job.owner, title)
+            job.weeek_tasks = weeek_tasks.prepare(
+                job.id, job.analysis, cfg,
+                weeek_tasks.meeting_date_of(title, job.created_at),
+                members=members, previous=job.weeek_tasks, series=series)
+        except Exception:  # noqa: BLE001 — черновики не должны ломать протокол
+            log.warning("Черновики задач Weeek не подготовлены (%s)", job.id, exc_info=True)
+        return job.weeek_tasks
 
     def regen_topic(self, job_id: str, index: int,
                     provider: str | None = None) -> Job:
@@ -662,6 +685,8 @@ class JobStore:
             result = self._maybe_verify(job, result, txt)
             result = self._enforce_participants(job, result)
             self._remember_series(job, result)
+            job.analysis = result
+            self.prepare_weeek_tasks(job)
             prov = result.get("_provider") or job.provider
             segs = []
             jp = self.result_path(job.id, "json")
@@ -1145,6 +1170,8 @@ class JobStore:
                         job, analysis_result, analysis_input)
                     analysis_result = self._enforce_participants(job, analysis_result)
                     self._remember_series(job, analysis_result)
+                    job.analysis = analysis_result
+                    self.prepare_weeek_tasks(job)
                     prov = analysis_result.get("_provider") or job.provider
                     segs_dicts = [
                         {"start": s.start, "end": s.end,

@@ -437,3 +437,129 @@ def set_custom_field(token: str, task_id: Any, field_name: str, value: str) -> d
         return {"ok": True, "field_id": fid}
     except WeeekError as e:
         return {"ok": False, "error": str(e), "field_id": fid}
+
+
+# --------------------------------------------------------------------------- #
+# Задачи ИЗ протокола: участники, доски, создание (см. app/weeek_tasks.py)
+#
+# Формы запросов сверены с открытой документацией и клиентами Weeek, но НЕ с
+# живым API из этой среды (developers.weeek.net недоступен через прокси).
+# Перед боевым включением — пробная запись в тестовом проекте: назначение
+# исполнителя (`userId` в теле создания) и формат `dueDate` могут отличаться;
+# код терпим к обеим формам и пишет предупреждение в результат.
+# --------------------------------------------------------------------------- #
+def _unwrap(out: dict, *keys: str) -> list:
+    if isinstance(out, list):
+        return out
+    for k in keys:
+        v = (out or {}).get(k)
+        if isinstance(v, list):
+            return v
+    return []
+
+
+def list_members(token: str) -> list[dict]:
+    """Участники воркспейса: [{id, name, email}]. id — UUID пользователя."""
+    out = _request("GET", "/ws/members", token, params={"perPage": 200})
+    result = []
+    for m in _unwrap(out, "members", "users", "data"):
+        if not isinstance(m, dict):
+            continue
+        first = str(m.get("firstName") or m.get("first_name") or "").strip()
+        last = str(m.get("lastName") or m.get("last_name") or "").strip()
+        name = (f"{first} {last}").strip() or str(m.get("name") or m.get("email") or "")
+        result.append({"id": m.get("id"), "name": name, "firstName": first,
+                       "lastName": last, "email": m.get("email") or ""})
+    return result
+
+
+def list_boards(token: str, project_id: Any) -> list[dict]:
+    out = _request("GET", "/tm/boards", token,
+                   params={"projectId": project_id, "perPage": 100})
+    return [{"id": b.get("id"), "name": b.get("name") or b.get("title") or f"Доска {b.get('id')}"}
+            for b in _unwrap(out, "boards", "data") if isinstance(b, dict)]
+
+
+def list_board_columns(token: str, board_id: Any) -> list[dict]:
+    out = _request("GET", "/tm/board-columns", token,
+                   params={"boardId": board_id, "perPage": 100})
+    return [{"id": c.get("id"), "name": c.get("name") or c.get("title") or f"Колонка {c.get('id')}"}
+            for c in _unwrap(out, "boardColumns", "columns", "data") if isinstance(c, dict)]
+
+
+def workspace_id(token: str) -> str:
+    """id воркспейса — для ссылки на задачу в интерфейсе Weeek."""
+    try:
+        out = _request("GET", "/ws", token)
+    except WeeekError:
+        return ""
+    ws = out.get("workspace") if isinstance(out, dict) else None
+    if isinstance(ws, dict):
+        return str(ws.get("id") or "")
+    return str((out or {}).get("id") or "")
+
+
+def task_url(ws_id: str, task_id: Any) -> str:
+    return f"https://app.weeek.net/ws/{ws_id}/task/{task_id}" if ws_id and task_id else ""
+
+
+def update_task(token: str, task_id: Any, fields: dict) -> dict:
+    return _request("PUT", f"/tm/tasks/{task_id}", token, body=fields)
+
+
+def create_task(token: str, title: str, description: str = "",
+                project_id: Any = None, board_id: Any = None, column_id: Any = None,
+                user_id: str | None = None, priority: int | None = None,
+                due: str | None = None) -> dict:
+    """Создать задачу. Возвращает {id, url, warnings[]}.
+
+    `due` — ISO «YYYY-MM-DD». Срок ставится отдельным PUT после создания: в
+    документации create принимает только `day`, а `dueDate` — у update.
+    """
+    body: dict = {"title": str(title)[:200], "type": "action"}
+    if description:
+        body["description"] = description
+    loc = {}
+    if project_id not in (None, ""):
+        loc["projectId"] = _as_int(project_id)
+    if board_id not in (None, ""):
+        loc["boardId"] = _as_int(board_id)
+    if column_id not in (None, ""):
+        loc["boardColumnId"] = _as_int(column_id)
+    if loc:
+        body["locations"] = [loc]
+    if user_id:
+        body["userId"] = str(user_id)
+    if priority is not None:
+        body["priority"] = int(priority)
+    out = _request("POST", "/tm/tasks", token, body=body)
+    task = out.get("task") if isinstance(out, dict) else None
+    tid = (task or {}).get("id") if isinstance(task, dict) else (out or {}).get("id")
+    if not tid:
+        raise WeeekError(f"Weeek не вернул id созданной задачи: {str(out)[:200]}")
+    warnings: list[str] = []
+    if due:
+        try:
+            update_task(token, tid, {"dueDate": due})
+        except WeeekError as e:
+            # Часть клиентов пишет срок как dd.mm.yyyy — вторая попытка.
+            try:
+                y, m, d = due.split("-")
+                update_task(token, tid, {"dueDate": f"{d}.{m}.{y}"})
+            except Exception:  # noqa: BLE001
+                warnings.append(f"срок не установлен: {e}")
+    if user_id and isinstance(task, dict) and not (
+            task.get("userId") or task.get("assignees") or task.get("assigneeId")):
+        # В ответе исполнителя нет — попробовать альтернативную форму.
+        try:
+            _request("POST", f"/tm/tasks/{tid}/assignees", token, body={"userId": str(user_id)})
+        except WeeekError:
+            warnings.append("исполнитель, возможно, не назначен — проверьте в Weeek")
+    return {"id": tid, "url": task_url(workspace_id(token), tid), "warnings": warnings}
+
+
+def _as_int(v: Any) -> Any:
+    try:
+        return int(str(v).strip())
+    except (TypeError, ValueError):
+        return v

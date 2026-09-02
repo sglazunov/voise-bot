@@ -121,6 +121,18 @@ _DEFAULTS: dict[str, Any] = {
     "protocol_folder": "disk:/Телемост-протоколы",  # SEPARATE folder for protocols
     "weeek_set_protocol_field": True,  # write its link into a Weeek custom field
     "weeek_protocol_field": "Протокол встречи",  # name of that link custom field
+    # --- задачи ИЗ протокола → Weeek (черновики с подтверждением человеком) ---
+    "weeek_tasks_enabled": True,       # готовить черновики и показывать блок «В Weeek»
+    "weeek_tasks_auto": False,         # создавать БЕЗ подтверждения (только с основанием
+                                       # и однозначным исполнителем)
+    "weeek_tasks_only_grounded": True, # по умолчанию отмечать лишь пункты с цитатой
+    "weeek_tasks_include_minor": False,  # брать ли мелкие задачи
+    "weeek_tasks_project_id": None,    # проект по умолчанию (иначе — проект серии)
+    "weeek_tasks_board_id": None,      # «доска бэклога бота» (идея Зои)
+    "weeek_tasks_column_id": None,     # колонка «Новые»
+    "weeek_tasks_default_due_days": None,  # срок по умолчанию (дней от встречи)
+    "weeek_user_map": {},              # {"имя в протоколе": "userId в Weeek"}
+    "weeek_members_cache": {"at": 0, "members": []},  # кэш GET /ws/members (сутки)
 }
 
 
@@ -182,7 +194,7 @@ def load(user: str) -> dict[str, Any]:
 
 # Keys whose values are sub-dicts that should be MERGED, not replaced, so a
 # partial update (e.g. just the Yandex token) keeps the rest (folder).
-_NESTED_KEYS = ("yandex_disk", "gdrive")
+_NESTED_KEYS = ("yandex_disk", "gdrive", "weeek_members_cache")
 
 
 def _drop_non_string_secrets(values: dict[str, Any]) -> list[str]:

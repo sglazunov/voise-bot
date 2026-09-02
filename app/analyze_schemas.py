@@ -55,6 +55,7 @@ class TaskNote(BaseModel):
     task: str = ""
     owner: str | None = None
     owner_evidence: str | None = None
+    due: str | None = None          # срок ДОСЛОВНО («до пятницы»); дату считает код
     done: bool = False
 
 
@@ -86,6 +87,7 @@ class ProtoTask(BaseModel):
     model_config = ConfigDict(extra="ignore", coerce_numbers_to_str=True)
     task: str | None = ""
     owner: str | None = "—"
+    due: str | None = None          # срок, как прозвучал; None если не называли
 
 
 class Protocol(BaseModel):

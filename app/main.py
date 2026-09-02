@@ -372,6 +372,84 @@ def save_context(body: ContextBody, user: str = Depends(current_user)):
     return ai_context.save(user, {"global": body.global_, "projects": body.projects})
 
 
+# ---- Задачи из протокола → Weeek (черновики с подтверждением) --------------
+def _job_weeek_view(job) -> dict:
+    from . import weeek_tasks
+    from .automation import settings as auto_settings
+    cfg = auto_settings.load(job.owner)
+    items = list(job.weeek_tasks or [])
+    return {
+        "enabled": bool(cfg.get("weeek_tasks_enabled", True)),
+        "connected": bool(cfg.get("weeek_token")),
+        "items": [{**d, "selected": weeek_tasks.default_selected(d, cfg)} for d in items],
+        "defaults": {"project_id": cfg.get("weeek_tasks_project_id"),
+                     "board_id": cfg.get("weeek_tasks_board_id"),
+                     "column_id": cfg.get("weeek_tasks_column_id")},
+        "members": (cfg.get("weeek_members_cache") or {}).get("members") or [],
+    }
+
+
+@app.get("/api/jobs/{job_id}/weeek-tasks")
+def job_weeek_tasks(job_id: str, user: str = Depends(current_user)):
+    """Черновики задач протокола для Weeek + участники воркспейса."""
+    job = _require_owned(job_id, user)
+    if not job.weeek_tasks and job.analysis:
+        store.prepare_weeek_tasks(job)
+        store._save(job)
+    return _job_weeek_view(job)
+
+
+@app.post("/api/jobs/{job_id}/weeek-tasks/prepare")
+def job_weeek_tasks_prepare(job_id: str, user: str = Depends(current_user)):
+    """Пересобрать черновики из текущего протокола (созданные не теряются)."""
+    job = _require_owned(job_id, user)
+    from .automation import settings as auto_settings
+    members = (auto_settings.load(user).get("weeek_members_cache") or {}).get("members") or []
+    store.prepare_weeek_tasks(job, members=members)
+    store._save(job)
+    return _job_weeek_view(job)
+
+
+class WeeekTasksCreate(BaseModel):
+    items: list[dict] = []
+
+
+@app.post("/api/jobs/{job_id}/weeek-tasks/create")
+def job_weeek_tasks_create(job_id: str, body: WeeekTasksCreate,
+                           user: str = Depends(current_user)):
+    """Создать отмеченные черновики в Weeek. Ответ — по каждой строке."""
+    from . import meeting_series, weeek_tasks
+    from .automation import settings as auto_settings
+    job = _require_owned(job_id, user)
+    cfg = auto_settings.load(user)
+    token = cfg.get("weeek_token")
+    if not token:
+        raise HTTPException(400, "Сначала подключите Weeek в «Автоматизации».")
+    if not body.items:
+        raise HTTPException(400, "Не выбрано ни одной задачи.")
+    if not job.weeek_tasks:
+        store.prepare_weeek_tasks(job)
+    title = meeting_series.display_title(job.context_hint or job.filename)
+    date = meeting_series.date_from_title(job.context_hint or job.filename) or ""
+    results = weeek_tasks.create_selected(
+        job.weeek_tasks, body.items[:100], token, title, date, user,
+        protocol_url=job.protocol_cloud_url or "")
+    store._save(job)
+    return {"results": results, **_job_weeek_view(job)}
+
+
+@app.post("/api/jobs/{job_id}/weeek-tasks/{key}/skip")
+def job_weeek_tasks_skip(job_id: str, key: str, user: str = Depends(current_user)):
+    """Пометить черновик «не заводить» (задача в Weeek не создаётся)."""
+    job = _require_owned(job_id, user)
+    for d in job.weeek_tasks or []:
+        if d.get("key") == key and d.get("status") != "created":
+            d["status"] = "skipped"
+            store._save(job)
+            return _job_weeek_view(job)
+    raise HTTPException(404, "Черновик не найден или уже создан.")
+
+
 # ---- Серии встреч: карточка повторяющейся встречи + память о прошлой -------
 @app.get("/api/series")
 def list_series(user: str = Depends(current_user)):

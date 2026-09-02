@@ -810,10 +810,16 @@ def _normalise_tasks(tasks) -> list[dict]:
         if isinstance(item, dict):
             text = str(item.get("task") or item.get("title") or item.get("text") or "").strip()
             owner = norm_owner(item.get("owner") or item.get("assignee"))
+            due = str(item.get("due") or "").strip()[:80]
+            if due.lower() in ("null", "none", "—", "-", "нет"):
+                due = ""
         else:
-            text, owner = str(item).strip(), ""
+            text, owner, due = str(item).strip(), "", ""
         if text:
-            out.append({"task": text, "owner": owner})
+            rec = {"task": text, "owner": owner}
+            if due:
+                rec["due"] = due
+            out.append(rec)
     return out
 
 
