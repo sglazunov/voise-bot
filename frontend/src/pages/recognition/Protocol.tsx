@@ -56,6 +56,33 @@ export function List({ title, items, verify }: { title: string; items?: any[]; v
   );
 }
 
+/** «Что спрашивали и что ответили»: документ нашли? баг починен? — ответы
+ *  для тех, кого на встрече не было. «без ответа» подсвечивается: это тоже факт. */
+export function StatusList({ items }: { items?: any[] }) {
+  const rows = (items || []).filter((s) => s && s.item);
+  if (!rows.length) return null;
+  return (
+    <section className="mb-4" aria-label="Что спрашивали и что ответили">
+      <h3 className="font-bold text-[13.5px] mb-1.5" style={{ color: "var(--accent-text, var(--accent))" }}>Что спрашивали и что ответили</h3>
+      <ul className="space-y-1.5">
+        {rows.map((s, i) => {
+          const open = s.status === "без ответа";
+          return (
+            <li key={i} className="text-[13px] leading-relaxed flex gap-2">
+              <ChevronRight size={14} className="flex-none mt-0.5" color="var(--muted)" aria-hidden="true" />
+              <span className="min-w-0">
+                {s.item}
+                <span className="chip ml-1.5" style={{ color: open ? "var(--warn)" : "var(--txt)" }}>{s.status || "—"}</span>
+                {s.note ? <span style={{ color: "var(--muted)" }}> — {s.note}</span> : null}
+              </span>
+            </li>
+          );
+        })}
+      </ul>
+    </section>
+  );
+}
+
 export const taskLine = (t: any) => `${t.task}${t.owner ? ` — ${t.owner}` : ""}`;
 // Разделитель «задача — ответственный»: тире с пробелами в КОНЦЕ строки после
 // короткого хвоста без точек. «Согласовать бюджет — до пятницы» ответственным
@@ -397,6 +424,7 @@ export function Protocol({ a, jobId }: { a: any; jobId?: string }) {
       {jobId && <WeeekTasks jobId={jobId} tasksCount={(a.tasks?.length || 0) + (a.minor_tasks?.length || 0)} />}
       <List title="Мелкие задачи" items={a.minor_tasks} verify={ver.minor_tasks} />
       <List title="Уже сделано" items={a.done_tasks} verify={ver.done_tasks} />
+      <StatusList items={a.statuses} />
       <List title="Выводы и открытые вопросы" items={a.conclusions} />
       {a.detailed?.length ? (
         <details className="mb-4" open={!a.decisions?.length && !a.tasks?.length}>

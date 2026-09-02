@@ -299,6 +299,27 @@ def generate_report(
                 r.font.color.rgb = RGBColor(0x60, 0x60, 0x60)
             _apply_verification(bp, _vinfo(analysis, "done_tasks", ti), RGBColor)
 
+    # ---- Статус по вопросам ----------------------------------------------
+    # «Документ нашли?», «баг с ролями есть или нет?» — ответы на такие вопросы
+    # раньше растворялись в описании тем. Для тех, кого на встрече не было.
+    statuses = [st for st in analysis.get("statuses", []) or []
+                if isinstance(st, dict) and st.get("item")]
+    if statuses:
+        doc.add_heading("Что спрашивали и что ответили", level=1)
+        table = doc.add_table(rows=1, cols=3)
+        table.style = "Table Grid"
+        for cell, title in zip(table.rows[0].cells, ("О чём спросили", "Статус", "Что сказали")):
+            cell.paragraphs[0].add_run(title).bold = True
+        for st in statuses:
+            row = table.add_row().cells
+            row[0].paragraphs[0].add_run(str(st.get("item") or ""))
+            sr = row[1].paragraphs[0].add_run(str(st.get("status") or "—"))
+            if str(st.get("status") or "") == "без ответа":
+                sr.font.color.rgb = RGBColor(0xB0, 0x60, 0x00)
+                sr.bold = True
+            row[2].paragraphs[0].add_run(str(st.get("note") or ""))
+        doc.add_paragraph().paragraph_format.space_after = Pt(6)
+
     # ---- Выводы и открытые вопросы -----------------------------------------
     conclusions = analysis.get("conclusions", [])
     if conclusions:

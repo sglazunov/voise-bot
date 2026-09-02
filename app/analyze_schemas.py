@@ -59,6 +59,20 @@ class TaskNote(BaseModel):
     done: bool = False
 
 
+class StatusNote(BaseModel):
+    """Состояние пункта, о котором СПРОСИЛИ или по которому прошлись списком.
+
+    Ради этого раздела протокол читают те, кого на встрече не было: «документ
+    нашли?», «баг с ролями починен или нет?». Раньше вопрос и ответ растворялись
+    в details темы, и читатель оставался с «непонятно, нашли ли»."""
+    model_config = ConfigDict(extra="ignore")
+    t: str | None = None
+    item: str = ""
+    status: str = ""
+    note: str = ""
+    quote: str | None = None
+
+
 class MapNotes(BaseModel):
     model_config = ConfigDict(extra="ignore", coerce_numbers_to_str=True)
     time_range: str = ""
@@ -66,6 +80,7 @@ class MapNotes(BaseModel):
     topics: list[TopicNote] = Field(default_factory=list)
     decisions: list[DecisionNote] = Field(default_factory=list)
     tasks: list[TaskNote] = Field(default_factory=list)
+    statuses: list[StatusNote] = Field(default_factory=list)
 
 
 # Final-protocol models are deliberately null-tolerant: a weak cloud model
@@ -90,6 +105,13 @@ class ProtoTask(BaseModel):
     due: str | None = None          # срок, как прозвучал; None если не называли
 
 
+class ProtoStatus(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    item: str | None = ""
+    status: str | None = ""
+    note: str | None = ""
+
+
 class Protocol(BaseModel):
     model_config = ConfigDict(extra="ignore", coerce_numbers_to_str=True)
     participants: list[ProtoParticipant] = Field(default_factory=list)
@@ -101,4 +123,5 @@ class Protocol(BaseModel):
     done_tasks: list[ProtoTask] = Field(default_factory=list)
     tasks: list[ProtoTask] = Field(default_factory=list)
     minor_tasks: list[ProtoTask] = Field(default_factory=list)
+    statuses: list[ProtoStatus] = Field(default_factory=list)
 

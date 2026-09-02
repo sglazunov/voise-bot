@@ -248,6 +248,7 @@ def _mech_merge(a: dict, b: dict) -> dict:
         "topics": (a.get("topics") or []) + (b.get("topics") or []),
         "decisions": (a.get("decisions") or []) + (b.get("decisions") or []),
         "tasks": (a.get("tasks") or []) + (b.get("tasks") or []),
+        "statuses": (a.get("statuses") or []) + (b.get("statuses") or []),
     }
 
 
@@ -723,6 +724,7 @@ def analyze_transcript(transcript_text: str, provider: str | None = None,
     # Task lists carry an owner.
     for list_key in ("done_tasks", "tasks", "minor_tasks"):
         result[list_key] = _normalise_tasks(result.get(list_key, []))
+    result["statuses"] = _normalise_statuses(result.get("statuses", []))
     result["detailed"] = merge_similar_topics(_normalise_detailed(result["detailed"]))
     result["_provider"] = backend.name
     spoken = speech_words(text)
@@ -856,6 +858,39 @@ def _normalise_tasks(tasks) -> list[dict]:
             if due:
                 rec["due"] = due
             out.append(rec)
+    return out
+
+
+_STATUS_WORDS = ("сделано", "в работе", "не сделано", "остаётся в плане", "остаётся",
+                 "заморожено", "снято", "без ответа")
+
+
+def _normalise_statuses(items) -> list[dict]:
+    """[{item, status, note}] — статусы пунктов, о которых спросили.
+
+    Поле status — короткое слово из списка в промпте; модель иногда пишет его
+    с большой буквы, через «е» вместо «ё» или добавляет пояснение — сводим к
+    словарной форме, а лишнее уносим в note, чтобы ничего не потерять."""
+    if not items:
+        return []
+    if isinstance(items, dict):
+        items = [items]
+    out = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        item = str(it.get("item") or it.get("task") or "").strip()
+        status = str(it.get("status") or "").strip().replace("ё", "е").lower()
+        note = str(it.get("note") or "").strip()
+        if not item:
+            continue
+        word = next((w for w in _STATUS_WORDS
+                     if status.startswith(w.replace("ё", "е"))), "")
+        if word and status != word.replace("ё", "е"):
+            tail = status[len(word):].strip(" :—-,.()")
+            if tail and tail not in note.lower():
+                note = (tail[0].upper() + tail[1:] + (". " if note else "") + note).strip()
+        out.append({"item": item, "status": word or status or "без ответа", "note": note})
     return out
 
 
