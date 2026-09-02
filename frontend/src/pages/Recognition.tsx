@@ -218,6 +218,35 @@ export default function Recognition() {
     setPending(f);
   }
 
+  // Файл можно бросить в ЛЮБОЕ место страницы, а не только в поле: поле
+  // сделано компактным, целиться в него неудобно. Счётчик dragenter/dragleave
+  // нужен, потому что при движении над дочерними элементами браузер шлёт
+  // leave родителю — без счётчика подсветка мигает.
+  const [dragOver, setDragOver] = useState(false);
+  const dragDepth = useRef(0);
+  useEffect(() => {
+    const hasFiles = (e: DragEvent) => Array.from(e.dataTransfer?.types || []).includes("Files");
+    const enter = (e: DragEvent) => { if (!hasFiles(e)) return; e.preventDefault(); dragDepth.current += 1; setDragOver(true); };
+    const over = (e: DragEvent) => { if (hasFiles(e)) e.preventDefault(); };
+    const leave = (e: DragEvent) => {
+      if (!hasFiles(e)) return;
+      dragDepth.current = Math.max(0, dragDepth.current - 1);
+      if (dragDepth.current === 0) setDragOver(false);
+    };
+    const drop = (e: DragEvent) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault(); dragDepth.current = 0; setDragOver(false);
+      const f = e.dataTransfer?.files?.[0];
+      if (f && !busy) onFile(f);
+    };
+    window.addEventListener("dragenter", enter); window.addEventListener("dragover", over);
+    window.addEventListener("dragleave", leave); window.addEventListener("drop", drop);
+    return () => {
+      window.removeEventListener("dragenter", enter); window.removeEventListener("dragover", over);
+      window.removeEventListener("dragleave", leave); window.removeEventListener("drop", drop);
+    };
+  }, [busy]);
+
   async function startRecognition() {
     const f = pending;
     if (!f) return;
@@ -314,36 +343,47 @@ export default function Recognition() {
 
   return (
     <Page title="Распознавание и протокол" subtitle="Загрузите запись — получите расшифровку и структурный протокол">
+      {dragOver && !busy && (
+        <div aria-hidden="true" className="fixed inset-0 z-40 grid place-items-center pointer-events-none"
+          style={{ background: "rgba(45,212,191,.12)", border: "3px dashed var(--accent)" }}>
+          <div className="glass2 rounded-2xl px-6 py-4 text-[15px] font-bold flex items-center gap-3">
+            <UploadCloud size={22} color="var(--accent)" /> Отпустите файл — он попадёт в «Новую запись»</div>
+        </div>
+      )}
       <div className="grid lg:grid-cols-[.9fr_1.1fr] gap-3.5 items-start">
         {/* LEFT: upload + jobs */}
         <div className="space-y-3.5">
           <Card>
             <div className="flex items-center gap-2 mb-3"><Mic size={17} color="var(--accent)" />
               <div className="font-bold text-[15px]">Новая запись</div></div>
+            {/* Поле компактное — одна строка: иконка и подпись. Бросать файл
+                можно в любое место страницы (см. слушатели на window). */}
             <div onClick={() => fileRef.current?.click()}
-              onDragOver={(e) => e.preventDefault()}
-              onDrop={(e) => { e.preventDefault(); onFile(e.dataTransfer.files?.[0]); }}
-              className="glass2 rounded-2xl grid place-items-center text-center cursor-pointer transition"
-              style={{ padding: "26px 16px", borderStyle: "dashed" }}>
+              className="glass2 rounded-2xl flex items-center gap-3 cursor-pointer transition"
+              style={{ padding: "10px 14px", borderStyle: "dashed",
+                ...(dragOver ? { borderColor: "var(--accent)", background: "rgba(45,212,191,.1)" } : {}) }}>
               {busy ? (
-                <><Loader2 size={26} className="animate-spin" color="var(--accent)" />
-                  <div className="text-[13px] mt-2">
-                    {prog >= 100 ? "Сервер принимает и сохраняет файл…" : `Загрузка… ${prog}%`}</div>
-                  {prog >= 100 && (
-                    <div className="text-[11px] mt-0.5" style={{ color: "var(--muted)" }}>
-                      для больших файлов это может занять минуту-другую</div>
-                  )}
-                  <div className="mt-2 w-full" style={{ height: 6, borderRadius: 6, background: "rgba(120,140,150,.2)", overflow: "hidden" }}>
-                    <div style={{ height: "100%", width: `${prog}%`, background: "linear-gradient(90deg,var(--accent),var(--accent2))" }} /></div></>
+                <><Loader2 size={20} className="animate-spin flex-none" color="var(--accent)" />
+                  <div className="min-w-0 flex-1">
+                    <div className="text-[13px]">
+                      {prog >= 100 ? "Сервер принимает и сохраняет файл…" : `Загрузка… ${prog}%`}
+                      {prog >= 100 && <span className="text-[11px] ml-1" style={{ color: "var(--muted)" }}>у больших файлов — минуту-другую</span>}</div>
+                    <div className="mt-1.5 w-full" style={{ height: 5, borderRadius: 5, background: "rgba(120,140,150,.2)", overflow: "hidden" }}>
+                      <div style={{ height: "100%", width: `${prog}%`, background: "linear-gradient(90deg,var(--accent),var(--accent2))" }} /></div>
+                  </div></>
               ) : pending ? (
-                <><Mic size={26} color="var(--accent)" />
-                  <div className="text-[13.5px] mt-2 font-semibold break-all">{pending.name}</div>
-                  <div className="text-[11.5px] mt-0.5" style={{ color: "var(--muted)" }}>
-                    {Math.max(1, Math.round(pending.size / 1024 / 1024))} МБ · проверьте настройки ниже и нажмите «Распознать»</div></>
+                <><Mic size={20} className="flex-none" color="var(--accent)" />
+                  <div className="min-w-0 flex-1">
+                    <Ellipsis as="div" className="text-[13px] font-semibold">{pending.name}</Ellipsis>
+                    <div className="text-[11px]" style={{ color: "var(--muted)" }}>
+                      {Math.max(1, Math.round(pending.size / 1024 / 1024))} МБ · проверьте настройки и нажмите «Распознать»</div>
+                  </div></>
               ) : (
-                <><UploadCloud size={26} color="var(--accent)" />
-                  <div className="text-[13.5px] mt-2 font-semibold">Перетащите файл или нажмите</div>
-                  <div className="text-[11.5px] mt-0.5" style={{ color: "var(--muted)" }}>mp3 · wav · m4a · mp4 · ogg…</div></>
+                <><UploadCloud size={20} className="flex-none" color="var(--accent)" />
+                  <div className="min-w-0 flex-1">
+                    <span className="text-[13px] font-semibold">{dragOver ? "Отпустите файл" : "Перетащите файл куда угодно или нажмите"}</span>
+                    <span className="text-[11px] ml-2" style={{ color: "var(--muted)" }}>mp3 · wav · m4a · mp4 · ogg…</span>
+                  </div></>
               )}
             </div>
 
