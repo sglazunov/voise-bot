@@ -62,6 +62,10 @@ function NavItem({ to, icon: Icon, label, end, onNavigate }: any) {
 }
 
 function Brand() {
+  // Хэш сборки под названием: по нему видно, обновился ли контейнер после
+  // раскатки (git на сервере может быть свежим, а образ — старым).
+  const [build, setBuild] = useState("");
+  useEffect(() => { api.get("/healthz").then((d) => setBuild(d.build || "")).catch(() => {}); }, []);
   return (
     <div className="flex items-center gap-3">
       <span className="grid place-items-center rounded-xl flex-none"
@@ -71,7 +75,8 @@ function Brand() {
       </span>
       <div className="min-w-0">
         <div className="font-extrabold text-[16px] leading-tight">MeetFlowAI</div>
-        <Ellipsis as="div" className="text-[11px]" style={{ color: "var(--muted)" }}>Автозапись встреч</Ellipsis>
+        <Ellipsis as="div" className="text-[11px]" style={{ color: "var(--muted)" }}>
+          Автозапись встреч{build && build !== "dev" ? ` · сборка ${build}` : ""}</Ellipsis>
       </div>
     </div>
   );

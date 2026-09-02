@@ -1471,7 +1471,8 @@ def model_download(name: str = "", user: str = Depends(current_user)):
 
 @app.get("/healthz")
 def healthz():
-    return {"ok": True, "model": config.MODEL, "diarization": config.DIARIZATION_ENABLED}
+    return {"ok": True, "model": config.MODEL, "diarization": config.DIARIZATION_ENABLED,
+            "build": os.getenv("VTX_BUILD", "dev")}
 
 
 # Register the SPA routes last, once current_user (their auth dependency) exists.

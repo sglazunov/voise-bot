@@ -14,6 +14,8 @@ services:
         # DIARIZATION=1 bakes pyannote+torch into the image (diarization of
         # uploaded audio; needs RAM >= 8 GB). Set it in .env and rebuild.
         DIARIZATION: "${DIARIZATION:-0}"
+        # Хэш коммита в образе (scripts/update.sh подставляет сам).
+        VTX_BUILD: "${VTX_BUILD:-dev}"
     image: linux-voise:latest
     container_name: linux-voise
     restart: unless-stopped

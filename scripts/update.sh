@@ -68,8 +68,17 @@ if [ "$PULLED" -eq 0 ]; then
 fi
 
 echo "==> Собираю образ (несколько минут)…"
+# Хэш коммита вшивается в образ: после сборки видно, из чего собран контейнер.
+export VTX_BUILD="$(git rev-parse --short HEAD 2>/dev/null || echo dev)"
 docker compose up -d --build app
 
 echo "==> Готово. Проверка:"
 docker compose ps app
 docker compose exec -T app ps -o comm -p 1 | tail -1   # должен быть docker-init
+IN_IMAGE="$(docker compose exec -T app printenv VTX_BUILD 2>/dev/null | tr -d '\r' || true)"
+if [ "$IN_IMAGE" = "$VTX_BUILD" ]; then
+  echo "==> В контейнере сборка $IN_IMAGE — совпадает с git."
+else
+  echo "!!  В контейнере сборка «${IN_IMAGE:-?}», в git — $VTX_BUILD: образ НЕ обновился."
+  echo "    Смотрите вывод сборки выше (обычно падает npm/vite или pip)."
+fi

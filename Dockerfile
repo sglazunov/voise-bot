@@ -53,6 +53,11 @@ RUN pip install --upgrade pip wheel && pip install -r requirements.txt
 # instead). Build with:  DIARIZATION=1 docker compose up -d --build app
 # Needs RAM >= 8 GB at runtime; leave 0 on small hosts.
 ARG DIARIZATION=0
+# Метка сборки: короткий хэш коммита, из которого собран образ. Показывается в
+# /healthz и в шапке интерфейса — иначе не отличить, стоит ли на бою новый код
+# или контейнер всё ещё из старого образа (02.09: git был свежий, образ — нет).
+ARG VTX_BUILD=dev
+ENV VTX_BUILD=${VTX_BUILD}
 RUN if [ "$DIARIZATION" = "1" ]; then \
       pip install --no-cache-dir "torch>=2.2,<3" "torchaudio>=2.2,<3" --index-url https://download.pytorch.org/whl/cpu \
       && pip install --no-cache-dir "pyannote.audio>=3.3,<4"; \
