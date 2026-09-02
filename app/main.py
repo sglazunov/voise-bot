@@ -216,14 +216,50 @@ async def _auth_gate(request: Request, call_next):
     return resp
 
 
-# Хэш инлайн-скрипта из frontend/index.html (выставляет тему до загрузки
-# бандла). Пересчитать при изменении скрипта: sha256 тела <script> в base64.
-_CSP = ("default-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; "
-        "style-src 'self' 'unsafe-inline'; font-src 'self' data:; "
-        "script-src 'self' 'sha256-{theme_hash}'; connect-src 'self'; "
-        "frame-ancestors 'none'; object-src 'none'; base-uri 'self'; "
-        "form-action 'self'").format(theme_hash=os.getenv(
-            "VTX_CSP_THEME_HASH", "RvyXR+TwrsIaxYQ4S5hUjStMbeLO2T0Xv8kK1EgOAjc="))
+# Инлайн-скрипты разрешаются ХЭШАМИ, а не 'unsafe-inline'. Хэши считаются
+# по реальному HTML, а не пишутся руками: 02.09 на бою сломались регистрация
+# и вход — в CSP стоял один хэш (тема из index.html), а на странице входа два
+# своих инлайн-скрипта (обработчик формы с «{{ mode }}» внутри и своя тема).
+# Браузер молча блокировал оба: кнопка не делала ничего, ошибок не показывалось.
+_SCRIPT_RE = re.compile(r"<script(?![^>]*\bsrc=)[^>]*>(.*?)</script>", re.S | re.I)
+_CSP_TEMPLATE = ("default-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; "
+                 "style-src 'self' 'unsafe-inline'; font-src 'self' data:; "
+                 "script-src 'self'{scripts}; connect-src 'self'; "
+                 "frame-ancestors 'none'; object-src 'none'; base-uri 'self'; "
+                 "form-action 'self'")
+
+
+def inline_script_hashes(html: str) -> list[str]:
+    """sha256 (base64) тела каждого инлайн-<script> в HTML — для CSP."""
+    import base64
+    import hashlib
+    return [base64.b64encode(hashlib.sha256(m.group(1).encode("utf-8")).digest()).decode()
+            for m in _SCRIPT_RE.finditer(html or "")]
+
+
+def csp_for(hashes) -> str:
+    src = " ".join(f"'sha256-{h}'" for h in dict.fromkeys(hashes))
+    return _CSP_TEMPLATE.format(scripts=(" " + src) if src else "")
+
+
+def _index_hashes() -> list[str]:
+    try:
+        return inline_script_hashes((SPA_DIR / "index.html").read_text(encoding="utf-8"))
+    except OSError:
+        return [os.getenv("VTX_CSP_THEME_HASH", "RvyXR+TwrsIaxYQ4S5hUjStMbeLO2T0Xv8kK1EgOAjc=")]
+
+
+_INDEX_HASHES = _index_hashes()
+_CSP = csp_for(_INDEX_HASHES)
+
+
+def _login_page(request: Request, **ctx) -> HTMLResponse:
+    """Страница входа/регистрации/восстановления с CSP под ЕЁ инлайн-скрипты."""
+    html = templates.get_template("login.html").render({"request": request, **ctx})
+    resp = HTMLResponse(html)
+    resp.headers["Content-Security-Policy"] = csp_for(
+        inline_script_hashes(html) + _INDEX_HASHES)
+    return resp
 
 
 def _cross_site_write(request: Request) -> bool:
@@ -293,16 +329,12 @@ class Credentials(BaseModel):
 def login_page(request: Request):
     if getattr(request.state, "user", None):
         return RedirectResponse("/", status_code=303)
-    return templates.TemplateResponse(
-        "login.html", {"request": request, "mode": "login",
-                       "first_run": not security.list_users()})
+    return _login_page(request, mode="login", first_run=not security.list_users())
 
 
 @app.get("/register", response_class=HTMLResponse)
 def register_page(request: Request):
-    return templates.TemplateResponse(
-        "login.html", {"request": request, "mode": "register",
-                       "first_run": not security.list_users()})
+    return _login_page(request, mode="register", first_run=not security.list_users())
 
 
 @app.post("/api/auth/register")
@@ -499,8 +531,7 @@ def series_forget_last(key: str, user: str = Depends(current_user)):
 # ---- Password recovery by phone (public, heavily throttled) ---------------
 @app.get("/recover", response_class=HTMLResponse)
 def recover_page(request: Request):
-    return templates.TemplateResponse(
-        "login.html", {"request": request, "mode": "recover", "first_run": False})
+    return _login_page(request, mode="recover", first_run=False)
 
 
 class RecoverRequestBody(BaseModel):
