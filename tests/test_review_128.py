@@ -265,6 +265,7 @@ class TestПоПротоколу0209:
                 calls.append(1); raise RuntimeError("HTTP 429: try again in 0s")
 
         monkeypatch.setattr(llm, "_is_rate_limit", lambda e: True)
+        monkeypatch.setattr(llm, "_cooldown_from", lambda e, default=0.0: 0.0)
         monkeypatch.setattr(llm.time, "sleep", lambda s: None)
         prov = llm._RotatingProvider(Hot, "m", [("k1", "")])
         with pytest.raises(RuntimeError, match="суточная квота"):
