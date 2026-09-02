@@ -63,6 +63,12 @@ class TestШумВЗадачах:
         assert [t["task"] for t in res["minor_tasks"]] == ["Переименовать теги"]
         assert len(res["_dropped"]) == 3
 
+    def test_оргфраза_без_слова_доступ_тоже_шум(self):
+        res = {"tasks": [{"task": "Написать Виктору или руководителю после встречи"}],
+               "minor_tasks": [], "done_tasks": []}
+        _drop_noise_tasks(res)
+        assert res["tasks"] == [] and len(res["_dropped"]) == 1
+
     def test_свой_стоп_лист_из_env(self, monkeypatch):
         monkeypatch.setenv("VTX_TASK_STOPLIST", r"кофе;;\bпиццу\b")
         res = {"tasks": [{"task": "Заказать пиццу"}, {"task": "Сварить кофе"}, {"task": "Сделать отчёт"}],
@@ -138,6 +144,16 @@ class TestДочитываниеПроверки:
         hit = _find_support("Обновить сервер и закрыть задачу по конструктору", SPEECH)
         assert hit and hit["t"] == "04:46" and "обновить сервер" in hit["quote"]
         assert _find_support("Купить слона в Африке", SPEECH) is None
+
+    def test_опора_через_уменьшительное_и_тему_из_предыдущей_реплики(self):
+        text = "\n".join([
+            "[22:30] Зоя Р: дальше раздел «Мои наставники» и «Мои ученики».",
+            "[22:40] Кирилл Бубнов: там пока непонятно, что показывать.",
+            "[22:48] Зоя Р: Сделай пока просто плашечку, потом мы отдельно подумаем, что в ней будет.",
+            "[23:10] Зоя Р: ладно, идём дальше.",
+        ])
+        hit = _find_support("Сделать плашку для раздела «Мои наставники/ученики»", text)
+        assert hit and hit["t"] == "22:48" and "плашечку" in hit["quote"]
 
     def test_verify_protocol_подхватывает_опору_без_модели(self, monkeypatch):
         class B:

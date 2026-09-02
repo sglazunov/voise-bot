@@ -1095,6 +1095,9 @@ _TASK_NOISE = [re.compile(pat, re.I) for pat in (
     r"\b(написать|напишите|попросить|обратиться|запросить|написав)\b.{0,50}"
     r"\b(виктор\w*|руководител\w*)\b.{0,50}\bдоступ",
     r"\bдоступ\w*\b.{0,50}\b(виктор\w*|руководител\w*)",
+    # Та же оргфраза ведущего без слова «доступ»: «Написать Виктору или
+    # руководителю после встречи» (протокол ЭМО 02.09 после правок).
+    r"\b(написать|напишите|обратиться)\b.{0,20}\bвиктор\w*\s+или\s+руководител",
     r"\b(включ|выключ|настро|провер|поправ)\w*\s+(микрофон|камер|звук|наушник|гарнитур)",
     r"(протокол-?бот\w*|\bбот[ауе]?\b).{0,60}\b(контекст|стоп-?слов|тест\w*|утк\w*)",
     r"\b(контекст|стоп-?слов|тест\w*)\b.{0,60}(протокол-?бот\w*|\bбот[ауе]?\b)",
@@ -1226,19 +1229,46 @@ def _find_support(point_text: str, text: str) -> dict | None:
     pw = _stems(point_text)
     if len(pw) < 3:
         return None
+
+    def covered(a: set[str], b: set[str]) -> int:
+        # Основа считается найденной и по префиксу: «плашк» ≈ «плашечк»,
+        # «конструктор» ≈ «конструкторн» — уменьшительные и производные
+        # одного слова в речи и в пункте протокола.
+        def same(x: str, y: str) -> bool:
+            if x == y:
+                return True
+            k = 0
+            for cx, cy in zip(x, y):
+                if cx != cy:
+                    break
+                k += 1
+            # Общее начало не короче 4 букв и не меньше ¾ короткой основы.
+            return k >= 4 and k >= 0.75 * min(len(x), len(y))
+
+        return sum(1 for x in a if any(same(x, y) for y in b))
+
     lines = [ln for ln in (text or "").splitlines() if ln.strip()]
+    stems_by_line = [_stems(_strip_labels(ln)) for ln in lines]
     best, best_i = 0.0, -1
+    # Окно ±2 реплики вокруг строки: тема часто названа ДО поручения
+    # («мои наставники…» → «сделай пока просто плашечку»).
     for i in range(len(lines)):
         ws: set[str] = set()
-        for j in range(i, min(len(lines), i + 3)):
-            ws |= _stems(_strip_labels(lines[j]))
-        score = len(pw & ws) / len(pw)
+        for j in range(max(0, i - 2), min(len(lines), i + 3)):
+            ws |= stems_by_line[j]
+        score = covered(pw, ws) / len(pw)
         if score > best:
             best, best_i = score, i
     if best < 0.6 or best_i < 0:
         return None
-    window = lines[best_i:best_i + 3]
-    line = max(window, key=lambda ln: len(pw & _stems(_strip_labels(ln))))
+    window = list(range(max(0, best_i - 2), min(len(lines), best_i + 3)))
+    # Цитата — реплика с самим поручением, а не та, где лишь названа тема:
+    # первое слово пункта (глагол «сделать», «обновить») весит втрое, при
+    # равенстве берётся более поздняя реплика (поручение идёт после темы).
+    first = _stems(point_text.split()[0]) if point_text.split() else set()
+    li = max(window, key=lambda j: (covered(pw, stems_by_line[j])
+                                    + 2 * covered(first, stems_by_line[j]), j))
+    line = lines[li]
     m = _LINE_T_RE.match(line)
     return {"quote": _strip_labels(line).strip()[:300],
             "t": _norm_t(m.group(1)) if m else None}
