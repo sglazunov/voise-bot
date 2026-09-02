@@ -15,10 +15,15 @@
 """
 from __future__ import annotations
 
+import difflib
 import re
 
 # Латинские буквы, неотличимые на вид от кириллических.
 _CONFUSABLES = str.maketrans("ABCEHKMOPTXYaceopxy", "АВСЕНКМОРТХУасеорху")
+# Шире: как OCR читает кириллицу латиницей, когда подпись целиком «уехала» в
+# латиницу («Mapua H» = «Мария Н»). Для сравнения с известными именами.
+_OCR_LATIN = str.maketrans("ABCEHKMOPTXYUNaceopxyumhnbkt",
+                           "АВСЕНКМОРТХУИПасеорхуимнпвкт")
 _CYR_RE = re.compile(r"[А-Яа-яЁё]")
 _LAT_RE = re.compile(r"[A-Za-z]")
 _CYR_WORD_RE = re.compile(r"[А-Яа-яЁё]+")   # слово целиком из кириллицы
@@ -186,3 +191,51 @@ def translit_key(s: str) -> str:
     """Ключ сравнения в одном алфавите — чтобы «Beck» и «Беск» сошлись."""
     low = key(s)
     return "".join(_TRANSLIT.get(ch, ch) for ch in low)
+
+
+def _uncaps(s: str) -> str:
+    """«КИРИЛЛ БУБНОВ» → «Кирилл Бубнов»: подпись капслоком у многословного
+    имени — это стиль, а не смысл. Одиночные капс-слова не трогаем (их
+    отсеивает looks_like_name как надписи с экрана)."""
+    words = s.split()
+    if len(words) >= 2 and all(w == w.upper() and len(w) >= 3 for w in words):
+        return " ".join(w[:1] + w[1:].lower() for w in words)
+    return s
+
+
+def canonical(caption: str, known: list[str] | None = None) -> str:
+    """Подпись плитки → известное имя, если подпись — его искажение.
+
+    Боевые случаи: «ЗЖКИРИЛЛ БУБНОВ» (OCR приклеил мусор спереди), «Mapua H»
+    (вся подпись прочитана латиницей — fold_confusables такое не трогает,
+    потому что настоящая латинская фамилия выглядит так же), «Зоя P».
+    Известные имена берутся из постоянного контекста и карточки серии — их
+    написал человек, им и верим. Без совпадений — только форма (регистр).
+    """
+    c = _uncaps(normalise(caption))
+    ck = key(c)
+    if not ck:
+        return c
+    ct = translit_key(c)
+    # Подпись, прочитанная латиницей целиком: сводим по расширенной таблице
+    # OCR-двойников (u≈и, m≈м, h≈н…) — только для сравнения, не для показа.
+    cf = " ".join(c.translate(_OCR_LATIN).lower().split())
+    for k in known or []:
+        kk = key(k)
+        if not kk:
+            continue
+        if ck == kk:
+            return normalise(k)
+        # Мусор спереди/сзади: «зжкирилл бубнов» кончается на «кирилл бубнов».
+        if len(kk) >= 6 and (ck.endswith(" " + kk) or ck.endswith(kk)) \
+                and len(ck) - len(kk) <= 3:
+            return normalise(k)
+        # Та же подпись в другом алфавите / с парой опечаток OCR: сравниваем
+        # и в транслите, и после сведения латиницы к кириллице целиком
+        # («Mapua H» → «Марuа Н» ≈ «Мария Н»).
+        kt = translit_key(k)
+        if abs(len(kt) - len(ct)) <= 3 and len(kt) >= 5 \
+                and (difflib.SequenceMatcher(None, ct, kt).ratio() >= 0.8
+                     or difflib.SequenceMatcher(None, cf, kk).ratio() >= 0.8):
+            return normalise(k)
+    return c

@@ -626,7 +626,7 @@ export default function Recognition() {
                       onSaved={(a) => { setDetail({ ...detail, analysis: a }); setEditing(false); }} />
                   ) : (
                     <>
-                      <Protocol a={detail.analysis} />
+                      <Protocol a={detail.analysis} jobId={detail.id} />
                       {detail.status === "done" && <AskBlock jobId={detail.id} />}
                     </>
                   )

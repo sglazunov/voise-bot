@@ -1294,14 +1294,32 @@ def _context_block(job: "Job") -> str:
 _name_key = names.key      # общий ключ дедупликации, см. app/names.py
 
 
+def _known_names(job: "Job") -> list[str]:
+    """Имена, которые написал человек: постоянный контекст + карточка серии."""
+    out: list[str] = []
+    try:
+        from . import ai_context
+        out += ai_context.known_names(_team(job.owner))
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        out += meeting_series.known_names(job.owner, job.context_hint or job.filename)
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
 def _tile_names(job: "Job") -> list[str]:
-    """Name-like tile captions of THIS call, deduped (scanner noise dropped)."""
+    """Name-like tile captions of THIS call, deduped (scanner noise dropped).
+    Искажённые OCR подписи («ЗЖКИРИЛЛ БУБНОВ», «Mapua H») приводятся к
+    известным именам из контекста и карточки серии."""
     seen: set[str] = set()
     out: list[str] = []
+    known = _known_names(job)
     for n in (getattr(job, "video_participants", None) or []):
         if not JobStore._looks_like_name(n):
             continue
-        clean = JobStore._strip_ui_badge(n)
+        clean = names.canonical(JobStore._strip_ui_badge(n), known)
         key = _name_key(clean)
         if key in seen:
             continue

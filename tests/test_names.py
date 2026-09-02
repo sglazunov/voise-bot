@@ -166,3 +166,23 @@ class TestУчастникиИзПротокола10_08:
         for real in ("Виктор Мухин", "Мария Н", "Мельников Алексей",
                      "КИРИЛЛ БУБНОВ", "Елизавета"):
             assert real in kept, real
+
+
+class TestCanonical:
+    """Искажённые OCR подписи → известные имена из контекста/карточки серии."""
+    KNOWN = ["Кирилл Бубнов", "Мария Н", "Зоя Р", "Сергей Beck"]
+
+    def test_glued_prefix_and_caps(self):
+        from app import names
+        assert names.canonical("ЗЖКИРИЛЛ БУБНОВ", self.KNOWN) == "Кирилл Бубнов"
+        assert names.canonical("КИРИЛЛ БУБНОВ", []) == "Кирилл Бубнов"
+
+    def test_latin_lookalike_caption(self):
+        from app import names
+        assert names.canonical("Mapua H", self.KNOWN) == "Мария Н"
+        assert names.canonical("Зоя P", self.KNOWN) == "Зоя Р"
+
+    def test_real_latin_surname_and_unknown_kept(self):
+        from app import names
+        assert names.canonical("Сергей Beck", self.KNOWN) == "Сергей Beck"
+        assert names.canonical("Алсу Хусаинова", self.KNOWN) == "Алсу Хусаинова"

@@ -424,6 +424,32 @@ def block_for(user: str, title: str | None) -> str:
     return "\n\n".join(parts)
 
 
+_NAME_PAIR = re.compile(r"\b([А-ЯЁA-Z][а-яёa-z]{2,})\s+([А-ЯЁA-Z][а-яёa-z]{1,})\b")
+
+
+def known_names(user: str, title: str | None) -> list[str]:
+    """Имена участников из карточки серии и памяти о прошлой встрече — для
+    канонизации подписей плиток и подсказки Whisper."""
+    _key, e = find(user, title)
+    if not e:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def add(n: str) -> None:
+        k = n.lower()
+        if k not in seen:
+            seen.add(k)
+            out.append(n)
+
+    for m in _NAME_PAIR.finditer(e.get("context") or ""):
+        add(f"{m.group(1)} {m.group(2)}")
+    for n in ((e.get("last") or {}).get("participants") or []):
+        if n:
+            add(str(n))
+    return out[:60]
+
+
 def pinned_preset(user: str, title: str | None) -> str:
     """Закреплённый в карточке серии тип протокола ('' = не закреплён)."""
     _key, e = find(user, title)

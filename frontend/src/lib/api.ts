@@ -34,6 +34,7 @@ export const api = {
     fetch(p, { method: "POST", headers: json, body: body == null ? undefined : JSON.stringify(body) }).then(handle),
   patch: (p: string, body?: unknown) =>
     fetch(p, { method: "PATCH", headers: json, body: body == null ? undefined : JSON.stringify(body) }).then(handle),
+  del: (p: string) => fetch(p, { method: "DELETE" }).then(handle),
   // raw text (transcript downloads)
   text: (p: string) => fetch(p).then((r) => (r.ok ? r.text() : Promise.reject(new Error(`HTTP ${r.status}`)))),
   // multipart upload with progress (transcription jobs)
