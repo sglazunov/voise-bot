@@ -89,6 +89,10 @@ _LAUNCH_ARGS = [
     "--no-first-run",
     "--no-default-browser-check",
     "--disable-features=Translate,TranslateUI",
+    # Cookies шифруются ключом из хранилища паролей. В контейнере хранилища
+    # нет, и Chromium сам выбирает «basic»; фиксируем это явно, чтобы копия
+    # профиля под слот (см. _slot_profile) расшифровывалась тем же ключом.
+    "--password-store=basic",
 ]
 # In a Linux container Chromium must run without the sandbox (esp. as root) and
 # not rely on the tiny default /dev/shm. Audio just follows the default Pulse
@@ -209,6 +213,50 @@ def _profile_dir(cfg: dict) -> Path:
     return base
 
 
+# Что НЕ копировать в профиль слота: кэши (сотни мегабайт и бесполезны),
+# замки одиночного экземпляра и служебные каталоги. Cookies, Local State,
+# Local Storage и Preferences — остаются: в них и живёт вход в Яндекс.
+_PROFILE_SKIP = ("Cache", "Code Cache", "GPUCache", "ShaderCache", "GrShaderCache",
+                 "DawnCache", "DawnGraphiteCache", "DawnWebGPUCache", "CacheStorage",
+                 "Service Worker", "blob_storage", "Crashpad", "BrowserMetrics*",
+                 "Singleton*", "*.lock", "lockfile", "*.log", "*-journal")
+
+
+def _slot_profile(master: Path, tag: str, on_log=None) -> Path:
+    """Копия залогиненного профиля ДЛЯ ОДНОГО СЛОТА записи.
+
+    Боевой случай 02.09: две встречи внахлёст (15:30 ещё писалась, 16:00
+    стартовала), режим profile. Оба бота открывали Chromium на ОДНОМ каталоге
+    профиля, причём второй запуск ещё и стирал SingletonLock первого. Второй
+    процесс не получал базу cookies (SQLite занята первым), Телемост не видел
+    входа в Яндекс — «Не удалось войти в встречу». Как только первая встреча
+    закончилась и профиль освободился, повторный заход прошёл.
+
+    Chromium принципиально не делит каталог профиля между процессами, поэтому
+    у каждого слота — своя копия мастера (`<профиль>-slot<тег>`), обновляемая
+    перед каждым запуском. Кэши не копируются: остаётся несколько десятков
+    мегабайт, копия занимает секунды. Мастер при этом никто не держит открытым,
+    так что окно входа и проверка входа тоже больше не конфликтуют с записью.
+    """
+    log = on_log or (lambda *_: None)
+    safe = re.sub(r"[^0-9A-Za-z_-]+", "", tag) or "solo"
+    clone = master.parent / f"{master.name}-slot{safe}"
+    shutil.rmtree(clone, ignore_errors=True)
+    try:
+        shutil.copytree(master, clone, symlinks=False, dirs_exist_ok=True,
+                        ignore=shutil.ignore_patterns(*_PROFILE_SKIP))
+    except (OSError, shutil.Error) as e:
+        # Частично скопированный профиль хуже пустого: Chromium на нём
+        # падает непонятно. Лучше честный гостевой заход и строка в логе.
+        log(f"Не удалось скопировать профиль бота ({e}); захожу без входа.")
+        shutil.rmtree(clone, ignore_errors=True)
+        clone.mkdir(parents=True, exist_ok=True)
+        return clone
+    size = sum(f.stat().st_size for f in clone.rglob("*") if f.is_file())
+    log(f"Профиль бота скопирован для слота {safe} ({size // (1024 * 1024)} МБ).")
+    return clone
+
+
 class TelemostBot:
     """Drive a Chromium instance into a Telemost call and back out."""
 
@@ -250,13 +298,12 @@ class TelemostBot:
         # dir sidesteps that entirely. The authenticated profile must persist, so
         # there we just clear any stale lock left by a crashed run.
         if use_profile:
-            user_dir = str(_profile_dir(self.cfg))
-            Path(user_dir).mkdir(parents=True, exist_ok=True)
-            for lock in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
-                try:
-                    (Path(user_dir) / lock).unlink()
-                except OSError:
-                    pass
+            # Не сам мастер-профиль, а его копия под этот слот: два бота на
+            # одном каталоге не живут (см. _slot_profile). Замки в копию не
+            # попадают, стирать их у работающего соседа больше не нужно.
+            master = _profile_dir(self.cfg)
+            tag = (self._display or "").lstrip(":") or "solo"
+            user_dir = str(_slot_profile(master, tag, on_log=self._on_log))
         else:
             user_dir = tempfile.mkdtemp(prefix="tm-guest-")
             self._temp_profile = user_dir
