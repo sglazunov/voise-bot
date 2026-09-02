@@ -1,8 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   Mic, UploadCloud, FileAudio, Sparkles, Users, Monitor, Loader2, RotateCcw,
-  Download, FileText, X, CalendarDays,
-} from "lucide-react";
+  Download, FileText, X, CalendarDays, ChevronDown } from "lucide-react";
 import { Page } from "../components/Layout";
 import { Card, Ellipsis, Select, useToast } from "../components/ui";
 import { api } from "../lib/api";
@@ -64,7 +63,23 @@ export default function Recognition() {
     const { context_hint, user_notes, ...persist } = opts;
     try { localStorage.setItem("vtx-recognition-opts", JSON.stringify(persist)); } catch { /* quota */ }
   }, [opts]);
+  // Тип встречи, контекст, заметки и переключатели свёрнуты по умолчанию:
+  // форма занимала весь экран, история уезжала вниз. Состояние запоминается.
+  const [moreOpen, setMoreOpen] = useState<boolean>(() => {
+    try { return localStorage.getItem("vtx-recognition-more") === "1"; } catch { return false; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem("vtx-recognition-more", moreOpen ? "1" : "0"); } catch { /* quota */ }
+  }, [moreOpen]);
   const [presets, setPresets] = useState<{ value: string; label: string }[]>([]);
+  // Свёрнутая строка «Дополнительно»: что сейчас выбрано, без раскрытия.
+  const TOGGLE_LABELS: Record<string, string> = {
+    analyze: "Протокол", diarize: "Спикеры (аудио)", identify_speakers: "Спикеры (видео)", capture_screen: "OCR экрана" };
+  const moreSummary = [
+    presets.find((x) => x.value === opts.preset)?.label,
+    ...Object.keys(TOGGLE_LABELS).filter((k) => opts[k]).map((k) => TOGGLE_LABELS[k]),
+    opts.user_notes ? "заметки" : "",
+  ].filter(Boolean).join(" · ");
   useEffect(() => { api.get("/api/presets").then((d) => setPresets(d.presets || [])).catch(() => {}); }, []);
   const [recommend, setRecommend] = useState("");
   useEffect(() => { api.get("/api/system/recommend").then((d) => setRecommend(d.detail || "")).catch(() => {}); }, []);
@@ -381,6 +396,20 @@ export default function Recognition() {
                 Cloud. */}
             <EngineSelect engines={engines} value={opts.provider}
               onChange={(v) => setOpts({ ...opts, provider: v })} />
+            <button type="button" onClick={() => setMoreOpen((v) => !v)}
+              className="w-full flex items-center gap-2 mt-3 text-left"
+              style={{ background: "none", border: 0, padding: 0, cursor: "pointer", color: "var(--txt)" }}
+              aria-expanded={moreOpen} aria-controls="rec-more">
+              <ChevronDown size={15} color="var(--muted)" aria-hidden="true"
+                style={{ transition: "transform .15s", transform: moreOpen ? "rotate(180deg)" : "none" }} />
+              <span className="text-[12.5px] font-semibold">Дополнительно</span>
+              {!moreOpen && (
+                <Ellipsis as="span" className="text-[11.5px] min-w-0 flex-1" style={{ color: "var(--muted)" }}>
+                  {moreSummary || "тип встречи, контекст, заметки, спикеры, OCR"}
+                </Ellipsis>
+              )}
+            </button>
+            {moreOpen && (<div id="rec-more">
             <label className="lbl mt-3">Тип встречи (пресет протокола)</label>
             <Select value={opts.preset} onChange={(v) => setOpts({ ...opts, preset: v })}
               options={presets.length ? presets : [{ value: "universal", label: "Универсальный" }]} />
@@ -407,6 +436,7 @@ export default function Recognition() {
                 </button>
               ))}
             </div>
+            </div>)}
           </Card>
 
           <Card>
