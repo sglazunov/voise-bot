@@ -726,6 +726,7 @@ def analyze_transcript(transcript_text: str, provider: str | None = None,
         result[list_key] = _normalise_tasks(result.get(list_key, []))
     result["statuses"] = _normalise_statuses(result.get("statuses", []))
     _drop_noise_tasks(result)
+    _dedup_decisions(result)
     result["detailed"] = merge_similar_topics(_normalise_detailed(result["detailed"]))
     result["_provider"] = backend.name
     spoken = speech_words(text)
@@ -1094,6 +1095,25 @@ def _task_noise() -> list[re.Pattern]:
         except re.error:
             continue
     return out
+
+
+def _dedup_decisions(result: dict) -> None:
+    """Решение, повторяющее задачу («Елизавета отправит скан договора» ↔
+    задача «Отправить скан договора»), — не решение. Промпт это запрещает, но
+    модель нарушает; убираем механически, задача остаётся (она действенная).
+    Зовётся ДО проверки цитат — индексы verification не сдвигаются."""
+    pools = [_stems(str(t.get("task") or "")) for k in ("tasks", "minor_tasks", "done_tasks")
+             for t in (result.get(k) or []) if isinstance(t, dict)]
+    keep, dropped = [], []
+    for d in result.get("decisions") or []:
+        ds = _stems(str(d))
+        # Считаем от КОРОТКОЙ стороны: задача обычно короче решения-пересказа.
+        dup = len(ds) >= 3 and any(
+            len(ps) >= 3 and len(ds & ps) / min(len(ds), len(ps)) >= 0.66 for ps in pools)
+        (dropped if dup else keep).append(d)
+    result["decisions"] = keep
+    if dropped:
+        result.setdefault("_dropped", []).extend(dropped)
 
 
 def _drop_noise_tasks(result: dict) -> None:

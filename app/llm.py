@@ -433,6 +433,9 @@ _DEAD_KEY_SEC = 24 * 3600.0
 # несколько минут, чем получить пустой протокол: окно ожидания расширено.
 KEY_WAIT_SEC = float(os.getenv("VTX_KEY_WAIT_SEC", "240"))
 KEY_TOTAL_WAIT_SEC = float(os.getenv("VTX_KEY_TOTAL_WAIT_SEC", "900"))
+# Суточная квота отвечает тем же 429 с «retry in 30s» — ждать её бесполезно.
+# После стольких ожиданий подряд в одном запросе движок считается выбывшим.
+KEY_MAX_WAITS = int(os.getenv("VTX_KEY_MAX_WAITS", "3"))
 
 
 def _cooldown_from(e: Exception, default: float = _KEY_COOLDOWN_SEC) -> float:
@@ -517,6 +520,7 @@ class _RotatingProvider:
         n = len(self._creds)
         deadline = time.time() + KEY_TOTAL_WAIT_SEC
         kw = {"should_stop": should_stop} if self.accepts_should_stop else {}
+        waits = 0
         while True:
             now = time.time()
             order = [(self._i + k) % n for k in range(n)]
@@ -558,11 +562,16 @@ class _RotatingProvider:
             # Ждём только живые ключи: отвергнутый лежит сутки, и по нему
             # ожидание вышло бы бесконечным.
             wait = max(min(self._cooldown.get(i, 0.0) for i in alive) - time.time(), 0.5)
+            if waits >= KEY_MAX_WAITS:
+                raise RuntimeError(
+                    f"«{self.name}» отвечает 429 уже {waits} раза подряд после ожидания — "
+                    "похоже, исчерпана суточная квота, а не минутное окно.")
             if wait > KEY_WAIT_SEC or time.time() + wait > deadline:
                 raise RuntimeError(
                     f"Все {n} ключа(ей) «{self.name}» упёрлись в лимит, сброс "
                     f"через ~{int(wait)} с — это дольше обычного окна. "
                     "Добавьте ещё ключ или выберите другой движок.")
+            waits += 1
             time.sleep(wait + 0.3)
 
 

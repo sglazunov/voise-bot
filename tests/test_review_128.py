@@ -235,3 +235,38 @@ class TestWordЭкспорт:
             "_carried": {"date": "25.08.2026", "items": [{"task": "Найти документ", "owner": "", "status": "без упоминания"}]}})
         assert any("не надо в мсу" in p for p in paras)
         assert "Найти документ" in cells and "без упоминания" in cells
+
+
+class TestПоПротоколу0209:
+    """Сравнение двух протоколов «Встреча лидеров» 02.09 (до/после правок)."""
+
+    def test_усечённое_обращение_ань_лиз_серёж(self):
+        known = ["Анна Румянцева", "Елизавета", "Сергей Beck"]
+        assert names.addressee("Ань, ты сможешь прописать, разработать текст", known) == "Анна Румянцева"
+        assert names.addressee("Лиз, скинь фильм", known) == "Елизавета"
+        assert names.addressee("Серёж, глянь курс", known) == "Сергей Beck"
+        assert names.addressee("Да, конечно, у меня есть фильм", known) == ""
+
+    def test_решение_дублирующее_задачу_убирается(self):
+        res = {"decisions": ["Елизавета отправит скан договора, оригинал — на Открытое шоссе",
+                             "Убрать кнопку «Волонтёры» с сайта"],
+               "tasks": [], "minor_tasks": [{"task": "Отправить скан договора"}], "done_tasks": []}
+        analyze._dedup_decisions(res)
+        assert res["decisions"] == ["Убрать кнопку «Волонтёры» с сайта"]
+        assert "скан договора" in res["_dropped"][0]
+
+    def test_ожидание_лимита_не_больше_трёх_раундов(self, monkeypatch):
+        calls = []
+
+        class Hot:
+            name = "gemini"
+            def __init__(self, model=None, api_key=None, extra=None): pass
+            def complete(self, *a, **k):
+                calls.append(1); raise RuntimeError("HTTP 429: try again in 0s")
+
+        monkeypatch.setattr(llm, "_is_rate_limit", lambda e: True)
+        monkeypatch.setattr(llm.time, "sleep", lambda s: None)
+        prov = llm._RotatingProvider(Hot, "m", [("k1", "")])
+        with pytest.raises(RuntimeError, match="суточная квота"):
+            prov.complete("x")
+        assert len(calls) == llm.KEY_MAX_WAITS + 1
