@@ -15,17 +15,25 @@ function VerifyMark({ v }: { v?: Verify }) {
   if (v === null || v === undefined) return null;
   if (!v.ok) {
     return (
-      <span className="ml-1.5 chip whitespace-nowrap text-[10.5px]"
-        style={{ color: "var(--warn)", background: "rgba(251,191,36,.12)" }}
-        title={v.note || "В расшифровке не нашлось дословного подтверждения — проверьте пункт"}>
-        ⚠ {v.note ? v.note : "проверьте"}</span>
+      <>
+        <span className="ml-1.5 chip whitespace-nowrap text-[10.5px]"
+          style={{ color: "var(--warn)", background: "rgba(251,191,36,.12)" }}
+          title={v.note || "В расшифровке не нашлось дословного подтверждения — проверьте пункт"}>
+          ⚠ {v.note ? v.note : "проверьте"}</span>
+        {/* Цитаты нет, но место в разговоре нашлось по словам пункта: это
+            ориентир, где слушать, а НЕ подтверждение — так и написано. */}
+        {v.t && <span className="ml-1.5 text-[11px]" style={{ color: "var(--muted)" }}>
+          без основания · примерно {v.t}</span>}
+      </>
     );
   }
   if (!v.quote) return null;
   return (
     <details className="mt-0.5">
       <summary className="text-[11px] cursor-pointer" style={{ color: "var(--muted)" }}>
-        основание{v.t ? ` · ${v.t}` : ""}{v.source === "notes" ? " · из заметок" : ""}{v.match === "approx" ? " · ≈" : ""}
+        {/* Значка «≈» больше нет: «цитата приблизительная» и «основания нет»
+            — разные вещи, и различает их слово, а не значок. */}
+        основание{v.t ? ` · ${v.t}` : ""}{v.source === "notes" ? " · из заметок" : ""}{v.match === "approx" ? " · цитата приблизительная" : ""}
         {v.note ? ` · ${v.note}` : ""}{v.owner_source === "обращение" ? " · ответственный из обращения" : ""}</summary>
       <div className="text-[11.5px] italic mt-0.5 pl-2" style={{ color: "var(--muted)", borderLeft: "2px solid var(--line)" }}>
         «{v.quote}»</div>

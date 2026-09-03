@@ -12,7 +12,7 @@ import json
 import pytest
 
 from app import analyze, analyze_prompts, llm, meeting_series, names
-from app.analyze import (_LABEL_RE, _drop_noise_tasks, _find_support, _norm_t,
+from app.analyze import (_LABEL_RE, _drop_noise_tasks, _find_support,
                          _refine_tasks, check_topics)
 
 SPEECH = "\n".join([
@@ -30,25 +30,9 @@ SPEECH = "\n".join([
 
 
 class TestТаймкодыИМетки:
-    def test_ноль_часов_и_чмс_приводятся_к_ммсс(self):
-        assert _norm_t("[013:01]") == "13:01"
-        assert _norm_t("021:22") == "21:22"
-        assert _norm_t("00:40:39") == "40:39"
-        assert _norm_t("1:05:03") == "65:03"
-        assert _norm_t("12:07") == "12:07"
-        assert _norm_t("") is None and _norm_t(None) is None
-
-    def test_ложный_час_снимается_по_меткам_расшифровки(self):
-        labels = {"13:01", "21:22", "06:34"}
-        assert _norm_t("01:13:01", labels, 68) == "13:01"
-        assert _norm_t("02:21:22", labels, 68) == "21:22"
-        assert _norm_t("01:13:01", set(), 68) == "13:01"          # 73 > 68 минут
-        assert _norm_t("01:05:03", {"65:03"}, 120) == "65:03"     # настоящий час
-        assert _norm_t("00:40:39", set(), None) == "40:39"
-        # Модель уже сложила ложный час в минуты: «96:34» при встрече в 68 минут.
-        assert _norm_t("96:34", {"36:34", "63:11"}, 68) == "36:34"
-        assert _norm_t("111:20", set(), 68) == "51:20"
-        assert _norm_t("63:11", {"36:34", "63:11"}, 68) == "63:11"      # настоящие 63 минуты
+    # Прежние тесты про _norm_t сняты вместе с самой функцией: время больше не
+    # приходит от модели и чинить её «ложные часы» нечего — оно берётся из
+    # расшифровки по найденной цитате (tests/test_timecodes.py).
 
     def test_метка_с_трёхзначными_минутами_вырезается(self):
         assert _LABEL_RE.sub("", "[013:01] Зоя Р: текст") == "текст"
@@ -145,8 +129,10 @@ class TestДочитываниеПроверки:
         assert len(res["tasks"]) == len(ver["tasks"]) == 3
 
     def test_опора_ищется_по_основам_когда_модель_цитату_не_нашла(self):
+        # Опора — только текст реплики: время ставится позже, по индексу
+        # расшифровки, потому что у большинства строк своей метки нет.
         hit = _find_support("Обновить сервер и закрыть задачу по конструктору", SPEECH)
-        assert hit and hit["t"] == "04:46" and "обновить сервер" in hit["quote"]
+        assert hit and "обновить сервер" in hit["quote"] and "t" not in hit
         assert _find_support("Купить слона в Африке", SPEECH) is None
 
     def test_опора_через_уменьшительное_и_тему_из_предыдущей_реплики(self):
@@ -157,7 +143,7 @@ class TestДочитываниеПроверки:
             "[23:10] Зоя Р: ладно, идём дальше.",
         ])
         hit = _find_support("Сделать плашку для раздела «Мои наставники/ученики»", text)
-        assert hit and hit["t"] == "22:48" and "плашечку" in hit["quote"]
+        assert hit and "плашечку" in hit["quote"]
 
     def test_verify_protocol_подхватывает_опору_без_модели(self, monkeypatch):
         class B:
@@ -169,6 +155,7 @@ class TestДочитываниеПроверки:
                "minor_tasks": [], "done_tasks": [], "decisions": [], "detailed": []}
         out = analyze.verify_protocol(res, SPEECH)
         v = out["verification"]["tasks"][0]
+        # Время — метки той самой реплики, найденной механическим поиском.
         assert v["ok"] and v["match"] == "approx" and v["t"] == "04:46"
 
 

@@ -16,6 +16,7 @@ truncated away.
 """
 from __future__ import annotations
 
+import bisect
 import difflib
 import json
 import os
@@ -994,48 +995,53 @@ def _stems(text: str) -> set[str]:
 # скопированная через границу двух реплик, метку не содержит; вырезаем её из
 # фрагмента ПЕРЕД сравнением, иначе такая цитата «не дословна».
 _LABEL_RE = re.compile(r"\[\d{1,3}:\d{2}(?::\d{2})?\]\s*(?:[^:\n]{0,40}:)?\s*")
-_T_RE = re.compile(r"(\d{1,3}):(\d{2})(?::(\d{2}))?")
 _LINE_T_RE = re.compile(r"^\s*\[(\d{1,3}:\d{2}(?::\d{2})?)\]")
+_HINT_T_RE = re.compile(r"(\d{1,3}):(\d{2})(?::(\d{2}))?")
 
 
-def _norm_t(t, labels: set[str] | None = None, max_min: int | None = None) -> str | None:
-    """Таймкод модели → «мм:сс».
+def _fmt_t(sec: int) -> str:
+    """Секунда → та же форма, что в просмотрщике расшифровки (Transcript.tsx
+    fmtTs): «мм:сс» до часа, «ч:мм:сс» начиная с часа. Форма «73:01» не
+    выдаётся — её нет ни в расшифровке, ни на экране, и человек ищет по ней
+    впустую."""
+    h, rem = divmod(int(sec), 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
-    Модель дописывает ложные часы: «[013:01]», «[021:22]», а на встрече 02.09
-    (68 минут) — «01:13:01» и «02:21:22», то есть 73 и 141 минута там, где
-    было 13:01 и 21:22. Поэтому форма ч:мм:сс НЕ доверяется слепо: из двух
-    прочтений (с часом и без) берётся то, которое есть среди меток
-    расшифровки `labels`, иначе — не выходящее за её длину `max_min`,
-    иначе — без часа."""
-    m = _T_RE.search(str(t or ""))
-    if not m:
+
+def _parse_label_sec(t: str) -> int | None:
+    """Метка расшифровки («[04:46]» или боевое «[00:04:46]») → секунды."""
+    parts = t.split(":")
+    try:
+        nums = [int(p) for p in parts]
+    except ValueError:
         return None
+    if len(nums) == 3:
+        return nums[0] * 3600 + nums[1] * 60 + nums[2]
+    if len(nums) == 2:
+        return nums[0] * 60 + nums[1]
+    return None
+
+
+def _hint_seconds(t) -> list[int]:
+    """Прочтения таймкода МОДЕЛИ — только как подсказка выбора между
+    настоящими вхождениями цитаты (Т2). Своего времени модель не создаёт,
+    поэтому и разбирать её ответ строго незачем: она дописывает ложный час
+    («01:13:01» вместо 13:01, «96:34» вместо 36:34), и вместо угадывания
+    верного прочтения мы возвращаем ВСЕ правдоподобные — ближайшее реальное
+    вхождение всё равно выбирается из расшифровки."""
+    m = _HINT_T_RE.search(str(t or ""))
+    if not m:
+        return []
     a, b, c = m.groups()
     if c is None:
         mins, secs = int(a), int(b)
-        # «96:34» на встрече в 68 минут — модель уже сложила ложный час в
-        # минуты (36:34 + 60). Снимаем часы, пока не попадём в метки или в
-        # длину встречи.
-        if max_min is not None and mins > max_min:
-            while mins > max_min and mins >= 60:
-                mins -= 60
-        elif labels and f"{mins:02d}:{secs:02d}" not in labels:
-            m2 = mins
-            while m2 >= 60 and f"{m2:02d}:{secs:02d}" not in labels:
-                m2 -= 60
-            if f"{m2:02d}:{secs:02d}" in labels:
-                mins = m2
-        return f"{mins:02d}:{secs:02d}"
-    with_h = f"{int(a) * 60 + int(b):02d}:{int(c):02d}"
-    no_h = f"{int(b):02d}:{int(c):02d}"
-    if labels:
-        if with_h in labels:
-            return with_h
-        if no_h in labels:
-            return no_h
-    if max_min is not None and int(a) * 60 + int(b) > max_min:
-        return no_h
-    return with_h if int(a) > 0 else no_h
+        out = [mins * 60 + secs]
+        while mins >= 60:                      # ложный час, сложенный в минуты
+            mins -= 60
+            out.append(mins * 60 + secs)
+        return out
+    return [int(a) * 3600 + int(b) * 60 + int(c), int(b) * 60 + int(c)]
 
 
 def _strip_labels(s: str) -> str:
@@ -1097,6 +1103,102 @@ class _Fragment:
             if difflib.SequenceMatcher(None, qt, window).ratio() >= _APPROX_RATIO:
                 return "approx"
         return None
+
+
+class _TimeIndex:
+    """Где какая секунда в расшифровке: строки речи со смещением в
+    нормализованном тексте и временем.
+
+    Держится на свойстве, проверенном на корпусах и закреплённом тестом:
+    нормализация строк, склеенная пробелами, побайтово равна нормализации
+    всего текста целиком. Поэтому индекс ищет цитату по ТОЙ ЖЕ строке, по
+    которой `_Fragment.match` признаёт дословность, и случай «цитата
+    подтверждена, а локатор её не нашёл» невозможен.
+
+    Две особенности боевого формата (`formats.to_txt`):
+    * метки бывают и «[04:46]» (фикстуры), и «[00:04:46]» (бой);
+    * у большинства строк метки НЕТ вовсе — при известном говорящем она стоит
+      только в шапке блока, поэтому строка наследует время последней метки
+      выше. Отсюда честная формулировка результата: это время реплики
+      говорящего, а не строки.
+    """
+
+    def __init__(self, text: str):
+        self.norm = _norm_for_match(_strip_labels(text or ""))
+        self.tokens = self.norm.split()
+        self.word_at: dict[str, list[int]] = {}
+        for i, t in enumerate(self.tokens):
+            self.word_at.setdefault(t, []).append(i)
+        # Смещение каждого слова в символах — чтобы от найденного окна слов
+        # вернуться к строке, а от неё к секунде.
+        self.tok_pos: list[int] = []
+        pos = 0
+        for t in self.tokens:
+            self.tok_pos.append(pos)
+            pos += len(t) + 1
+        # Границы строк в тех же символьных смещениях + их время.
+        self.starts: list[int] = []
+        self.secs: list[int | None] = []
+        cur: int | None = None
+        off = 0
+        for line in (text or "").splitlines():
+            m = _LINE_T_RE.match(line)
+            if m:
+                sec = _parse_label_sec(m.group(1))
+                if sec is not None:
+                    cur = sec
+            n = _norm_for_match(_strip_labels(line))
+            if not n:
+                continue                      # пустая строка: речи в ней нет
+            self.starts.append(off)
+            self.secs.append(cur)
+            off += len(n) + 1
+
+    def _sec_at(self, offset: int) -> int | None:
+        """Секунда строки, в которой начинается найденное место (Т7: цитата
+        через границу двух реплик получает время первой)."""
+        i = bisect.bisect_right(self.starts, offset) - 1
+        return self.secs[i] if 0 <= i < len(self.secs) else None
+
+    def locate(self, quote: str) -> list[int]:
+        """ВСЕ вхождения цитаты → список секунд (Т3: их число показывает
+        масштаб неоднозначности, а не угадывается).
+
+        Мягкий поиск не строже `_Fragment.match`: кандидаты берутся и по
+        самому редкому слову цитаты (Т12 — опечатка в первом слове увела бы
+        поиск), и по первым двум словам, как в самой сверке."""
+        qn = _norm_for_match(_strip_labels(quote))
+        if len(qn) < _MIN_QUOTE_CHARS:         # «Да, беру» повторяется десятками
+            return []
+        hits: list[int] = []
+        at = self.norm.find(qn)
+        while at >= 0:
+            hits.append(at)
+            at = self.norm.find(qn, at + 1)
+        if hits:
+            return [s for s in (self._sec_at(h) for h in hits) if s is not None]
+        qt = qn.split()
+        if len(qt) < 4:
+            return []
+        rare = min(range(len(qt)), key=lambda i: (len(self.word_at.get(qt[i], ())) or 10**6))
+        starts: set[int] = {i - rare for i in self.word_at.get(qt[rare], ()) if i >= rare}
+        starts |= set(self.word_at.get(qt[0], ()))
+        starts |= {i - 1 for i in self.word_at.get(qt[1], ()) if i > 0}
+        approx: list[int] = []
+        for s in sorted(starts):
+            if s < 0 or s >= len(self.tok_pos):
+                continue
+            for extra in (1, 0):
+                window = self.tokens[s:s + len(qt) + extra]
+                if difflib.SequenceMatcher(None, qt, window).ratio() >= _APPROX_RATIO:
+                    off = self.tok_pos[s]
+                    # Сдвинутое на слово окно той же реплики — то же самое
+                    # место, а не второе вхождение: иначе число вхождений
+                    # (Т3) раздувается и подсказка модели выбирает из копий.
+                    if not approx or off - approx[-1] > len(qn) // 2:
+                        approx.append(off)
+                    break
+        return [s for s in (self._sec_at(a) for a in approx) if s is not None]
 
 
 # Шаблонные фразы, которые модель раз за разом оформляет задачами (ревью 128
@@ -1234,11 +1336,46 @@ def check_topics(result: dict, transcript_text: str) -> dict:
     return result
 
 
-def _find_support(point_text: str, text: str) -> dict | None:
+_LINES_CACHE: tuple[str, list[str], list[set[str]]] | None = None
+
+
+def _speech_lines(text: str) -> tuple[list[str], list[set[str]]]:
+    """Непустые строки речи и основы слов каждой.
+
+    Кэш на один текст: `_find_support` вызывается по КАЖДОМУ пункту без
+    подтверждения, а разбор 900 строк стоит ~45 мс — на протоколе с двумя
+    десятками таких пунктов это лишняя секунда на ровном месте, теперь ещё и
+    удвоенная поиском времени (Т16). Кортеж присваивается целиком, поэтому
+    параллельные вызовы могут разве что промахнуться мимо кэша."""
+    global _LINES_CACHE
+    cached = _LINES_CACHE
+    if cached is not None and cached[0] == text:
+        return cached[1], cached[2]
+    lines = [ln for ln in (text or "").splitlines() if ln.strip()]
+    stems_by_line = [_stems(_strip_labels(ln)) for ln in lines]
+    _LINES_CACHE = (text, lines, stems_by_line)
+    return lines, stems_by_line
+
+
+# Доля основ слов пункта, найденных в окне речи. `_SUPPORT_MIN` подтверждает
+# пункт (цитата становится основанием), `_TIME_HINT_MIN` — только показывает
+# место в разговоре (Т16). Понижение обязательно: до этой добавки доходят
+# ровно те пункты, на которых поиск с `_SUPPORT_MIN` уже вернул пустоту, и с
+# тем же порогом добавка не нашла бы ничего.
+_SUPPORT_MIN = 0.6
+_TIME_HINT_MIN = 0.35
+
+
+def _find_support(point_text: str, text: str,
+                  threshold: float = _SUPPORT_MIN) -> dict | None:
     """Опора для пункта, когда модель цитату не нашла или переврала: окно в три
-    реплики, где есть ≥60 % основ слов пункта. Ревью 128 протоколов: «Обновить
-    сервер и закрыть задачу по конструктору» ушло в «требуют проверки», хотя в
-    речи на 04:46–04:57 это сказано почти дословно."""
+    реплики, где есть ≥`threshold` основ слов пункта. Ревью 128 протоколов:
+    «Обновить сервер и закрыть задачу по конструктору» ушло в «требуют
+    проверки», хотя в речи на 04:46–04:57 это сказано почти дословно.
+
+    С порогом `_SUPPORT_MIN` находка ПОДТВЕРЖДАЕТ пункт, поэтому планка
+    высокая. С пониженным `_TIME_HINT_MIN` (Т16) та же функция ищет только
+    место в разговоре — подтверждением такая находка не становится."""
     pw = _stems(point_text)
     if len(pw) < 3:
         return None
@@ -1260,8 +1397,7 @@ def _find_support(point_text: str, text: str) -> dict | None:
 
         return sum(1 for x in a if any(same(x, y) for y in b))
 
-    lines = [ln for ln in (text or "").splitlines() if ln.strip()]
-    stems_by_line = [_stems(_strip_labels(ln)) for ln in lines]
+    lines, stems_by_line = _speech_lines(text)
     best, best_i = 0.0, -1
     # Окно ±2 реплики вокруг строки: тема часто названа ДО поручения
     # («мои наставники…» → «сделай пока просто плашечку»).
@@ -1272,7 +1408,7 @@ def _find_support(point_text: str, text: str) -> dict | None:
         score = covered(pw, ws) / len(pw)
         if score > best:
             best, best_i = score, i
-    if best < 0.6 or best_i < 0:
+    if best < threshold or best_i < 0:
         return None
     window = list(range(max(0, best_i - 2), min(len(lines), best_i + 3)))
     # Цитата — реплика с самим поручением, а не та, где лишь названа тема:
@@ -1281,10 +1417,10 @@ def _find_support(point_text: str, text: str) -> dict | None:
     first = _stems(point_text.split()[0]) if point_text.split() else set()
     li = max(window, key=lambda j: (covered(pw, stems_by_line[j])
                                     + 2 * covered(first, stems_by_line[j]), j))
-    line = lines[li]
-    m = _LINE_T_RE.match(line)
-    return {"quote": _strip_labels(line).strip()[:300],
-            "t": _norm_t(m.group(1)) if m else None}
+    # Время не берётся из метки этой строки: у большинства строк её нет, а
+    # наследование метки шапки блока знает только `_TimeIndex`. Опора —
+    # только текст, время ставится одной функцией позже (Т11).
+    return {"quote": _strip_labels(lines[li]).strip()[:300]}
 
 
 def _lines_after(text: str, quote: str, k: int = 3) -> list[str]:
@@ -1375,6 +1511,72 @@ def _collect_points(result: dict) -> list[tuple[str, int, str, str]]:
     return points
 
 
+def _point_text(item) -> str:
+    return str(item.get("task") or "").strip() if isinstance(item, dict) else str(item).strip()
+
+
+def _pick_sec(secs: list[int], hint) -> int:
+    """Т4: одно вхождение — оно; несколько и есть подсказка модели —
+    ближайшее к ней; несколько без подсказки — первое. Подсказка выбирает
+    между НАСТОЯЩИМИ местами разговора, а не создаёт время."""
+    readings = _hint_seconds(hint) if len(secs) > 1 else []
+    if not readings:
+        return secs[0]
+    return min(secs, key=lambda s: min(abs(s - r) for r in readings))
+
+
+def _apply_transcript_times(result: dict, ver: dict, text: str, weak: bool = True) -> None:
+    """Время в основании — время реплики, в которой нашлась цитата.
+
+    Замер по шести боевым протоколам: цитата находится в расшифровке в 100 %
+    случаев, а время, названное моделью, точно лишь в 35 %, мимо больше
+    минуты — в 16 %, и каждое четвёртое вообще отсутствует среди меток
+    расшифровки (человек открывал запись и слышал другой разговор).
+
+    Проверку эта функция не трогает ни при каких обстоятельствах (Т9):
+    восстановление времени не умеет ни подтверждать пункты, ни опровергать
+    их. `weak` — искать ли место пунктам без цитаты (Т16); при сорвавшейся
+    проверке такие записи всё равно обнуляются в `None`.
+    """
+    index = _TimeIndex(text)
+    for key in _VERIFIED_LISTS:
+        items = result.get(key) or []
+        for idx, v in enumerate(ver.get(key) or []):
+            if not isinstance(v, dict):
+                continue                      # пункт не проверялся
+            # Подсказка модели дальше этой функции не идёт: в записи протокола
+            # её времени не место (Т2).
+            hint = v.pop("t_hint", None)
+            v["t"] = None
+            v.pop("t_hits", None)
+            v.pop("t_approx", None)
+            quote = str(v.get("quote") or "")
+            if quote:
+                # Заметки участника (Т10): времени в них нет, а модельное
+                # было чистой выдумкой. Опровергнутый пункт (`ok` снят в
+                # _refine_tasks) времени тоже не получает: основания больше нет.
+                if v.get("ok") and v.get("source") != "notes":
+                    secs = index.locate(quote)
+                    if secs:
+                        v["t_hits"] = len(secs)
+                        v["t"] = _fmt_t(_pick_sec(secs, hint))
+                continue
+            if not weak:
+                continue
+            # Т16: цитаты нет — даём хотя бы ориентир, где это место в
+            # разговоре. Порог ниже порога подтверждения, иначе добавка
+            # бессмысленна: сюда доходят пункты, на которых поиск опоры с
+            # `_SUPPORT_MIN` уже вернул пустоту. Подтверждением такая находка
+            # НЕ становится (Т16.1) — пункт остаётся в «Требуют проверки».
+            hit = _find_support(_point_text(items[idx] if idx < len(items) else ""),
+                                text, threshold=_TIME_HINT_MIN)
+            if hit:
+                secs = index.locate(hit["quote"])
+                if secs:
+                    v["t"] = _fmt_t(secs[0])
+                    v["t_approx"] = True
+
+
 def verify_protocol(result: dict, transcript_text: str, user_notes: str = "",
                     provider: str | None = None, keys: dict | None = None,
                     on_progress=None, cancel_check=None) -> dict:
@@ -1420,10 +1622,6 @@ def verify_protocol(result: dict, transcript_text: str, user_notes: str = "",
     text = _INJECTED_BLOCK_RE.sub(" ", transcript_text or "").strip()
     for i in range(0, len(text), budget_chars):
         sources.append(("transcript", text[i:i + budget_chars]))
-    # Метки расшифровки — чтобы отличить «01:13:01» (73-я минута) от «13:01».
-    labels = {f"{int(a):02d}:{int(b):02d}" for a, b in re.findall(r"\[(\d{1,3}):(\d{2})\]", text)}
-    max_min = max((int(l.split(":")[0]) for l in labels), default=None)
-
     pending = {i: p for i, p in enumerate(points, 1)}
     calls = failed_calls = 0
     for si, (src_name, fragment) in enumerate(sources, 1):
@@ -1469,7 +1667,10 @@ def verify_protocol(result: dict, transcript_text: str, user_notes: str = "",
                     continue
                 key, idx, _text, _owner = pending.pop(n)
                 ver[key][idx] = {"ok": True, "quote": quote[:300],
-                                 "t": _norm_t(item.get("t"), labels, max_min), "source": src_name,
+                                 # Время модели в запись не попадает (Т2) —
+                                 # только как подсказка выбора вхождения.
+                                 "t": None, "t_hint": item.get("t"),
+                                 "source": src_name,
                                  "owner_ok": bool(item.get("owner_ok")),
                                  "match": kind}
 
@@ -1481,10 +1682,16 @@ def verify_protocol(result: dict, transcript_text: str, user_notes: str = "",
             hit = _find_support(ptext, text)
             if hit:
                 pending.pop(n)
-                ver[key][idx] = {"ok": True, "quote": hit["quote"], "t": hit["t"],
+                ver[key][idx] = {"ok": True, "quote": hit["quote"], "t": None,
                                  "source": "transcript", "owner_ok": False,
                                  "match": "approx"}
         _refine_tasks(result, ver, text)
+
+    # Время — одной функцией и ровно один раз (Т11): ПОСЛЕ _refine_tasks,
+    # который перекладывает записи между списками (задача, оказавшаяся
+    # сделанной, уезжает в «Сделано») и снимает подтверждение у опровергнутых.
+    # До него индексы списков успевали устареть.
+    _apply_transcript_times(result, ver, text, weak=not ver.get("error"))
 
     ver["stats"] = {"checked": len(points), "confirmed": len(points) - len(pending),
                     "calls": calls, "failed_calls": failed_calls}

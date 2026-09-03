@@ -51,10 +51,20 @@ def _apply_verification(par, v, RGBColor) -> None:
         warn = par.add_run(("  ⚠ " + v["note"]) if v.get("note") else _UNVERIFIED_MARK)
         warn.italic = True
         warn.font.color.rgb = RGBColor(*_GRAY)
+        # Цитаты нет, но место в разговоре нашлось по словам пункта (Т16):
+        # ориентир, где это слушать. Подтверждением он не является — пункт
+        # остаётся в «требуют проверки», и текст говорит об этом прямо.
+        if v.get("t"):
+            hint = par.add_run(f"\nОснования нет; в разговоре об этом — примерно [{v['t']}]")
+            hint.italic = True
+            hint.font.color.rgb = RGBColor(*_GRAY)
     elif v.get("quote"):
         t = f" [{v['t']}]" if v.get("t") else ""
         src = " (из заметок участника)" if v.get("source") == "notes" else ""
-        approx = " ≈" if v.get("match") == "approx" else ""
+        # Значок «≈» убран (Т17): на него претендовали два разных смысла —
+        # «цитату слегка перефразировали» и «основания нет вовсе», а различить
+        # их значок не может. Словами — может.
+        approx = ", цитата приблизительная" if v.get("match") == "approx" else ""
         extra = f" — {v['note']}" if v.get("note") else ""
         who = " (ответственный — из обращения в реплике)" if v.get("owner_source") == "обращение" else ""
         note = par.add_run(f"\nОснование{t}{src}{approx}: «{v['quote']}»{extra}{who}")
