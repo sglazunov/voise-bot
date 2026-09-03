@@ -118,6 +118,11 @@ _WIPE_HOUR = int(os.getenv("VTX_FIELD_WIPE_HOUR", "4"))
 # Сколько часов длится окно чистки. Пропустили (сервис был выключен) — ждём
 # следующей ночи: чистить днём хуже, чем не почистить вовсе.
 _WIPE_WINDOW_H = int(os.getenv("VTX_FIELD_WIPE_WINDOW_H", "2"))
+# Сколько задач за один опрос можно РЕАЛЬНО почистить. Сканирование бесплатно
+# (значения полей уже прочитаны опросом), платит только запись, а Weeek на
+# череду записей отвечает 429. Остальные задачи достанутся следующему опросу:
+# очищенное поле второй раз не пишется, так что проход всегда движется вперёд.
+_WIPE_MAX_PER_POLL = int(os.getenv("VTX_FIELD_WIPE_MAX_PER_POLL", "20"))
 
 _ROOM_RE = re.compile(r"/j/([a-z0-9_-]+)", re.I)
 
@@ -264,20 +269,18 @@ class Scheduler:
             self._stop.wait(_TICK_SEC)
 
     def _nightly_wipe(self, user: str, cfg: dict) -> None:
-        """Раз в сутки очистить в Weeek поля видео и протокола у сегодняшних встреч.
+        """Ночная страховка: пройти по СЕГОДНЯШНИМ задачам и снять с них
+        унаследованные ссылки.
 
-        Повторяющаяся задача Weeek — это ОДНА задача, и её кастомные поля несут
-        ссылки прошлого проведения. Если их не чистить, вчерашнее видео выглядит
-        как сегодняшнее.
+        Основную работу делает `_wipe_inherited` на каждом опросе — там
+        унаследованная ссылка живёт не дольше одного интервала опроса. Этот
+        проход остаётся на случай задач, до которых опрос не добрался (лимит
+        на тик, сбой сети, выключенная на время автоматика).
 
-        Раньше чистка шла в момент старта записи. Это работало, но прошлые
-        ссылки исчезали ровно тогда, когда встреча начиналась, — а именно в этот
-        момент к ним чаще всего и обращаются («что решили в прошлый раз»).
-        Ночной проход оставляет весь рабочий день на прошлые ссылки и убирает их
-        задолго до новой встречи.
-
-        Отметка о выполнении хранится в настройках: иначе перезапуск сервиса
-        днём запустил бы чистку повторно и стёр УЖЕ СВЕЖИЕ ссылки.
+        Отметка о выполнении хранится в настройках, чтобы дневной перезапуск
+        сервиса не запускал проход повторно. Ставится ТОЛЬКО при проходе без
+        ошибок: раньше она ставилась безусловно, и половина задач, упавших на
+        429, оставалась с прошлыми ссылками до следующей ночи.
         """
         tz = self._tz(cfg)
         now = datetime.now(tz)
@@ -300,24 +303,147 @@ class Scheduler:
             _LOG.warning("Ночная чистка полей: не удалось получить встречи",
                          exc_info=True)
             return
-        done = 0
-        today_date = now.date()
-        for m in meetings:
-            # ТОЛЬКО сегодняшние проведения. Раньше чистились ВСЕ задачи со
-            # ссылкой на Телемост — и разовая встреча прошлой недели теряла
-            # прикреплённые (в том числе руками) ссылки на видео и протокол.
-            start = getattr(m, "start", None)
-            if start is not None and start.astimezone(tz).date() != today_date:
-                continue
-            try:
-                delivery.wipe_stale_links(m.task_id, cfg, lambda _m: None)
-                done += 1
-            except Exception:           # noqa: BLE001
-                _LOG.warning("Ночная чистка: задача %s не очищена", m.task_id,
-                             exc_info=True)
+        done, errors = self._wipe_inherited(user, cfg, meetings,
+                                            tz=tz, only_date=now.date())
+        if errors:
+            # Отметку не ставим: проход повторится на следующем тике окна и
+            # доделает то, что упало.
+            _LOG.warning("Ночная чистка полей Weeek: очищено %d, с ошибками %d "
+                         "— отметку за сутки не ставлю", done, errors)
+            return
         auto_settings.save(user, {"last_field_wipe": today})
         _LOG.info("Ночная чистка полей Weeek (%02d:00): очищено задач %d",
                   _WIPE_HOUR, done)
+
+    def _held_task_ids(self, user: str) -> set[str]:
+        """Задачи, по которым прямо сейчас идёт работа бота.
+
+        Их поля не трогает никто: запись идёт, ссылка вот-вот будет записана —
+        и очистка на полпути стёрла бы её же (Т7).
+        """
+        with self._lock:
+            return {str(st.task_id) for st in self._states.values()
+                    if st.owner == user and st.state in self._ACTIVE_STATES}
+
+    def _recorded_task_ids(self, user: str, snaps: dict) -> set[str]:
+        """Задачи, по которым проведение УЖЕ СОСТОЯЛОСЬ.
+
+        Это и есть признак «ссылка в поле наша». Не происхождение задачи (копия
+        она или та же самая с новой датой — Weeek умеет и так, и так), а факт
+        записи: ссылки мы пишем только после состоявшегося проведения. Значит,
+        если по этому task_id у нас есть карточка с облачной ссылкой или
+        доведённая до «done» — поля этой задачи не наше дело.
+
+        Память в оба конца: карточки в памяти (текущая сессия) и снапшоты
+        (всё, что пережило перезапуск).
+        """
+        ids: set[str] = set()
+        with self._lock:
+            for st in self._states.values():
+                if st.owner == user and (st.cloud_url or st.state == "done"):
+                    ids.add(str(st.task_id))
+        for key, snap in (snaps or {}).items():
+            parts = key.split(":", 2)
+            if len(parts) == 3 and (snap.get("cloud_url")
+                                    or snap.get("state") == "done"):
+                ids.add(parts[1])
+        return ids
+
+    def _recording_declined(self, cfg: dict, m) -> bool:
+        """Про эту встречу уже решено «не писать»?
+
+        Тогда результата не будет, и прошлые ссылки — единственное, что в
+        задаче есть (Т10). Решение читается там же, где его читает запись:
+        ручной выбор на карточке и галочка «Запись встречи» в Weeek.
+        """
+        if (cfg.get("rec_decisions") or {}).get(str(m.task_id)) is False:
+            return True
+        if cfg.get("weeek_use_record_field", True):
+            fld = cfg.get("weeek_record_field") or "Запись встречи"
+            if weeek.custom_field_bool(getattr(m, "raw", None) or {}, fld) is False:
+                return True
+        return False
+
+    def _wipe_inherited(self, user: str, cfg: dict, meetings: list,
+                        tz=None, only_date=None, snaps: dict | None = None
+                        ) -> tuple[int, int]:
+        """Снять унаследованные ссылки у ещё не состоявшихся встреч.
+
+        Повторяющаяся встреча приезжает на новую дату вместе со значениями
+        кастом-полей: человек открывает будущую задачу, видит заполненные
+        «Видео встречи» и «Протокол встречи» и читает документ ЧУЖОГО
+        проведения. Заметить подмену нельзя — данные выглядят настоящими.
+
+        Правило одно: встреча ещё впереди, а по её задаче у нас нет ни одного
+        состоявшегося проведения — значит, в полях лежит наследство, и его
+        надо снять. Работает и когда Weeek двигает дату у той же задачи, и
+        когда создаёт КОПИЮ с новым id (у копии проведений нет по
+        определению, а у закрытого оригинала ссылки остаются навсегда).
+
+        Идёт на данных, уже прочитанных опросом: `Meeting.raw` содержит
+        значения полей, поэтому задача с пустыми полями не стоит ни одного
+        запроса к Weeek.
+
+        Возвращает (сколько задач почищено, сколько с ошибками).
+        """
+        if not cfg.get("weeek_token"):
+            return (0, 0)
+        # Оба поля выключены — чистить нечего, и обход не нужен.
+        if not ((cfg.get("weeek_set_video_field", True) and cfg.get("weeek_video_field"))
+                or (cfg.get("weeek_set_protocol_field", True)
+                    and cfg.get("weeek_protocol_field"))):
+            return (0, 0)
+        now = datetime.now(timezone.utc)
+        if snaps is None:               # опрос свои снапшоты уже прочитал
+            try:
+                snaps = snapshots.load(user)
+            except Exception:           # noqa: BLE001 — снапшоты не обязаны читаться
+                snaps = {}
+        held = self._held_task_ids(user)
+        recorded = self._recorded_task_ids(user, snaps)
+        done = errors = 0
+        for m in meetings:
+            start = getattr(m, "start", None)
+            # Т8: задача без даты — не встреча в расписании, а карточка, куда
+            # ссылки чаще всего прикрепляют руками. Раньше её чистило каждую
+            # ночь, и прикреплённое исчезало снова и снова.
+            if start is None:
+                continue
+            if only_date is not None and start.astimezone(tz).date() != only_date:
+                continue
+            # Прошедшее проведение не трогаем никогда: там либо наши свежие
+            # ссылки, либо прикреплённые руками (Т2, Т6).
+            if start <= now:
+                continue
+            tid = str(m.task_id)
+            if tid in held or tid in recorded:
+                continue
+            if weeek.is_completed(getattr(m, "raw", None) or {}):
+                continue            # Т9: закрытая задача — документ прошедшей встречи
+            if self._recording_declined(cfg, m):
+                continue
+            try:
+                res = delivery.wipe_stale_links(
+                    m.task_id, cfg, lambda _msg: None,
+                    task=getattr(m, "raw", None) or None)
+            except Exception as e:  # noqa: BLE001 — Т20: одна задача не рвёт проход
+                errors += 1
+                _LOG.warning("Чистка полей: задача %s не очищена (%s)",
+                             m.task_id, e, exc_info=True)
+                continue
+            if res.get("cleared"):
+                done += 1
+                _LOG.info("Задача %s «%s»: сняты ссылки прошлого проведения (%s)",
+                          m.task_id, getattr(m, "title", ""),
+                          ", ".join(res["cleared"]))
+            if res.get("errors"):
+                errors += 1
+            if done + errors >= _WIPE_MAX_PER_POLL:
+                # Остальное — следующему опросу: главный цикл ждёт этот проход.
+                _LOG.info("Чистка полей: за проход обработано %d задач, "
+                          "остальные — на следующем опросе", done + errors)
+                break
+        return (done, errors)
 
     def _tz(self, cfg: dict):
         try:
@@ -409,6 +535,10 @@ class Scheduler:
                         # слот, под которым встреча была записана.
                         self._revive_recorded_slot(
                             user, str(s.task_id), s.start, snaps_for_dedup)
+
+        # Снять унаследованные ссылки — на данных этого же опроса, БЕЗ лока:
+        # внутри запросы к Weeek, а под локом стоят status() и остановка записи.
+        self._wipe_inherited(user, cfg, meetings, snaps=snaps_for_dedup)
 
     @staticmethod
     def _kw(raw) -> list[str]:
@@ -628,8 +758,9 @@ class Scheduler:
             # Write the recording link into the task's «Видео встречи» custom field.
             field = (cfg.get("weeek_video_field") or "").strip()
             if cfg.get("weeek_set_video_field", True) and st.cloud_url and field:
-                delivery.write_weeek_field(cfg.get("weeek_token"), st.task_id,
-                                        field, st.cloud_url, log)
+                delivery.write_weeek_field(
+                    cfg.get("weeek_token"), st.task_id, field, st.cloud_url, log,
+                    protected=cfg.get("weeek_protected_fields"))
 
             # Keep the video ONLY where the UI points. If it was delivered
             # elsewhere (a remote cloud, or a local folder other than the staging
@@ -745,8 +876,9 @@ class Scheduler:
             token = cfg.get("weeek_token")
             field = (cfg.get("weeek_video_field") or "").strip()
             if cfg.get("weeek_set_video_field", True) and st.cloud_url and field:
-                delivery.write_weeek_field(token, st.task_id, field, st.cloud_url,
-                                        lambda *_: None)
+                delivery.write_weeek_field(
+                    token, st.task_id, field, st.cloud_url, lambda *_: None,
+                    protected=cfg.get("weeek_protected_fields"))
             if cfg.get("post_back_to_weeek") and st.cloud_url:
                 weeek.add_comment(token, st.task_id,
                                   f"🎥 Запись встречи: {st.cloud_url}")
@@ -1040,8 +1172,9 @@ class Scheduler:
                 st.cloud_url = up.get("url")
                 field = (cfg.get("weeek_video_field") or "").strip()
                 if cfg.get("weeek_set_video_field", True) and st.cloud_url and field:
-                    delivery.write_weeek_field(cfg.get("weeek_token"), st.task_id,
-                                            field, st.cloud_url, log)
+                    delivery.write_weeek_field(
+                        cfg.get("weeek_token"), st.task_id, field, st.cloud_url,
+                        log, protected=cfg.get("weeek_protected_fields"))
             else:
                 st.upload_error = up.get("error") or "облако недоступно"
                 threading.Thread(target=self._late_upload,

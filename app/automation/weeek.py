@@ -22,7 +22,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone, tzinfo
 from typing import Any
 
+from .. import logs
+
 API_BASE = "https://api.weeek.net/public/v1"
+
+# Отказ записать поле («защищено», «не найдено») виден только в логе: наверх
+# уходит словарь-отчёт, а смотреть его некому — запись поля косметична.
+_LOG = logs.get("vtx.weeek")
 
 # Telemost links look like https://telemost.yandex.ru/j/1234567890123456.
 # Stop at whitespace, quotes or angle brackets so we cleanly extract the URL even
@@ -342,6 +348,24 @@ def custom_field_bool(task: dict, field_name: str) -> bool | None:
     return _as_bool(cf.get("value"))
 
 
+def is_completed(task: dict) -> bool:
+    """Задача закрыта/выполнена?
+
+    Имя поля у Weeek в разных ответах разное, поэтому проверяются все
+    известные варианты, а неизвестное значение считается «не закрыта».
+    Признак нужен ровно для одного: у закрытой задачи поля результата —
+    документ ПРОШЕДШЕЙ встречи, и очищать их нельзя.
+    """
+    for key in ("isCompleted", "completed", "isDone", "done", "isClosed"):
+        v = task.get(key)
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, (int, float)):
+            return v != 0
+    status = str(task.get("status") or "").strip().lower()
+    return status in ("completed", "done", "closed", "выполнена", "завершена")
+
+
 def task_to_meeting(task: dict, local_tz: tzinfo = timezone.utc) -> Meeting | None:
     """Convert a raw task to a Meeting if it carries a Telemost link.
 
@@ -404,20 +428,83 @@ def add_comment(token: str, task_id: Any, text: str) -> bool:
     return False
 
 
-def _find_custom_field_id(task: dict, field_name: str):
-    """Id of a task's custom field by (case-insensitive, then partial) name."""
+def _find_custom_field(task: dict, field_name: str) -> dict | None:
+    """Кастом-поле задачи по имени: точное совпадение без регистра, затем
+    ВХОЖДЕНИЕ искомого имени в имя поля.
+
+    Возвращается всё поле, а не только id: перед записью и очисткой нужно ещё
+    и настоящее ИМЯ найденного поля (частичное совпадение легко приводит не
+    туда) и его ТЕКУЩЕЕ значение (ссылку на Телемост трогать нельзя).
+    """
     fields = task.get("customFields") or []
-    name = field_name.strip().lower()
+    name = (field_name or "").strip().lower()
+    if not name:
+        return None
     for cf in fields:
         if isinstance(cf, dict) and str(cf.get("name", "")).strip().lower() == name:
-            return cf.get("id")
+            return cf
     for cf in fields:  # partial match fallback
         if isinstance(cf, dict) and name in str(cf.get("name", "")).lower():
-            return cf.get("id")
+            return cf
     return None
 
 
-def set_custom_field(token: str, task_id: Any, field_name: str, value: str) -> dict:
+def _find_custom_field_id(task: dict, field_name: str):
+    """Id of a task's custom field by (case-insensitive, then partial) name."""
+    cf = _find_custom_field(task, field_name)
+    return cf.get("id") if cf else None
+
+
+def custom_field_text(task: dict, field_name: str) -> str | None:
+    """Текущее строковое значение кастом-поля по имени.
+
+    `None` — поля в задаче НЕТ (в том числе когда Weeek перестал его отдавать
+    после очистки), пустая строка — поле есть и пусто. Разница важна: «нет
+    поля» — это норма и повод для одной строки в лог, а не ошибка.
+    """
+    cf = _find_custom_field(task, field_name)
+    if cf is None:
+        return None
+    return _value_as_text(cf.get("value"))
+
+
+# Поля, в которые бот не пишет НИКОГДА. По умолчанию — «Встреча»: там лежит
+# ссылка на Телемост, единственный способ попасть на звонок. Список
+# переопределяется настройкой `weeek_protected_fields`.
+DEFAULT_PROTECTED_FIELDS: tuple[str, ...] = ("Встреча",)
+
+
+def _protection_reason(cf: dict, protected: list | tuple | None) -> str | None:
+    """Почему в это поле писать нельзя (или None, если можно).
+
+    Две независимые страховки, потому что поле ищется по ЧАСТИЧНОМУ вхождению
+    имени и промахнуться легко: имя из списка защищённых и — главное — ссылка
+    на Телемост в текущем значении. Вторая срабатывает даже если поле в
+    воркспейсе переименовали и в список его добавить забыли.
+    """
+    names = protected if protected is not None else DEFAULT_PROTECTED_FIELDS
+    if isinstance(names, str):
+        # Настройку могли поправить руками и написать строкой. Перебор строки
+        # даёт БУКВЫ, и защищённым оказалось бы каждое поле — бот перестал бы
+        # писать ссылки вовсе, молча.
+        names = [n for n in re.split(r"[,;\n]", names) if n.strip()]
+    real = str(cf.get("name", "")).strip().lower()
+    for p in names:
+        p = str(p or "").strip().lower()
+        # ТОЧНОЕ совпадение, не вхождение. Вхождение здесь опаснее промаха:
+        # защищённое «Встреча» поглощало бы «Видео встреча» и «Встреча —
+        # видео», и бот МОЛЧА переставал бы писать ссылки на запись. От
+        # переименований страхует проверка ниже — по содержимому поля.
+        if p and p == real:
+            return f"поле «{cf.get('name')}» защищено от записи"
+    if extract_telemost(_value_as_text(cf.get("value"))):
+        return (f"в поле «{cf.get('name')}» лежит ссылка на Телемост — "
+                "её трогать нельзя")
+    return None
+
+
+def set_custom_field(token: str, task_id: Any, field_name: str, value: str,
+                     protected: list | tuple | None = None) -> dict:
     """Write `value` into the task's custom field named `field_name` (e.g. a link
     field «Видео встречи»). Best-effort: tries the known Weeek write shapes and
     returns {ok, ...} with the API error for diagnosis if all fail."""
@@ -425,9 +512,16 @@ def set_custom_field(token: str, task_id: Any, field_name: str, value: str) -> d
         task = get_task(token, task_id)
     except WeeekError as e:
         return {"ok": False, "error": f"Не прочитал задачу: {e}"}
-    fid = _find_custom_field_id(task, field_name)
-    if fid is None:
+    cf = _find_custom_field(task, field_name)
+    if cf is None:
         return {"ok": False, "error": f"Кастом-поле «{field_name}» не найдено в задаче."}
+    why = _protection_reason(cf, protected)
+    if why:
+        _LOG.warning("Задача %s: запись в поле «%s» отменена — %s",
+                     task_id, field_name, why)
+        return {"ok": False, "protected": True, "error": why,
+                "field_id": cf.get("id"), "field_name": cf.get("name")}
+    fid = cf.get("id")
     # Verified against the live Weeek API: update the task, passing customFields
     # as a {fieldId: value} MAP, and the value as a plain STRING. (The list shape
     # [{"id","value"}] returns 200 but is silently ignored; a non-string 422s.)
@@ -437,6 +531,69 @@ def set_custom_field(token: str, task_id: Any, field_name: str, value: str) -> d
         return {"ok": True, "field_id": fid}
     except WeeekError as e:
         return {"ok": False, "error": str(e), "field_id": fid}
+
+
+def clear_custom_field(token: str, task_id: Any, field_name: str,
+                       task: dict | None = None,
+                       protected: list | tuple | None = None) -> dict:
+    """Очистить кастом-поле задачи и УБЕДИТЬСЯ, что оно опустело.
+
+    `task` — уже прочитанная задача (её отдаёт опрос в `Meeting.raw`): второй
+    GET за тем же самым не нужен, а на каждом опросе он стоил бы запроса на
+    поле. Возвращается словарь-отчёт, а не None: вызывающий должен знать, что
+    очистка не удалась, иначе следующая встреча снова покажет прошлые ссылки.
+
+    Ключи ответа: `ok`, `skipped` (запроса на запись не было), `missing`
+    (поля в задаче нет — это норма), `protected`, `verified` (перечитали и
+    поле действительно пусто), `was` (прежнее значение).
+    """
+    if task is None:
+        try:
+            task = get_task(token, task_id)
+        except WeeekError as e:
+            return {"ok": False, "error": f"Не прочитал задачу: {e}"}
+    cf = _find_custom_field(task, field_name)
+    if cf is None:
+        # Поля нет — очищать нечего. Weeek может и вовсе не отдавать пустое
+        # поле в JSON задачи, так что это же состояние наступает ПОСЛЕ удачной
+        # очистки: ошибкой считать нельзя, иначе повторный проход начнёт
+        # ругаться на каждую уже вычищенную задачу.
+        return {"ok": True, "skipped": True, "missing": True,
+                "detail": f"Кастом-поля «{field_name}» в задаче нет."}
+    why = _protection_reason(cf, protected)
+    if why:
+        _LOG.warning("Задача %s: очистка поля «%s» отменена — %s",
+                     task_id, field_name, why)
+        return {"ok": False, "protected": True, "error": why,
+                "field_id": cf.get("id"), "field_name": cf.get("name")}
+    was = _value_as_text(cf.get("value"))
+    if not (was or "").strip():
+        # Пусто и так: изменяющий запрос был бы платой ни за что. Проход по
+        # задачам с пустыми полями обязан стоить НОЛЬ записей.
+        return {"ok": True, "skipped": True, "empty": True, "was": "",
+                "field_id": cf.get("id")}
+    fid = cf.get("id")
+    try:
+        _request("PUT", f"/tm/tasks/{task_id}", token,
+                 body={"customFields": {str(fid): ""}})
+    except WeeekError as e:
+        return {"ok": False, "error": str(e), "field_id": fid, "was": was}
+    # Самопроверка. Очистка пустой строкой на живом API не проверялась, и
+    # молчаливый «успех» здесь означал бы, что человек и дальше видит в
+    # будущей задаче ссылки прошлого проведения, а мы считаем, что убрали их.
+    try:
+        fresh = get_task(token, task_id)
+    except WeeekError as e:
+        _LOG.warning("Задача %s: поле «%s» очищено, но перечитать не удалось: %s",
+                     task_id, field_name, e)
+        return {"ok": True, "verified": False, "was": was, "field_id": fid,
+                "detail": f"Очищено, но проверить не удалось: {e}"}
+    now_text = custom_field_text(fresh, field_name)
+    if (now_text or "").strip():
+        return {"ok": False, "verified": False, "was": was, "field_id": fid,
+                "error": (f"Weeek принял очистку поля «{field_name}», но там "
+                          f"осталось «{now_text[:80]}»")}
+    return {"ok": True, "verified": True, "was": was, "field_id": fid}
 
 
 # --------------------------------------------------------------------------- #

@@ -30,12 +30,19 @@ class TestWipeStaleLinks:
         def boom(*a, **kw):
             raise RuntimeError("Weeek 500")
 
-        monkeypatch.setattr(delivery.weeek, "set_custom_field", boom)
+        # Патчим ВЕСЬ путь до сети: чтение задачи, очистку и запись поля.
+        # Иначе тест уходит в настоящий api.weeek.net и «проходит» за 16 секунд
+        # ретраев вместо того, что проверяет.
+        for fn in ("get_task", "clear_custom_field", "set_custom_field"):
+            monkeypatch.setattr(delivery.weeek, fn, boom)
         cfg = {"weeek_token": "wk", "weeek_video_field": "Видео встречи",
                "weeek_protocol_field": "Протокол встречи"}
         lines: list[str] = []
 
-        delivery.wipe_stale_links(12345, cfg, lines.append)   # не должно бросать
+        res = delivery.wipe_stale_links(12345, cfg, lines.append)  # не должно бросать
+        # Сбой обязан быть ВИДЕН вызывающему: раньше функция возвращала None, и
+        # ночной проход считал задачу очищенной.
+        assert res["ok"] is False and res["errors"]
 
 
 class TestAwaitProtocolReport:

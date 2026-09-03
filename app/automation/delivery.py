@@ -23,26 +23,55 @@ from . import clouds, weeek
 _LOG = logs.get("vtx.delivery")
 
 
-def wipe_stale_links(task_id, cfg: dict, log) -> None:
-    """Blank the video/protocol link fields of the task when recording
-    starts — a recurring task inherits LAST week's links otherwise."""
+def wipe_stale_links(task_id, cfg: dict, log, task: dict | None = None) -> dict:
+    """Снять с задачи ссылки на видео и протокол ПРОШЛОГО проведения.
+
+    Зовётся до встречи, а не в момент старта записи (так было раньше): к
+    прошлым ссылкам чаще всего обращаются как раз в начале новой встречи.
+
+    `task` — уже прочитанная задача (`Meeting.raw` из опроса). С ней проход по
+    задаче с пустыми полями не стоит НИ ОДНОГО запроса к Weeek: раньше каждое
+    поле перечитывало задачу заново, то есть четыре запроса на пустую работу.
+
+    Возвращается отчёт `{ok, cleared[], errors[]}`, а не None: вызывающий
+    должен знать, что очистка не удалась, — иначе человек и дальше видит в
+    будущей задаче ссылки прошлой встречи, а мы считаем, что убрали их.
+    """
     token = cfg.get("weeek_token")
+    protected = cfg.get("weeek_protected_fields")
+    cleared: list[str] = []
+    errors: list[str] = []
     for opt, fname in (("weeek_set_video_field", "weeek_video_field"),
                        ("weeek_set_protocol_field", "weeek_protocol_field")):
         fld = (cfg.get(fname) or "").strip()
+        # Поле, запись в которое выключена настройкой, не чистится тоже: раз мы
+        # туда не пишем, то и лежит там не наше.
         if not (cfg.get(opt, True) and fld and token):
             continue
         try:
-            res = weeek.set_custom_field(token, task_id, fld, "")
-            if res.get("ok"):
-                log(f"Поле «{fld}»: очищено от прошлой встречи.")
-        except Exception:  # cosmetic step — never blocks the recording
+            if task is None:
+                # Одно чтение на оба поля, а не по чтению на каждое.
+                task = weeek.get_task(token, task_id)
+            res = weeek.clear_custom_field(token, task_id, fld, task=task,
+                                           protected=protected)
+            if res.get("ok") and not res.get("skipped"):
+                cleared.append(fld)
+                log(f"Поле «{fld}»: снята ссылка прошлого проведения.")
+                _LOG.info("Задача %s: поле «%s» очищено (было «%s»)",
+                          task_id, fld, str(res.get("was"))[:120])
+            elif not res.get("ok"):
+                errors.append(f"{fld}: {res.get('error')}")
+                _LOG.warning("Задача %s: поле «%s» не очищено — %s",
+                             task_id, fld, res.get("error"))
+        except Exception as e:  # noqa: BLE001 — сбой одного поля не рвёт проход
+            errors.append(f"{fld}: {e}")
             _LOG.info("Не удалось очистить поле «%s» задачи %s",
-                     fld, task_id, exc_info=True)
+                      fld, task_id, exc_info=True)
+    return {"ok": not errors, "cleared": cleared, "errors": errors}
 
 
 def write_weeek_field(token, task_id, field: str, value: str,
-                       log, attempts: int = 3) -> bool:
+                       log, attempts: int = 3, protected=None) -> bool:
     """Write a link into a Weeek custom field, retrying — the link for THIS
     meeting must actually land, not silently stay last week's."""
     err = None
@@ -50,13 +79,16 @@ def write_weeek_field(token, task_id, field: str, value: str,
         if i:
             time.sleep(10 * i)
         try:
-            res = weeek.set_custom_field(token, task_id, field, value)
+            res = weeek.set_custom_field(token, task_id, field, value,
+                                         protected=protected)
         except Exception as e:  # noqa: BLE001
             res = {"ok": False, "error": str(e)}
         if res.get("ok"):
             log(f"Поле «{field}» в Weeek: заполнено ✓")
             return True
         err = res.get("error")
+        if res.get("protected"):
+            break   # защищённое поле повторами не пробить — только шум в логе
     log(f"Поле «{field}» в Weeek: не удалось — {err}")
     return False
 
