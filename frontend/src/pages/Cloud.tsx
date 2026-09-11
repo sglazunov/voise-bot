@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { HardDrive, Cloud as CloudIcon, FolderInput, UploadCloud } from "lucide-react";
+import { HardDrive, FolderInput, UploadCloud, AlertTriangle } from "lucide-react";
 import { Page } from "../components/Layout";
 import { Card, useToast } from "../components/ui";
 import { useSettings } from "../lib/useSettings";
@@ -7,18 +7,21 @@ import { api } from "../lib/api";
 
 const DEST = [
   { id: "local", icon: HardDrive, title: "Локальный диск", sub: "data/recordings на сервере" },
-  { id: "yandex_disk", icon: CloudIcon, title: "Яндекс Диск", sub: "OAuth-токен · disk.write" },
   { id: "gdrive", icon: FolderInput, title: "Google Drive", sub: "OAuth · refresh token" },
 ];
+// Снятые бэкенды. Пока такой лежит в сохранённых настройках, ни одна карточка
+// не выбрана — без явного предупреждения это выглядит как рабочая выгрузка.
+const REMOVED: Record<string, string> = {
+  yandex_disk: "Яндекс.Диск отключён: выберите Google Drive и заполните его поля. " +
+    "Пока облако не выбрано, записи встреч остаются на сервере.",
+};
 
 export default function CloudPage() {
   const { s, set, save , ready } = useSettings();
-  const [ytoken, setYtoken] = useState("");
   // Учётка Google: сервер отдаёт эти три поля как «есть/нет», а не значением,
   // поэтому вводим их отдельным состоянием и шлём только заполненные.
   const [gsec, setGsec] = useState({ client_id: "", client_secret: "", refresh_token: "" });
   const toast = useToast();
-  const yd = s.yandex_disk || {};
   const gd = s.gdrive || {};
   const cloud = s.cloud || "local";
 
@@ -27,13 +30,11 @@ export default function CloudPage() {
       // Пустая строка = «очистить». null бэкенд трактует как «поле не меняли»,
       // из-за чего папку протоколов нельзя было стереть.
       const patch: any = { cloud, protocol_folder: s.protocol_folder ?? "",
-        yandex_disk: { folder: yd.folder ?? "" },
         gdrive: { folder_id: gd.folder_id ?? "" } };
-      if (ytoken.trim()) patch.yandex_disk.token = ytoken.trim();
       for (const k of ["client_id", "client_secret", "refresh_token"] as const)
         if (gsec[k].trim()) patch.gdrive[k] = gsec[k].trim();
       await save(patch);
-      setYtoken(""); setGsec({ client_id: "", client_secret: "", refresh_token: "" });
+      setGsec({ client_id: "", client_secret: "", refresh_token: "" });
       toast("Облако сохранено");
     } catch (e: any) { toast(e.message, true); }
   }
@@ -65,21 +66,11 @@ export default function CloudPage() {
         </div>
       </Card>
 
-      {cloud === "yandex_disk" && (
-        <Card>
-          <label className="lbl">OAuth-токен Я.Диска</label>
-          <input className="field" type="password" value={ytoken} onChange={(e) => setYtoken(e.target.value)}
-            placeholder={yd.token ? "•••••••• сохранён" : "вставьте токен"} />
-          <div className="text-[12px] mt-1.5" style={{ color: "var(--muted)" }}>scope: disk.read + disk.write</div>
-          <div className="grid md:grid-cols-2 gap-3 mt-3">
-            <div><label className="lbl">Папка для записи</label>
-              <input className="field" value={yd.folder || ""} onChange={(e) => set("yandex_disk", { ...yd, folder: e.target.value })} placeholder="disk:/Телемост/Записи" /></div>
-            <div><label className="lbl">Папка для протокола</label>
-              <input className="field" value={s.protocol_folder || ""} onChange={(e) => set("protocol_folder", e.target.value)} placeholder="disk:/Телемост/Протоколы" /></div>
-          </div>
-          <div className="flex gap-2.5 mt-3">
-            <button className="btn btn-primary" onClick={onSave} disabled={!ready}>Сохранить</button>
-            <button className="btn btn-ghost" onClick={test}><UploadCloud size={15} /> Тест загрузки</button>
+      {REMOVED[cloud] && (
+        <Card className="mb-3.5">
+          <div className="flex gap-2.5 items-start">
+            <AlertTriangle size={17} style={{ color: "var(--warn, #f59e0b)", flexShrink: 0, marginTop: 2 }} />
+            <div className="text-[13px]">{REMOVED[cloud]}</div>
           </div>
         </Card>
       )}
@@ -121,7 +112,7 @@ export default function CloudPage() {
           </div>
         </Card>
       )}
-      {cloud !== "yandex_disk" && cloud !== "gdrive" && (
+      {cloud !== "gdrive" && !REMOVED[cloud] && (
         <Card><div className="flex gap-2.5"><button className="btn btn-primary" onClick={onSave} disabled={!ready}>Сохранить</button></div></Card>
       )}
     </Page>
