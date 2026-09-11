@@ -24,7 +24,8 @@ _LOCK = threading.Lock()
 # memory. Dotted paths reach into the nested cloud sub-dicts.
 _LOG = logs.get("vtx.settings")
 
-_SECRET_PATHS = ("weeek_token", "gdrive.client_secret", "gdrive.refresh_token",
+_SECRET_PATHS = ("weeek_token", "yandex_disk.token", "yandex_disk.read_token",
+                 "gdrive.client_secret", "gdrive.refresh_token",
                  "telegram_bot_token")
 
 
@@ -58,7 +59,8 @@ _DEFAULTS: dict[str, Any] = {
     "weeek_project_id": None,         # optional: limit polling to one project
     "timezone": "Europe/Moscow",      # workspace tz for naive Weeek date/times
     # --- where to put finished recordings ---
-    "cloud": "local",                 # "local" | "gdrive"
+    "cloud": "local",                 # "local" | "gdrive" | "yandex_disk"
+    "yandex_disk": {"token": "", "read_token": "", "folder": "disk:/Телемост-записи"},
     "gdrive": {"client_id": "", "client_secret": "", "refresh_token": "",
                "folder_id": ""},
     "local_dir": "",                  # empty -> DATA_DIR/recordings
@@ -116,11 +118,7 @@ _DEFAULTS: dict[str, Any] = {
     "weeek_video_field": "Видео встречи",  # name of that link custom field
     # --- after the protocol (.docx) is built: upload it to the cloud ---
     "upload_protocol": True,          # send the generated protocol to the cloud too
-    # Отдельная папка для протоколов. Пусто — туда же, куда записи. До
-    # 11.09.2026 здесь стояло «disk:/Телемост-протоколы» (форма Яндекс.Диска);
-    # в сохранённых настройках это значение осталось и для Google игнорируется
-    # (clouds.upload), потому что идентификатор папки Google выглядит иначе.
-    "protocol_folder": "",
+    "protocol_folder": "disk:/Телемост-протоколы",  # SEPARATE folder for protocols
     "weeek_set_protocol_field": True,  # write its link into a Weeek custom field
     "weeek_protocol_field": "Протокол встречи",  # name of that link custom field
     # Поля Weeek, в которые бот не пишет НИКОГДА. «Встреча» — то самое поле со
@@ -203,7 +201,7 @@ def load(user: str) -> dict[str, Any]:
 
 # Keys whose values are sub-dicts that should be MERGED, not replaced, so a
 # partial update (e.g. just the Yandex token) keeps the rest (folder).
-_NESTED_KEYS = ("gdrive", "weeek_members_cache")
+_NESTED_KEYS = ("yandex_disk", "gdrive", "weeek_members_cache")
 
 
 def _drop_non_string_secrets(values: dict[str, Any]) -> list[str]:
@@ -264,9 +262,10 @@ def redacted(user: str) -> dict[str, Any]:
     data = load(user)
     out = dict(data)
     out["weeek_token"] = bool(data.get("weeek_token"))
-    # Остатки снятого Яндекс.Диска наружу не отдаём: в сохранённых настройках
-    # его подсловарь может лежать до сих пор, а вместе с ним — токен.
-    out.pop("yandex_disk", None)
+    yd = dict(data.get("yandex_disk") or {})
+    yd["token"] = bool(yd.get("token"))
+    yd["read_token"] = bool(yd.get("read_token"))
+    out["yandex_disk"] = yd
     gd = dict(data.get("gdrive") or {})
     for secret in ("client_secret", "refresh_token"):
         gd[secret] = bool(gd.get(secret))

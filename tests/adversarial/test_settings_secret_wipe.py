@@ -52,14 +52,14 @@ class TestSecretRoundTrip:
 
     def test_nested_cloud_secret_survives_roundtrip(self, client):
         register(client)
-        auto_settings.save("alice", {"gdrive": {"refresh_token": "1//0_REAL"}})
-        shown = auto_settings.redacted("alice")["gdrive"]
-        assert shown["refresh_token"] is True
+        auto_settings.save("alice", {"yandex_disk": {"token": "y0_REAL"}})
+        shown = auto_settings.redacted("alice")["yandex_disk"]
+        assert shown["token"] is True
 
-        auto_settings.save("alice", {"gdrive": shown})
+        auto_settings.save("alice", {"yandex_disk": shown})
 
-        assert auto_settings.load("alice")["gdrive"]["refresh_token"] == "1//0_REAL", (
-            "круговой рейс стёр refresh_token Google Drive")
+        assert auto_settings.load("alice")["yandex_disk"]["token"] == "y0_REAL", (
+            "круговой рейс стёр OAuth-токен Яндекс Диска")
 
     def test_ui_indicator_matches_reality(self):
         """Индикатор «подключено» обязан совпадать с тем, что есть на самом деле.

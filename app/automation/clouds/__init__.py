@@ -2,14 +2,8 @@
 
 One simple interface: pick a backend by the `cloud` setting and `upload()` a
 file, getting back {ok, url, path, backend} (or {ok: False, error}). Backends:
-local disk and Google Drive. Credentials come from app.automation.settings
-(the per-backend sub-dict).
-
-Яндекс.Диск убран 11.09.2026 по решению владельца. Настройки, сохранённые до
-этого, продолжают лежать в базе с `cloud: "yandex_disk"`, поэтому снятый
-бэкенд обязан объясняться словами (`_REMOVED`), а не превращаться в «неизвестное
-облако» и не откатываться молча на локальную папку: локальная папка не чистится
-никем, и такой откат тихо забил бы диск сервера записями.
+local disk, Yandex Disk, Google Drive. Credentials come from app.automation
+.settings (the per-backend sub-dict).
 """
 from __future__ import annotations
 
@@ -17,20 +11,13 @@ from pathlib import Path
 
 from ... import config
 
-from . import gdrive, local
+from . import gdrive, local, yandex_disk
 
 # backend key -> (module, settings sub-key, human label)
 BACKENDS = {
     "local": (local, "local_dir", "Локально на диск"),
+    "yandex_disk": (yandex_disk, "yandex_disk", "Яндекс Диск"),
     "gdrive": (gdrive, "gdrive", "Google Drive"),
-}
-
-
-# Снятые бэкенды: ключ -> что сказать человеку. Строка попадает и в готовность
-# облака, и в ошибку выгрузки, и в журнал карточки встречи.
-_REMOVED = {
-    "yandex_disk": ("Яндекс.Диск больше не поддерживается — выберите Google Drive "
-                    "на странице «Облако» и заполните его поля."),
 }
 
 
@@ -46,12 +33,6 @@ def readiness(settings: dict) -> dict:
     """Per-backend readiness + which one is currently selected."""
     selected = settings.get("cloud") or "local"
     out = {"selected": selected, "backends": {}}
-    if selected in _REMOVED:
-        # Выбранного облака больше нет. Показываем это на его месте, иначе на
-        # странице «Облако» выбранным не окажется НИЧЕГО и человек решит, что
-        # выгрузка работает.
-        out["backends"][selected] = {"ready": False, "label": "Снято",
-                                     "detail": _REMOVED[selected]}
     for key, (mod, _subkey, label) in BACKENDS.items():
         try:
             r = mod.readiness(_backend_cfg(settings, key))
@@ -71,8 +52,7 @@ def upload(file_path: str, name: str, settings: dict,
     key = backend or settings.get("cloud") or "local"
     entry = BACKENDS.get(key)
     if not entry:
-        return {"ok": False, "backend": key,
-                "error": _REMOVED.get(key) or f"Неизвестное облако: {key}"}
+        return {"ok": False, "backend": key, "error": f"Неизвестное облако: {key}"}
     mod = entry[0]
     bcfg = _backend_cfg(settings, key)
     if folder:
@@ -91,12 +71,13 @@ def upload(file_path: str, name: str, settings: dict,
                     or (config.DATA_DIR / "recordings")) / "protocols")
         elif key == "gdrive":
             # Та же беда, что и с локальным диском: папка протоколов может быть
-            # записана в форме Яндекс.Диска («disk:/…»). Так стояло в
-            # умолчаниях до 11.09.2026, и в сохранённых настройках это значение
-            # остаётся. Для Google это не идентификатор папки: запрос ушёл бы с
-            # мусорным parents и вернул 404. Идентификатор — непрозрачный токен
-            # без слэшей и двоеточий; всё остальное игнорируем, тогда протокол
-            # ляжет туда же, куда запись.
+            # записана в форме Яндекс.Диска («disk:/…») — так стоит В
+            # УМОЛЧАНИЯХ. Для Google это не идентификатор папки, запрос ушёл бы
+            # с мусорным parents и вернул 404. Идентификатор — непрозрачный
+            # токен без слэшей и двоеточий; всё остальное игнорируем, тогда
+            # протокол ляжет туда же, куда запись.
             if "/" not in folder and ":" not in folder:
                 bcfg["folder_id"] = folder
+        else:  # yandex_disk
+            bcfg["folder"] = folder
     return mod.upload(file_path, name, bcfg)
