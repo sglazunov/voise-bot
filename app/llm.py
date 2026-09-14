@@ -33,10 +33,14 @@ from . import config
 # отмена генерации, протокол провайдера. Имена ре-экспортируются: снаружи и в
 # тестах обращаются к llm.X.
 from .llm_base import (                 # noqa: F401 — часть публичного API
-    GenerationCancelled, LLMProvider, _KeyProviderMixin,
+    CACHE_MARK, GenerationCancelled, LLMProvider, _KeyProviderMixin,
+    cache_parts, cache_strip,
     _http_post_json, _is_rate_limit, is_key_rejected, _retry_after, _safe_url,
 )
 from .llm_custom import CustomProvider, text_of  # noqa: F401 — часть публичного API
+from . import logs
+
+_LOG = logs.get("vtx.llm")
 
 
 # ---------------------------------------------------------------------------
@@ -181,6 +185,11 @@ class AnthropicProvider:
     """Anthropic Claude. Paid per token, highest quality."""
 
     name = "anthropic"
+    # Единственный движок в проекте, который умеет кэш промпта: неизменная
+    # часть запроса (правила, схема, контекст команды) помечается
+    # `llm_base.CACHE_MARK` и уходит отдельными блоками с `cache_control`.
+    # Остальные провайдеры метку просто не видят — её вырезает цепочка.
+    cache_aware = True
 
     def __init__(self, model: str | None = None, api_key: str | None = None,
                  extra: str | None = None) -> None:
@@ -197,12 +206,25 @@ class AnthropicProvider:
                 "Пакет anthropic не установлен. Выполните: pip install anthropic"
             )
         client = anthropic.Anthropic(api_key=self.api_key)
+        # Промпт уходит блоками: у всех, кроме последнего, стоит
+        # `cache_control` — их содержимое одинаково от запроса к запросу
+        # (правила и схема — у всех встреч, контекст — у всех кусков одной).
+        # Без меток это ровно один блок, то есть прежнее поведение.
+        content = [
+            {"type": "text", "text": text}
+            | ({"cache_control": {"type": "ephemeral"}} if cached else {})
+            for text, cached in cache_parts(prompt)
+        ]
         message = client.messages.create(
             model=self.model,
             max_tokens=max_tokens,
             temperature=0.1,
-            messages=[{"role": "user", "content": prompt}],
+            messages=[{"role": "user", "content": content}],
         )
+        u = getattr(message, "usage", None)
+        if u is not None and getattr(u, "cache_read_input_tokens", 0):
+            _LOG.debug("anthropic: из кэша %s токенов, обычных %s",
+                       u.cache_read_input_tokens, getattr(u, "input_tokens", "?"))
         return message.content[0].text.strip()
 
 
@@ -473,6 +495,9 @@ class _RotatingProvider:
         # ДВУХ ключах отмена в потоке молча переставала работать: цепочка
         # смотрит на тип, а тип здесь — обёртка, а не сам провайдер.
         self.accepts_should_stop = getattr(cls, "accepts_should_stop", False)
+        # Тот же приём, что и выше: цепочка смотрит на ПРИЗНАК, а не на тип, а
+        # тип здесь — обёртка ротации, а не сам провайдер.
+        self.cache_aware = getattr(cls, "cache_aware", False)
 
     @property
     def model(self) -> str:
@@ -656,12 +681,18 @@ class _FallbackChain:
             if i in self._excluded:
                 continue
             b = self._backends[i]
+            # Метки кэша — договорённость между analyze и Anthropic. Всем
+            # остальным движкам промпт уходит ровно таким, каким был раньше:
+            # вырезаем метку ЗДЕСЬ, в единственном месте, где известно, какой
+            # движок сейчас пробуют, — чтобы не править каждого провайдера и
+            # не забыть нового.
+            p = prompt if getattr(b, "cache_aware", False) else cache_strip(prompt)
             # The caller sized max_tokens for the PRIMARY provider; re-clamp for
             # the one actually being tried, or Groq rejects the request with 413.
             mt = max_tokens
             tpm = config.PROVIDER_TPM.get(str(getattr(b, "name", "")).split(":")[0])
             if tpm:
-                mt = max(1200, min(mt, tpm - len(prompt) // 3 - 400))
+                mt = max(1200, min(mt, tpm - len(p) // 3 - 400))
                 # A big request (the final protocol asks for >=8000 tokens) that
                 # this provider can only answer with <4000 would come back
                 # TRUNCATED — broken JSON, lost detail. Prefer a provider that
@@ -678,7 +709,7 @@ class _FallbackChain:
                     continue
             try:
                 if isinstance(b, OllamaProvider):
-                    out = b.complete(prompt, max_tokens=mt, force_json=force_json,
+                    out = b.complete(p, max_tokens=mt, force_json=force_json,
                                      on_token=on_token, should_stop=should_stop,
                                      json_schema=json_schema)
                 elif getattr(b, "accepts_should_stop", False):
@@ -686,10 +717,10 @@ class _FallbackChain:
                     # действовать внутри него, а не только между вызовами.
                     # Проверяем ПРИЗНАК, а не тип: при нескольких ключах здесь
                     # лежит обёртка ротации, и проверка типа её не узнавала.
-                    out = b.complete(prompt, mt, force_json,
+                    out = b.complete(p, mt, force_json,
                                      should_stop=should_stop)
                 else:
-                    out = b.complete(prompt, mt, force_json)
+                    out = b.complete(p, mt, force_json)
                 self._i = i
                 # Почему выбранный движок не отработал. Раньше это молча
                 # терялось: человек выбирал DeepSeek, протокол собирал Gemini,
@@ -705,10 +736,11 @@ class _FallbackChain:
         # Никто не ответил — пробуем отложенных. Урезанный протокол лучше, чем
         # полное отсутствие протокола после часа распознавания.
         for i, b, mt in tight:
+            pt = prompt if getattr(b, "cache_aware", False) else cache_strip(prompt)
             try:
-                out = (b.complete(prompt, mt, force_json, should_stop=should_stop)
+                out = (b.complete(pt, mt, force_json, should_stop=should_stop)
                        if getattr(b, "accepts_should_stop", False)
-                       else b.complete(prompt, mt, force_json))
+                       else b.complete(pt, mt, force_json))
                 self._i = i
                 for msg in errors:
                     if msg not in self.skipped and len(self.skipped) < 3:

@@ -958,10 +958,30 @@ _VERIFY_TEMPLATE = (
 
 _VERIFIED_LISTS = ("tasks", "minor_tasks", "done_tasks", "decisions")
 _MIN_QUOTE_CHARS = 10
-# Пунктов в одном запросе проверки. Раньше все 30-40 шли одним запросом с
-# потолком 3000 токенов — ответ обрезался, и ВСЕ пункты выходили «без
-# подтверждения» (К2).
-_VERIFY_BATCH = 15
+# Пунктов в одном запросе проверки.
+#
+# Каждый батч несёт ВЕСЬ фрагмент расшифровки целиком (см. цикл ниже: фрагмент
+# один и тот же, меняется только список пунктов). Замер: 25 871 символ входа на
+# 7 000 символов расшифровки — 3,7× текста встречи; доля проверки во входе
+# 31 % на короткой встрече, 43 % на часовой, 57 % на длинной. Значит каждый
+# лишний батч — лишняя копия расшифровки, и размер батча это ПРЯМО деньги.
+#
+# ⚠️ Батч 15 стоял здесь не случайно: раньше все 30-40 пунктов шли одним
+# запросом с потолком 3000 токенов, ответ обрезался, и ВСЕ пункты выходили
+# «без подтверждения» (К2). Корень был в ПОТОЛКЕ ОТВЕТА, не во входе, поэтому
+# батч поднят вместе с потолком (`_verify_max_tokens`), а на случай, если
+# ответ всё-таки не поместился, батч разрезается пополам и повторяется
+# (`_VERIFY_MIN_BATCH`) — вместо прежнего «сорвалась проверка целиком».
+_VERIFY_BATCH = max(1, int(os.getenv("VTX_VERIFY_BATCH", "50")))
+# Меньше этого не дробим: дальше дело не в размере ответа.
+_VERIFY_MIN_BATCH = 8
+# Потолок ответа: ~150 токенов на пункт с запасом. Замер на боевых ответах —
+# около 56 токенов на пункт, так что запас трёхкратный.
+_VERIFY_MAX_TOKENS = max(1000, int(os.getenv("VTX_VERIFY_MAX_TOKENS", "8000")))
+
+
+def _verify_max_tokens(n_points: int) -> int:
+    return min(_VERIFY_MAX_TOKENS, 150 * n_points + 300)
 # Мягкая дословность: цитата, в которой модель «починила» ошибку распознавания
 # или пропустила метку говорящего между репликами, — всё ещё цитата.
 _APPROX_RATIO = 0.85
@@ -1629,8 +1649,15 @@ def verify_protocol(result: dict, transcript_text: str, user_notes: str = "",
             break
         frag = _Fragment(fragment)
         items = sorted(pending.items())
-        for bi in range(0, len(items), _VERIFY_BATCH):
-            batch = [(n, p) for n, p in items[bi:bi + _VERIFY_BATCH] if n in pending]
+        # Очередь батчей, а не простой срез: неудачный батч разрезается пополам
+        # и возвращается в очередь. Единственная причина, по которой крупный
+        # батч мог не получиться, — не поместившийся ответ (К2), и половина
+        # пунктов помещается заведомо. Раньше любая осечка ставила
+        # verification.error и обрывала проверку ВСЕГО протокола.
+        queue = [items[bi:bi + _VERIFY_BATCH]
+                 for bi in range(0, len(items), _VERIFY_BATCH)]
+        while queue:
+            batch = [(n, p) for n, p in queue.pop(0) if n in pending]
             if not batch:
                 continue
             if cancel_check and cancel_check():
@@ -1644,11 +1671,18 @@ def verify_protocol(result: dict, transcript_text: str, user_notes: str = "",
             calls += 1
             try:
                 out = _complete_validated(backend, prompt, EvidenceList,
-                                          min(4000, 150 * len(batch) + 300),
+                                          _verify_max_tokens(len(batch)),
                                           on_progress, stage, cancel_check)
             except AnalysisCancelled:
                 raise
             except Exception as e:  # noqa: BLE001 — verification must not kill the job
+                if len(batch) > _VERIFY_MIN_BATCH:
+                    half = len(batch) // 2
+                    queue.insert(0, batch[half:])
+                    queue.insert(0, batch[:half])
+                    _LOG.info("Проверка: батч из %d пунктов не прошёл (%s) — "
+                              "делю пополам", len(batch), e)
+                    continue
                 failed_calls += 1
                 ver["error"] = f"Проверка не завершена: {e}"
                 break
@@ -1761,6 +1795,25 @@ def _window_for_topic(text: str, topic: dict, budget_chars: int) -> str:
     return text[start:start + budget_chars]
 
 
+# Сколько расшифровки давать на перегенерацию ОДНОЙ темы.
+#
+# Было `max(int(0.7 * _ctx_budget(backend)) * 3, 8000)` — у движка без
+# известного TPM это 210 000 символов, то есть любая реальная встреча влезала
+# целиком и окно `_window_for_topic` не срабатывало НИ РАЗУ. А перегенерация
+# вызывается не только руками: `refill_empty_topics` зовёт её до
+# `_MAX_TOPIC_REGENS` раз за один прогон, и на длинной встрече это шесть копий
+# всей расшифровки — больше, чем стоит сама встреча.
+#
+# Окно берётся вокруг найденного места темы, поэтому 20 000 символов (≈2 800
+# слов, полчаса разговора) описывают тему с запасом. Потолок движка остаётся
+# верхней границей: маленькое окно ему не повредит, большое — не влезет.
+_REGEN_WINDOW_CHARS = max(8000, int(os.getenv("VTX_REGEN_WINDOW_CHARS", "20000")))
+
+
+def _regen_window(backend) -> int:
+    return min(_REGEN_WINDOW_CHARS, max(int(0.7 * _ctx_budget(backend)) * 3, 8000))
+
+
 def regen_topic_details(transcript_text: str, topic: dict,
                         provider: str | None = None, keys: dict | None = None,
                         user_notes: str = "", backend=None) -> dict:
@@ -1771,7 +1824,7 @@ def regen_topic_details(transcript_text: str, topic: dict,
     длинной встречи цепочка могла быть переключена на облако (prefer_cloud), и
     создавать её заново значило бы откатиться на медленный локальный движок."""
     backend = backend or llm.get_provider_chain(provider, keys)
-    budget_chars = max(int(0.7 * _ctx_budget(backend)) * 3, 8000)
+    budget_chars = _regen_window(backend)
     text = _window_for_topic(transcript_text or "", topic, budget_chars)
     prompt = (
         "Ниже — расшифровка рабочей встречи (реплики с таймкодами [мм:сс]) и "
