@@ -15,7 +15,7 @@ import json
 import time
 from typing import Any
 
-from . import db, logs, security, usage
+from . import db, events, logs, security, usage
 
 _LOG = logs.get("vtx.stats")
 
@@ -48,6 +48,22 @@ MEETING_OUTCOMES = ("recorded", "missed", "skipped", "rec_error")
 # показывать. При десятке встреч «явка 90 %» — это «одна не состоялась»,
 # и читать её как процент вреднее, чем не читать вовсе.
 _MIN_DENOM = 20
+# И9: «прочитан» — открыт человеком в течение 72 часов после готовности.
+# Окно нужно, чтобы метрика мерила свежесть пользы, а не накапливалась вечно:
+# протокол, открытый через месяц, — это уже И15 «возврат к архиву».
+READ_WINDOW_SEC = float(__import__("os").getenv("VTX_READ_WINDOW_HOURS", "72")) * 3600
+# И63: агрегат «читал тот, кого не было на встрече» и прочие разрезы по людям
+# показываются только при пяти и более читателях — иначе доля вычисляется
+# обратно до конкретного человека.
+_MIN_READERS = 5
+
+
+def _median(xs: list[float]) -> float | None:
+    if not xs:
+        return None
+    xs = sorted(xs)
+    mid = len(xs) // 2
+    return xs[mid] if len(xs) % 2 else (xs[mid - 1] + xs[mid]) / 2
 
 
 def stop_reason_ru(code: str | None) -> str:
@@ -324,6 +340,31 @@ def summary(user: str, days: int = 30) -> dict:
         e["hours"] += float(r.get("duration_sec") or 0) / 3600
     top = sorted(agg.values(), key=lambda x: x["hours"], reverse=True)[:5]
 
+    # --- ценность: протокол прочитали и он пригодился (§5) -------------------
+    # ⚠️ Производство протоколов — это ПРЕДЛОЖЕНИЕ: бот ходит на встречи сам,
+    # и «сколько встреч обработано» растёт от календаря клиента, а не от пользы
+    # продукта. Ценность измеряется только потреблением, поэтому знаменатель —
+    # собранные протоколы, а числитель берётся из событий ЧЕЛОВЕКА.
+    ev = events.human_rows(events.load(team, since))
+    opens = events.by_job(ev, {events.OPENED})
+    actions = events.by_job(ev, events.ACTIONS)
+    built = [r for r in rows if r.get("protocol_ok")]
+    ready_at = {r["id"]: float(r.get("at") or 0) for r in built if r.get("id")}
+    read_jobs, lags, readers_per_job = [], [], []
+    for jid, ready in ready_at.items():
+        rs = opens.get(jid) or []
+        # ⚠️ Окно 72 часа считается от ГОТОВНОСТИ протокола, а не от запроса
+        # сводки: иначе вчерашние встречи всегда «не прочитаны», а месячные —
+        # всегда прочитаны, и метрика меряла бы длину периода.
+        fresh = [e for e in rs if 0 <= float(e.get("at") or 0) - ready <= READ_WINDOW_SEC]
+        if not fresh:
+            continue
+        read_jobs.append(jid)
+        lags.append((min(float(e.get("at") or 0) for e in fresh) - ready) / 60)
+        readers_per_job.append(len({e.get("actor") for e in fresh}))
+    acted = [jid for jid in ready_at if actions.get(jid)]
+    all_readers = {e.get("actor") for e in ev if e.get("kind") == events.OPENED}
+
     # --- исходы встреч (§14.2) ----------------------------------------------
     # Единица — ВСТРЕЧА, а не задача распознавания: клиенту всё равно, на каком
     # шаге сломалось, и провал планировщика («бот не пришёл») виден только
@@ -345,6 +386,28 @@ def summary(user: str, days: int = 30) -> dict:
     return {
         "days": int(days),
         "meetings": len(ok),
+        # --- ценность (§5) ---
+        # Знаменатель — протоколы, собранные БЕЗ фатальной ошибки: файл,
+        # которого нет, никто не мог прочитать.
+        "protocols_built": len(built),
+        "protocols_read": len(read_jobs),
+        # ⚠️ Читать только в паре с `readers_median`: одно открытие владельца,
+        # проверяющего бота, от чтения командой неотличимо.
+        "read_ratio": (round(len(read_jobs) / len(built), 3)
+                       if len(built) >= _MIN_DENOM else None),
+        "read_window_hours": round(READ_WINDOW_SEC / 3600),
+        "readers_median": _median([float(x) for x in readers_per_job]),
+        # ⚠️ Уникальных читателей за период показываем от пяти: меньше —
+        # и «доля» вычисляется обратно до конкретного человека (И63).
+        "readers_total": len(all_readers) if len(all_readers) >= _MIN_READERS else None,
+        # Медиана минут от готовности протокола до первого открытия. У команд с
+        # пятничным разбором длинный лаг законен — это не поломка.
+        "time_to_open_min": (round(_median(lags)) if lags else None),
+        # И12: прочитали ≠ пригодилось. В числителе — только действия ЧЕЛОВЕКА
+        # (правка, выгрузка, вопрос, перегенерация, задача в трекер).
+        "protocols_acted": len(acted),
+        "acted_ratio": (round(len(acted) / len(built), 3)
+                        if len(built) >= _MIN_DENOM else None),
         # --- исходы встреч ---
         "planned": planned,
         "recorded": by_outcome["recorded"],

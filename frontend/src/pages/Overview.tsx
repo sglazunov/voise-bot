@@ -3,7 +3,7 @@ import { Link } from "react-router-dom";
 import {
   CalendarClock, Clock3, ListChecks, Timer, Users2, Gavel, FileText,
   Radio, ShieldCheck, ArrowRight, Info, CheckCircle2, AlertTriangle, Coins,
-  BadgeCheck, Video, CloudOff,
+  BadgeCheck, Video, CloudOff, BookOpen, Zap,
 } from "lucide-react";
 import { Page } from "../components/Layout";
 import { Card, Ellipsis, StatusBadge } from "../components/ui";
@@ -217,6 +217,34 @@ export default function Overview() {
               : "Протоколов-черновиков"} />
         </div>
       )}
+      {/* Ценность: протокол прочитали и он пригодился.
+          ⚠️ Производство протоколов — это ПРЕДЛОЖЕНИЕ: бот ходит на встречи
+          сам, и «сколько встреч обработано» растёт от календаря, а не от
+          пользы. Поэтому здесь только потребление — и доля прочитанных
+          читается в паре с числом читателей на протокол: одно открытие
+          владельца, проверяющего бота, от чтения командой неотличимо. */}
+      {!!st?.protocols_built && (
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 mt-3.5">
+          <Mini icon={BookOpen}
+            n={st.read_ratio != null ? `${Math.round(st.read_ratio * 100)}%`
+              : `${st.protocols_read} из ${st.protocols_built}`}
+            label={`Протоколов прочитано за ${st.read_window_hours} ч`} />
+          <Mini icon={Users2} n={st.readers_median ?? "—"}
+            label="Читателей на протокол" />
+          <Mini icon={Clock3}
+            n={st.time_to_open_min != null
+              ? (st.time_to_open_min >= 60
+                  ? `${Math.round(st.time_to_open_min / 60)} ч`
+                  : `${st.time_to_open_min} мин`)
+              : "—"}
+            label="До первого открытия" />
+          <Mini icon={Zap}
+            n={st.acted_ratio != null ? `${Math.round(st.acted_ratio * 100)}%`
+              : `${st.protocols_acted} из ${st.protocols_built}`}
+            label="Протокол пригодился" />
+        </div>
+      )}
+
       {/* Исходы встреч: бот пришёл / не пришёл / отсеяли / запись сорвалась.
           Единица здесь — ВСТРЕЧА, а не задача распознавания: провал
           планировщика виден только отсюда (docs/ТЗ-МЕТРИКИ.md И36).

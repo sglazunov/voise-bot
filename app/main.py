@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, ConfigDict, Field
 
-from . import config, db, llm, analyze, logs, security, sms, user_creds
+from . import config, db, events, llm, analyze, logs, security, sms, user_creds
 from .jobs import store, STATUS_DONE, STATUS_CANCELLED
 
 log = logs.get("vtx.main")
@@ -467,6 +467,10 @@ def job_weeek_tasks_create(job_id: str, body: WeeekTasksCreate,
         job.weeek_tasks, body.items[:100], token, title, date, user,
         protocol_url=job.protocol_cloud_url or "")
     store._save(job)
+    created = sum(1 for r in results if (r or {}).get("ok"))
+    if created:
+        events.record(events.TASK_CREATED, user=user, job_id=job_id,
+                      once_a_day=False, extra={"count": created})
     return {"results": results, **_job_weeek_view(job)}
 
 
@@ -1076,6 +1080,25 @@ def get_job(job_id: str, user: str = Depends(current_user)):
     return {**job.to_public(), "stage": store.stage(job_id)}
 
 
+@app.post("/api/jobs/{job_id}/opened")
+def job_opened(job_id: str, user: str = Depends(current_user)):
+    """Человек открыл протокол встречи (docs/ТЗ-МЕТРИКИ.md И7, И9—И11).
+
+    ⚠️ Ставится ТОЛЬКО по осознанному действию человека — клику по встрече или
+    по вкладке «Протокол». Звать это из опроса (`GET /api/jobs`, `/partial`,
+    статус автоматики) НЕЛЬЗЯ: «доля прочитанных протоколов» — главная метрика
+    ценности, и от опроса она превратится в метрику трафика.
+
+    Протокола нет — события нет: открыли карточку идущей записи, а не документ.
+    Дедупликация «встреча + человек + сутки» живёт в `events.record`.
+    """
+    job = _require_owned(job_id, user)
+    if not job.analysis:
+        return {"ok": True, "recorded": False}
+    return {"ok": True,
+            "recorded": events.record(events.OPENED, user=user, job_id=job_id)}
+
+
 @app.post("/api/jobs/{job_id}/pause")
 def pause_job(job_id: str, user: str = Depends(current_user)):
     """Пауза: воркер замирает между сегментами, сделанное сохраняется."""
@@ -1129,6 +1152,11 @@ def reanalyze_job(job_id: str, body: ReanalyzeBody, user: str = Depends(current_
         raise HTTPException(404, "Задача не найдена")
     except ValueError as e:
         raise HTTPException(409, str(e))
+    # ⚠️ Пересборка УСПЕШНОГО протокола — это качество: человек прочитал и
+    # остался недоволен. Пересборка после ошибки — надёжность. Разделяем по
+    # флагу (И21), а не сваливаем в одну кучу.
+    events.record(events.REANALYZED, user=user, job_id=job_id, once_a_day=False,
+                  extra={"after_error": bool(job.analysis_error) or not job.analysis})
     return job.to_public()
 
 
@@ -1256,6 +1284,10 @@ def patch_analysis(job_id: str, body: AnalysisPatch, user: str = Depends(current
         job = store.update_analysis(job_id, body.analysis or {})
     except ValueError as e:
         raise HTTPException(409, str(e))
+    # Правка руками — самый сильный признак, что протокол прочитали и он нужен
+    # (И12, И19). `once_a_day=False`: правок за день бывает много, и каждая
+    # что-то говорит о качестве.
+    events.record(events.EDITED, user=user, job_id=job_id, once_a_day=False)
     return {"ok": True, "analysis": job.analysis}
 
 
@@ -1272,6 +1304,7 @@ def regen_topic(job_id: str, body: RegenTopicBody, user: str = Depends(current_u
         job = store.regen_topic(job_id, body.index, provider=body.provider)
     except ValueError as e:
         raise HTTPException(409, str(e))
+    events.record(events.REGEN, user=user, job_id=job_id, once_a_day=False)
     return {"ok": True, "analysis": job.analysis}
 
 
@@ -1287,9 +1320,13 @@ def ask_meeting_api(job_id: str, body: AskBody, user: str = Depends(current_user
     if len(q) < 3:
         raise HTTPException(400, "Сформулируйте вопрос.")
     try:
-        return {"ok": True, "answer": store.ask(job_id, q)}
+        answer = store.ask(job_id, q)
     except ValueError as e:
         raise HTTPException(409, str(e))
+    # ⚠️ Текст вопроса в событие НЕ идёт: содержание разговоров в аналитику не
+    # попадает ни в каком виде (И60). Нужен только факт.
+    events.record(events.ASKED, user=user, job_id=job_id, once_a_day=False)
+    return {"ok": True, "answer": answer}
 
 
 @app.post("/api/jobs/{job_id}/redeliver")
@@ -1355,6 +1392,10 @@ def get_result(job_id: str, format: str = "txt", provider: str = "",
         # no-store: адрес у документа один и тот же, а содержимое после
         # «Пересобрать» новое. Без запрета браузер отдавал СТАРЫЙ Word из
         # своего кэша (эвристика по Last-Modified) — «скачивается старая версия».
+        # Выгрузка — человеческое действие (И12): протокол унесли из сервиса.
+        # ⚠️ Что с ним было дальше, мы не знаем: «переслал команде» и
+        # «распечатал и забыл» здесь неотличимы — читать только вместе с И9.
+        events.record(events.EXPORTED, user=user, job_id=job_id)
         return FileResponse(
             path,
             media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",

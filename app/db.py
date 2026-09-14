@@ -301,6 +301,22 @@ CREATE TABLE IF NOT EXISTS meeting_series (
     username    TEXT PRIMARY KEY,
     data        JSONB NOT NULL
 );
+-- Продуктовые события: что сделал ЧЕЛОВЕК (docs/ТЗ-МЕТРИКИ.md §4).
+-- Человек обозначен ПСЕВДОНИМОМ (security.pseudonym), логина здесь нет и
+-- содержимого разговора — тоже: только вид действия, встреча и время.
+-- Первичный ключ несёт дедупликацию «встреча + человек + сутки» (И7): иначе
+-- «доля прочитанных протоколов» считала бы не читателей, а нажатия.
+CREATE TABLE IF NOT EXISTS product_events (
+    id       TEXT PRIMARY KEY,
+    team     TEXT NOT NULL,
+    kind     TEXT NOT NULL,
+    job_id   TEXT,
+    actor    TEXT,
+    source   TEXT,
+    at       DOUBLE PRECISION,
+    extra    JSONB
+);
+CREATE INDEX IF NOT EXISTS idx_product_events_team_at ON product_events(team, at);
 """
 
 
@@ -677,11 +693,44 @@ def delete_user_data(user: str) -> None:
                       "meeting_series"):
             cur.execute(f"DELETE FROM {table} WHERE username=%s", (user,))
         cur.execute("DELETE FROM meeting_stats WHERE team=%s", (user,))
+        # И68: полное удаление по требованию — журнал событий тоже данные команды.
+        cur.execute("DELETE FROM product_events WHERE team=%s", (user,))
 
 
 # --------------------------------------------------------------------------- #
 # search_docs — full-text index over the team's transcripts + protocols (Д14)
 # --------------------------------------------------------------------------- #
+_EVENT_COLS = ["id", "team", "kind", "job_id", "actor", "source", "at", "extra"]
+
+
+def event_add(row: dict) -> bool:
+    """Записать событие. False — такое уже было (дедуп по первичному ключу).
+
+    ⚠️ `DO NOTHING`, а не `DO UPDATE`: на первом событии стоит «время до
+    первого открытия» (И11), и перезапись сдвигала бы его на последнее.
+    """
+    with _conn() as conn, _cur(conn) as cur:
+        cols = ", ".join(_EVENT_COLS)
+        ph = ", ".join(["%s"] * len(_EVENT_COLS))
+        cur.execute(f"INSERT INTO product_events ({cols}) VALUES ({ph}) "
+                    "ON CONFLICT (id) DO NOTHING",
+                    [_json(row.get(c)) if c == "extra" else row.get(c)
+                     for c in _EVENT_COLS])
+        return bool(cur.rowcount)
+
+
+def events_load(team: str, since: float) -> list[dict]:
+    with _conn() as conn, _cur(conn) as cur:
+        cur.execute(f"SELECT {', '.join(_EVENT_COLS)} FROM product_events "
+                    "WHERE team=%s AND at >= %s ORDER BY at", (team, since))
+        return [{c: r.get(c) for c in _EVENT_COLS} for r in cur.fetchall()]
+
+
+def events_delete(team: str) -> None:
+    with _conn() as conn, _cur(conn) as cur:
+        cur.execute("DELETE FROM product_events WHERE team=%s", (team,))
+
+
 def search_save(job_id: str, team: str, title: str, body: str,
                 created_at: float) -> None:
     with _conn() as conn, _cur(conn) as cur:
