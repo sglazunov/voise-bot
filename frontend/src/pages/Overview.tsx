@@ -3,7 +3,7 @@ import { Link } from "react-router-dom";
 import {
   CalendarClock, Clock3, ListChecks, Timer, Users2, Gavel, FileText,
   Radio, ShieldCheck, ArrowRight, Info, CheckCircle2, AlertTriangle, Coins,
-  BadgeCheck,
+  BadgeCheck, Video, CloudOff,
 } from "lucide-react";
 import { Page } from "../components/Layout";
 import { Card, Ellipsis, StatusBadge } from "../components/ui";
@@ -217,6 +217,37 @@ export default function Overview() {
               : "Протоколов-черновиков"} />
         </div>
       )}
+      {/* Исходы встреч: бот пришёл / не пришёл / отсеяли / запись сорвалась.
+          Единица здесь — ВСТРЕЧА, а не задача распознавания: провал
+          планировщика виден только отсюда (docs/ТЗ-МЕТРИКИ.md И36).
+          ⚠️ Доля явки показывается только при знаменателе от 20 — иначе это
+          пересказанная процентами единица. */}
+      {!!st?.planned && (
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 mt-3.5">
+          <Mini icon={Video} n={`${st.recorded} из ${st.planned}`}
+            label={st.skipped ? `Записано (отсеяно: ${st.skipped})` : "Записано из запланированных"} />
+          <Mini icon={ShieldCheck}
+            n={st.attendance != null ? `${Math.round(st.attendance * 100)}%` : "—"}
+            label={st.attendance != null ? "Явка бота"
+              : `Явка: мало данных (${st.attendance_base} встр.)`} />
+          <Mini icon={AlertTriangle} n={st.missed + st.rec_failed || "—"}
+            label={st.rec_failed
+              ? `Не записано (сорвалось: ${st.rec_failed})`
+              : "Бот не пришёл"} />
+          <Mini icon={CloudOff} n={st.upload_failed || "—"}
+            label="Записей осталось на сервере" />
+        </div>
+      )}
+      {!!st?.by_stop_reason?.length && (
+        <div className="text-[12px] mt-2 flex flex-wrap gap-x-3 gap-y-1"
+          style={{ color: "var(--muted)" }}>
+          <span>Чем кончались записи:</span>
+          {st.by_stop_reason.map((r: any) => (
+            <span key={r.reason}>{r.label} — {r.count}</span>
+          ))}
+        </div>
+      )}
+
       {st?.verify_versions && st.verify_versions.length > 1 && (
         <div className="text-[12px] mt-2" style={{ color: "var(--muted)" }}>
           ⚠️ За период правила проверки менялись ({st.verify_versions.join(", ")}) —

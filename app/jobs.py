@@ -114,6 +114,11 @@ class Job:
     context_hint: str = ""           # matches saved AI-context projects (meeting/project name)
     user_notes: str = ""             # participant's own live notes — the protocol's skeleton (Д6)
     preset: str = ""                 # protocol preset (Д11): planerka|design|demo|one_on_one|custom
+    # Почему остановилась запись, из которой взялась эта задача: silence |
+    # max_duration | chat_stop | call_ended | left_call | nobody_joined |
+    # thinned_out | stopped | error. Рекордер возвращает это с самого начала,
+    # но никто не читал — переживает ретеншн в meeting_stats.
+    stop_reason: str = ""
     delete_audio_when_done: bool = False  # delete the source media after processing
                                           # (recordings already sent to the UI's cloud)
     owner: str = ""                  # the login that owns this job (isolation)
@@ -238,7 +243,8 @@ class JobStore:
                deliver_protocol_cloud: bool = False, deliver_weeek_task: str = "",
                context_hint: str = "", model: str = "",
                delete_audio_when_done: bool = False, owner: str = "",
-               user_notes: str = "", preset: str = "") -> Job:
+               user_notes: str = "", preset: str = "",
+               stop_reason: str = "") -> Job:
         job = Job(
             id=uuid.uuid4().hex[:12],
             filename=filename,
@@ -259,6 +265,7 @@ class JobStore:
             context_hint=(context_hint or "").strip(),
             user_notes=(user_notes or "").strip(),
             preset=(preset or "").strip(),
+            stop_reason=(stop_reason or "").strip(),
             delete_audio_when_done=delete_audio_when_done,
             owner=_team(owner),   # jobs belong to the TEAM, not the individual
         )

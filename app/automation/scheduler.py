@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .. import config, db, logs, meeting_series, security
+from .. import config, db, logs, meeting_series, security, stats
 from . import (clouds, delivery, recorder, settings as auto_settings,
                snapshots, weeek)
 
@@ -54,6 +54,13 @@ class MeetingState:
     cloud_url: str | None = None
     out_path: str | None = None       # local recording file — lets a restart pick it up
     upload_error: str | None = None   # why the video didn't reach the cloud (retrying)
+    # Чем кончилась запись: silence | max_duration | chat_stop | call_ended |
+    # left_call | nobody_joined | thinned_out | stopped | error. Рекордер
+    # возвращает это в результате, а планировщик раньше выбрасывал — и
+    # четырёхчасовые записи пустой комнаты приходилось разбирать руками.
+    stop_reason: str | None = None
+    rec_bytes: int = 0                # размер записи: немая встреча видна сразу
+    recorded_sec: float = 0.0         # сколько длилась запись (по часам сервера)
     do_protocol: bool = False         # whether this meeting also builds a protocol
     record_flag: bool | None = None   # Weeek checkbox «Запись встречи»: True/False/unset
     stop_flag: bool = False           # manual "stop this recording"
@@ -79,6 +86,7 @@ class MeetingState:
                 "state": self.state, "detail": self.detail,
                 "job_id": self.job_id, "cloud_url": self.cloud_url,
                 "upload_error": self.upload_error,
+                "stop_reason": self.stop_reason,
                 "has_live": bool(self.live_text), "has_notes": bool(self.live_notes),
                 "do_protocol": self.do_protocol, "record_flag": self.record_flag,
                 # Есть ли уже записанный файл. Нужно интерфейсу: у красной
@@ -593,6 +601,12 @@ class Scheduler:
         now = datetime.now(timezone.utc).timestamp()
         lookahead = int(cfg.get("lookahead_min", 2)) * 60
         candidates = []
+        # Пропущенные и отсеянные встречи — тоже исход, и до сих пор он нигде не
+        # оставался: карточка живёт в памяти, снапшота не было, строки метрики
+        # не было. Собираем здесь, а пишем ПОСЛЕ выхода из лока: снапшот и
+        # метрика — это диск и база, держать на них глобальный лок нельзя
+        # (тот же урок, что и V20).
+        ended: list[tuple[MeetingState, str]] = []
         with self._lock:
             for st in self._states.values():
                 if st.owner != user:
@@ -605,17 +619,23 @@ class Scheduler:
                 # only record meetings that come due while we're running.
                 if start < self._boot_time:
                     st.state, st.detail = "missed", "Началась до запуска приложения — пропущено."
+                    ended.append((st, "missed"))
                     continue
                 if now < start - lookahead:
                     continue  # not yet
                 if now > start + _LATE_GRACE_SEC:
                     st.state, st.detail = "missed", "Время начала прошло — пропущено."
+                    ended.append((st, "missed"))
                     continue
                 ok, why = self._passes_filter(st, cfg)
                 if not ok:
                     st.state, st.detail = "skipped", f"Не записываем: {why}."
+                    ended.append((st, "skipped"))
                     continue
                 candidates.append((start, st))
+        for st, outcome in ended:
+            snapshots.save(st)
+            self._record_outcome(st, outcome)
         # Launch as many due meetings as there are FREE recording slots — up to
         # MAX_SLOTS run in parallel, each isolated on its own display + sink.
         candidates.sort(key=lambda x: x[0])  # earliest-starting first
@@ -628,6 +648,7 @@ class Scheduler:
                          and s.state == "recording"}
         for _, chosen in candidates:
             if chosen.url and room_key(chosen.url) in busy_urls:
+                marked = False
                 with self._lock:
                     if chosen.state == "scheduled":
                         chosen.state, chosen.detail = (
@@ -635,6 +656,10 @@ class Scheduler:
                                        "записывается): всё сказанное попадёт в ту "
                                        "запись. Ссылки этой задаче можно "
                                        "прикрепить вручную (кнопка-скрепка).")
+                        marked = True
+                if marked:      # снапшот и метрику пишем вне лока
+                    snapshots.save(chosen)
+                    self._record_outcome(chosen, "skipped")
                 continue
             slot = recorder.acquire_slot()
             if slot is None:
@@ -716,6 +741,7 @@ class Scheduler:
                                  args=(st, cfg, out), daemon=True,
                                  name="vtx-live-transcribe").start()
 
+            rec_started = time.time()
             res = recorder.record_meeting(
                 st.url, out, cfg, on_log=log, slot=slot,
                 should_stop=lambda: (self._stop.is_set()
@@ -729,8 +755,26 @@ class Scheduler:
             # через десять минут помечались «пропущена».
             recorder.release_slot(slot)
             slot = None
+            # ⚠️ Причина остановки записи. Рекордер возвращает её с самого
+            # начала (silence, max_duration, chat_stop, call_ended, left_call,
+            # nobody_joined, thinned_out, stopped, error), а планировщик её НЕ
+            # ЧИТАЛ — и почему запись пустой комнаты шла четыре часа, каждый раз
+            # выясняли руками по логам. Теперь она доезжает до карточки, до
+            # снапшота и до метрики (docs/ТЗ-МЕТРИКИ.md §14.2).
+            st.stop_reason = res.get("reason") or None
+            st.rec_bytes = int(res.get("size") or 0)
+            st.recorded_sec = max(0.0, time.time() - rec_started)
+            if st.stop_reason:
+                log("Запись остановлена: "
+                    f"{stats.stop_reason_ru(st.stop_reason)}.")
+            if st.stop_reason == "max_duration":
+                # Единственная причина, которая всегда означает «что-то пошло не
+                # так»: встречу не закрыли, а бот упёрся в предел длительности.
+                log("⚠ Запись дошла до предела длительности — встречу, похоже, "
+                    "никто не завершил. Проверьте, не пишется ли пустая комната.")
             if not res.get("ok"):
                 self._set(st, "error", res.get("error") or "Запись не удалась.")
+                self._record_outcome(st, "rec_error")
                 return
             out = res.get("path") or out
             st.out_path = out
@@ -754,6 +798,11 @@ class Scheduler:
             else:
                 st.upload_error = up.get("error") or "облако недоступно"
                 log(f"Облако: {st.upload_error}")
+            # Исход встречи в метрику: запись состоялась. Пишется здесь, а не в
+            # конце конвейера, — дальше идут распознавание и протокол, у них
+            # своя строка (kind="job"), и падение любого из них не должно
+            # стирать факт «бот пришёл и записал».
+            self._record_outcome(st, "recorded")
 
             # Write the recording link into the task's «Видео встречи» custom field.
             field = (cfg.get("weeek_video_field") or "").strip()
@@ -802,6 +851,7 @@ class Scheduler:
                     context_hint=str(st.title or ""),
                     user_notes=st.live_notes,
                     preset=preset,
+                    stop_reason=st.stop_reason or "",
                     delete_audio_when_done=delivered_elsewhere,
                     owner=user)
                 st.job_id = job.id
@@ -883,6 +933,10 @@ class Scheduler:
                 weeek.add_comment(token, st.task_id,
                                   f"🎥 Запись встречи: {st.cloud_url}")
             snapshots.save(st)  # the late-delivered cloud link survives restarts
+            # Запись всё-таки уехала — строка исхода переписывается уже без
+            # upload_error. Иначе «осталось на сервере» в метрике оставалось бы
+            # навсегда, хотя облако приняло видео получасом позже.
+            self._record_outcome(st, "recorded")
             if delivery.delivered_elsewhere(up, out):
                 job = store.get(st.job_id) if st.job_id else None
                 if job is not None and job.status != "done":
@@ -1026,8 +1080,12 @@ class Scheduler:
     # Deploys restart the process, wiping the in-memory states; these snapshots
     # keep the outcome of already-handled meetings, so they don't come back as
     # «пропущена» after every `docker compose up -d --build`.
+    # ⚠️ «missed» и «skipped» тоже сохраняются: иначе перезапуск стирал
+    # единственный след встречи, на которую бот не пришёл или которую отсеял
+    # фильтр, — а «явка бота» (docs/ТЗ-МЕТРИКИ.md И36) считается именно от
+    # запланированных встреч. Без них провал планировщика невидим.
     _PERSIST_STATES = {"recording", "uploading", "transcribing", "analyzing",
-                       "done", "error"}
+                       "done", "error", "missed", "skipped"}
 
 
     def _revive_recorded_slot(self, user: str, task_id: str,
@@ -1134,7 +1192,10 @@ class Scheduler:
                     cloud_url=snap.get("cloud_url"),
                     out_path=snap.get("out_path"),
                     live_notes=str(snap.get("live_notes") or ""),
-                    do_protocol=bool(snap.get("do_protocol")))
+                    do_protocol=bool(snap.get("do_protocol")),
+                    upload_error=snap.get("upload_error"),
+                    stop_reason=snap.get("stop_reason"),
+                    rec_bytes=int(snap.get("rec_bytes") or 0))
                 with self._lock:
                     st = self._states.setdefault(key, st)
                 if not (st.do_protocol and cfg.get("upload_protocol", True)):
@@ -1215,8 +1276,11 @@ class Scheduler:
         st.job_id = snap.get("job_id")
         st.cloud_url = snap.get("cloud_url")
         st.do_protocol = bool(snap.get("do_protocol"))
+        st.upload_error = snap.get("upload_error")
+        st.stop_reason = snap.get("stop_reason")
+        st.rec_bytes = int(snap.get("rec_bytes") or 0)
         state = snap.get("state")
-        if state in ("done", "error"):
+        if state in ("done", "error", "missed", "skipped"):
             st.state, st.detail = state, snap.get("detail", "")
         else:
             # The restart caught it mid-pipeline. The recording itself finished
@@ -1225,6 +1289,15 @@ class Scheduler:
             st.detail = ("Прервано перезапуском сервиса — запись в облаке."
                          if st.cloud_url else
                          "Прервано перезапуском сервиса.")
+
+    def _record_outcome(self, st: MeetingState, outcome: str) -> None:
+        """Исход встречи в метрику — пережить и ретеншн задач, и перезапуск.
+
+        Отдельно от строки задачи распознавания: встреча, на которую бот не
+        пришёл, задачи не порождает вовсе, а «явка бота» считается именно от
+        запланированных встреч (docs/ТЗ-МЕТРИКИ.md И36, §14.2).
+        """
+        stats.record_meeting(st, outcome)
 
     def _set(self, st: MeetingState, state: str, detail: str) -> None:
         with self._lock:

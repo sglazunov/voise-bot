@@ -73,7 +73,7 @@ JOB_SCALAR_COLS = [
     "delete_audio_when_done", "status", "progress", "created_at", "started_at",
     "finished_at", "error", "duration", "speakers", "diarization_error",
     "speaker_error", "screen_error", "protocol_cloud_url", "delivery_error",
-    "screen_segments", "analysis_error", "transcribe_sec",
+    "screen_segments", "analysis_error", "transcribe_sec", "stop_reason",
 ]
 JOB_JSON_COLS = ["video_participants", "analysis", "docx_providers", "weeek_tasks",
                  "llm_usage"]
@@ -170,6 +170,9 @@ ALTER TABLE jobs ADD COLUMN IF NOT EXISTS weeek_tasks JSONB;
 -- взято из кэша, разбивка по моделям. Копится за все прогоны, включая
 -- пересборки, — деньги тратятся за каждый.
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS llm_usage JSONB;
+-- Чем кончилась запись, из которой взялась задача (silence, max_duration,
+-- chat_stop…). Рекордер возвращал это всегда, но никто не читал.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS stop_reason TEXT;
 CREATE TABLE IF NOT EXISTS search_docs (
     job_id     TEXT PRIMARY KEY,
     username   TEXT,
@@ -266,6 +269,23 @@ ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS tasks_with_owner INTEGER;
 -- Расход по каждой модели отдельно: раньше by_model схлопывался в строку имён
 -- без чисел, и «сколько стоит Gemini против Groq» посчитать было нечем.
 ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS tokens_by_model JSONB;
+-- Исходы встречи (docs/ТЗ-МЕТРИКИ.md §14.2). До этого метрика знала только те
+-- встречи, по которым СОЗДАЛАСЬ задача распознавания: пропущенная, отфильтрованная
+-- и сорвавшаяся запись не оставляли следа вообще, а «явка бота» (И36) требует
+-- знаменателя из ЗАПЛАНИРОВАННЫХ встреч. Поэтому строки теперь двух видов:
+--   kind='job'     — задача распознавания (всё, что было раньше; NULL у старых строк);
+--   kind='meeting' — исход встречи у планировщика (missed|skipped|rec_error|recorded).
+-- Считать их вместе нельзя: у записанной встречи есть и та, и другая строка.
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS kind TEXT;
+-- Почему остановилась запись: silence|max_duration|chat_stop|call_ended|
+-- left_call|nobody_joined|thinned_out|stopped|error. Рекордер возвращал это с
+-- самого начала, а планировщик не читал — четырёхчасовые записи пустой комнаты
+-- разбирались руками именно поэтому.
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS stop_reason TEXT;
+-- Запись не уехала в облако (текст причины). Видео не должно жить на сервере.
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS upload_error TEXT;
+-- Человеческая причина пропуска/отказа — то, что видит пользователь в карточке.
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS detail TEXT;
 CREATE TABLE IF NOT EXISTS ai_context (
     username     TEXT PRIMARY KEY,
     global_text  TEXT DEFAULT ''
@@ -714,7 +734,8 @@ _STAT_COLS = ["id", "team", "at", "title", "duration_sec", "speakers",
               "transcribe_sec", "verify_checked", "verify_confirmed",
               "verify_mode", "verify_version", "topics", "empty_topics",
               "dropped_topics", "dropped_items", "summary_is_toc", "edited",
-              "tasks_with_owner", "tokens_by_model"]
+              "tasks_with_owner", "tokens_by_model",
+              "kind", "stop_reason", "upload_error", "detail"]
 # Колонки, которые в файловом режиме и в Postgres лежат как JSON.
 _STAT_JSON_COLS = {"tokens_by_model"}
 

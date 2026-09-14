@@ -46,6 +46,13 @@ def of_state(st) -> dict:
             "out_path": st.out_path,
             "live_notes": st.live_notes,
             "do_protocol": st.do_protocol,
+            # Исход записи. Раньше в снапшот не попадал НИ ОДИН из трёх: после
+            # перезапуска нельзя было узнать ни почему остановилась запись, ни
+            # что она не уехала в облако. Поздняя дозагрузка при этом уже
+            # работала — по полю, которого в снапшоте не было.
+            "upload_error": st.upload_error,
+            "stop_reason": st.stop_reason,
+            "rec_bytes": int(getattr(st, "rec_bytes", 0) or 0),
             "saved_at": time.time()}
 
 

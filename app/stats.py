@@ -26,6 +26,35 @@ MANUAL_MINUTES_COEFF = float(__import__("os").getenv("VTX_MINUTES_COEFF", "0.5")
 _MAX_ROWS = 5000     # file backend: keep the log bounded
 
 
+# Почему остановилась запись — по-русски, одним словарём на весь проект.
+# Коды приходят из рекордера (`recorder.record_meeting` → `reason`), а раньше
+# никуда не доезжали: и карточка встречи, и метрика молчали о том, чем запись
+# кончилась. См. docs/ТЗ-МЕТРИКИ.md §14.2.
+STOP_REASON_RU = {
+    "silence": "тишина после разговора",
+    "max_duration": "предел длительности",
+    "chat_stop": "стоп-слово в чате",
+    "call_ended": "встречу завершили для всех",
+    "left_call": "бота убрали из звонка",
+    "nobody_joined": "никто не пришёл",
+    "thinned_out": "все вышли",
+    "stopped": "остановлено вручную",
+    "error": "сбой во время записи",
+}
+# Исход встречи у планировщика. Считается ОТДЕЛЬНО от строки задачи
+# распознавания: у записанной встречи есть обе, складывать их нельзя.
+MEETING_OUTCOMES = ("recorded", "missed", "skipped", "rec_error")
+# ⚠️ Порог из ТЗ §9: при знаменателе меньше 20 процент не считать и не
+# показывать. При десятке встреч «явка 90 %» — это «одна не состоялась»,
+# и читать её как процент вреднее, чем не читать вовсе.
+_MIN_DENOM = 20
+
+
+def stop_reason_ru(code: str | None) -> str:
+    code = (code or "").strip()
+    return STOP_REASON_RU.get(code, code or "причина неизвестна")
+
+
 def _path(team: str):
     return security.user_dir(team) / "meeting_stats.json"
 
@@ -64,6 +93,11 @@ def record(job: Any) -> None:
             "participants": len(a.get("participants") or []),
             "has_protocol": bool(a),
             "ok": getattr(job, "status", "") != "error",
+            # Вид строки. У записанной встречи их ДВЕ — исход встречи
+            # (kind="meeting") и эта, по задаче распознавания. Складывать их
+            # нельзя, поэтому сводка разделяет их по этому полю; у строк,
+            # записанных до появления колонки, оно пустое и значит "job".
+            "kind": "job",
         }
         # Расход модели. В строке задачи он тоже есть, но строку через сутки
         # стирает ретеншн, а «сколько команда потратила за месяц» нужно
@@ -94,6 +128,54 @@ def record(job: Any) -> None:
         # потерянная строка выглядит как «встречи не было».
         _LOG.warning("Метрика по задаче %s не записана",
                      getattr(job, "id", "?"), exc_info=True)
+
+
+def record_meeting(st: Any, outcome: str) -> None:
+    """Сохранить ИСХОД ВСТРЕЧИ у планировщика (docs/ТЗ-МЕТРИКИ.md §14.2).
+
+    До этого метрика знала только те встречи, по которым создалась задача
+    распознавания. Встреча, на которую бот не пришёл, которую отсеял фильтр или
+    у которой сорвалась запись, не оставляла следа НИГДЕ: карточка живёт в
+    памяти, снапшота у таких состояний не было, строки метрики — тоже. Поэтому
+    «явка бота» (И36), у которой знаменатель — запланированные встречи, была
+    непосчитаема в принципе.
+
+    Ключ строки — ключ карточки встречи («команда:задача:время начала»), так что
+    повторные вызовы по одной встрече обновляют её же строку: отменённый пропуск
+    («записывать всё-таки будем») не оставляет лишнего провала.
+    """
+    try:
+        if outcome not in MEETING_OUTCOMES:
+            raise ValueError(f"неизвестный исход встречи: {outcome}")
+        team = security.team_of(getattr(st, "owner", "") or "")
+        if not team:
+            return
+        row = {
+            "id": f"m:{getattr(st, 'key', '') or id(st)}",
+            "team": team,
+            "at": time.time(),
+            "title": (getattr(st, "title", "") or "")[:200],
+            "kind": "meeting",
+            "status": outcome,
+            "ok": outcome == "recorded",
+            "has_protocol": False,
+            "duration_sec": float(getattr(st, "recorded_sec", 0) or 0),
+            "stop_reason": getattr(st, "stop_reason", None) or None,
+            # Запись не уехала в облако. Поле существовало и раньше, но жило
+            # только в памяти карточки — после перезапуска узнать было негде.
+            "upload_error": (str(getattr(st, "upload_error", "") or "")[:300]
+                             or None),
+            "detail": (str(getattr(st, "detail", "") or "")[:300] or None),
+        }
+        if db.enabled():
+            db.stats_add(row)
+        else:
+            rows = [r for r in _file_load(team) if r.get("id") != row["id"]]
+            rows.append(row)
+            _file_save(team, rows)
+    except Exception:
+        _LOG.warning("Исход встречи %s (%s) не записан",
+                     getattr(st, "key", "?"), outcome, exc_info=True)
 
 
 def _quality_row(job: Any, a: dict) -> dict:
@@ -140,6 +222,10 @@ def _quality_row(job: Any, a: dict) -> dict:
         "summary_is_toc": bool(q.get("summary_is_toc")) if q else None,
         "edited": bool(a.get("_edited")),
         "tasks_with_owner": with_owner if tasks else None,
+        # Чем кончилась запись, из которой взялась задача. Нужно рядом с
+        # качеством: протокол встречи, оборванной по пределу длительности, и
+        # протокол нормально завершённой — разные истории.
+        "stop_reason": getattr(job, "stop_reason", "") or None,
     }
 
 
@@ -148,9 +234,16 @@ def summary(user: str, days: int = 30) -> dict:
     team = security.team_of(user)
     since = time.time() - max(1, int(days)) * 86400
     if db.enabled():
-        rows = db.stats_load(team, since)
+        all_rows = db.stats_load(team, since)
     else:
-        rows = [r for r in _file_load(team) if (r.get("at") or 0) >= since]
+        all_rows = [r for r in _file_load(team) if (r.get("at") or 0) >= since]
+
+    # ⚠️ Два вида строк в одной таблице. У записанной встречи есть И строка
+    # исхода (kind="meeting"), И строка задачи распознавания — считать их
+    # вместе значит удвоить встречи. Строки, записанные до появления колонки,
+    # пустые по kind и относятся к задачам.
+    rows = [r for r in all_rows if (r.get("kind") or "job") == "job"]
+    mrows = [r for r in all_rows if r.get("kind") == "meeting"]
 
     ok = [r for r in rows if r.get("ok")]
     secs = sum(float(r.get("duration_sec") or 0) for r in ok)
@@ -231,9 +324,45 @@ def summary(user: str, days: int = 30) -> dict:
         e["hours"] += float(r.get("duration_sec") or 0) / 3600
     top = sorted(agg.values(), key=lambda x: x["hours"], reverse=True)[:5]
 
+    # --- исходы встреч (§14.2) ----------------------------------------------
+    # Единица — ВСТРЕЧА, а не задача распознавания: клиенту всё равно, на каком
+    # шаге сломалось, и провал планировщика («бот не пришёл») виден только
+    # отсюда.
+    by_outcome = {o: sum(1 for r in mrows if r.get("status") == o)
+                  for o in MEETING_OUTCOMES}
+    planned = len(mrows)
+    # Знаменатель явки — запланированные МИНУС сознательно пропущенные
+    # (фильтр, «не записывать», бот уже в этом звонке): отказ по решению — не
+    # провал бота.
+    due = planned - by_outcome["skipped"]
+    upload_failed = sum(1 for r in mrows if r.get("upload_error"))
+    stop_reasons: dict[str, int] = {}
+    for r in mrows:
+        code = r.get("stop_reason")
+        if code:
+            stop_reasons[code] = stop_reasons.get(code, 0) + 1
+
     return {
         "days": int(days),
         "meetings": len(ok),
+        # --- исходы встреч ---
+        "planned": planned,
+        "recorded": by_outcome["recorded"],
+        "missed": by_outcome["missed"],
+        "skipped": by_outcome["skipped"],
+        "rec_failed": by_outcome["rec_error"],
+        # ⚠️ Доля показывается только при знаменателе от 20 (ТЗ §9): при пяти
+        # встречах процент — это пересказанная единица, и он вводит в
+        # заблуждение сильнее, чем её отсутствие. Абсолютные числа — всегда.
+        "attendance": (round(by_outcome["recorded"] / due, 3)
+                       if due >= _MIN_DENOM else None),
+        "attendance_base": due,
+        # Запись осталась на сервере, потому что облако её не приняло.
+        # Видео на сервере жить не должно — это прямой расход диска.
+        "upload_failed": upload_failed,
+        "by_stop_reason": [{"reason": c, "label": stop_reason_ru(c), "count": n}
+                           for c, n in sorted(stop_reasons.items(),
+                                              key=lambda kv: -kv[1])],
         "hours": round(secs / 3600, 1),
         "person_hours": round(person_secs / 3600, 1),
         "protocols": protocols,
