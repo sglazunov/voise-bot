@@ -103,8 +103,16 @@ class TestMechMerge:
 
 class TestBudget:
     def test_groq_budget_is_tpm(self):
-        class B: name = "groq:llama-3.3-70b"
-        assert _ctx_budget(B()) == 12000
+        """Бюджет Groq берётся из PROVIDER_TPM, а не из общего умолчания.
+
+        Значение сознательно меньше минутного лимита Groq: оно же служит
+        оценкой ОКНА КОНТЕКСТА, а окно у gpt-oss (131 072) наступает раньше
+        лимита в 250 000 токенов в минуту."""
+        from app import config
+
+        class B: name = "groq:openai/gpt-oss-120b"
+        assert _ctx_budget(B()) == config.PROVIDER_TPM["groq"]
+        assert config.PROVIDER_TPM["groq"] < 131_072, "бюджет обязан влезать в окно"
 
     def test_ollama_budget_is_num_ctx(self):
         class B: name = "ollama:qwen2.5:7b"

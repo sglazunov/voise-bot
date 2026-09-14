@@ -134,3 +134,20 @@ class TestStatsRow:
         stats.record(job)
         s = stats.summary("carol", days=7)
         assert s["llm_calls"] == 0 and s["usd"] is None
+
+
+class TestGroqPrices:
+    """Цены Groq взяты из его каталога моделей (14.09.2026) — это самый дешёвый
+    движок в проекте, и на нём держится вся арифметика подписки."""
+
+    def test_имя_с_косой_чертой_находит_цену(self):
+        # Провайдер сообщает «groq/openai/gpt-oss-120b» — имя модели само
+        # содержит косую черту, и разбор не должен на ней спотыкаться.
+        assert usage.price_of("groq/openai/gpt-oss-120b") == (0.15, 0.60)
+        assert usage.price_of("groq/openai/gpt-oss-20b") == (0.075, 0.30)
+
+    def test_часовая_встреча_стоит_копейки(self):
+        # 77 400 токенов входа и 14 600 выхода — замер часовой встречи.
+        c = usage.cost_usd({"groq/openai/gpt-oss-120b":
+                            {"in": 77400, "cached": 0, "out": 14600}})
+        assert 0.015 < c < 0.03, f"ожидали пару центов, получили {c}"
