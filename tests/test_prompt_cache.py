@@ -80,3 +80,44 @@ class TestRegenWindow:
         out = analyze._window_for_topic(
             text, {"topic": "УНИКАЛЬНОЕСЛОВО", "details": "тарифы"}, 2000)
         assert "УНИКАЛЬНОЕСЛОВО" in out and len(out) <= 2000
+
+
+class TestGeminiImplicitCache:
+    """У Gemini кэш НЕЯВНЫЙ: включён сам, срабатывает по совпадающему НАЧАЛУ
+    запроса. Значит польза от порядка блоков в шаблоне карты есть и без
+    какой-либо поддержки в коде — но только пока начало кусков совпадает."""
+
+    def _clean(self, i: int, chunk: str) -> str:
+        return cache_strip(_MAP_TEMPLATE.format(
+            i=i, n=6, chunk=chunk,
+            context="=== ПОСТОЯННЫЙ КОНТЕКСТ ===\nпроект, роли\n\n"))
+
+    def test_у_кусков_одинаковое_начало(self):
+        a, b = self._clean(1, "речь " * 500), self._clean(2, "другое " * 500)
+        common = 0
+        for x, y in zip(a, b):
+            if x != y:
+                break
+            common += 1
+        # Нижний порог неявного кэша — около 1024 токенов; 2500 символов
+        # русского текста примерно столько и есть.
+        assert common >= 2500, (
+            f"общее начало всего {common} символов — неявный кэш не возьмётся")
+        assert a[common:].startswith("1 из 6"), "расходиться должен номер куска"
+
+
+class TestUsageLog:
+    def test_строка_расхода_считает_долю_кэша(self, caplog):
+        from app.llm import _log_usage
+        with caplog.at_level("INFO"):
+            _log_usage("gemini/x", {"promptTokenCount": 1000,
+                                    "cachedContentTokenCount": 250,
+                                    "candidatesTokenCount": 400})
+        assert "из кэша 250, 25%" in caplog.text
+
+    def test_пустой_расход_не_пишется(self, caplog):
+        from app.llm import _log_usage
+        with caplog.at_level("INFO"):
+            _log_usage("gemini/x", None)
+            _log_usage("gemini/x", {})
+        assert caplog.text == ""

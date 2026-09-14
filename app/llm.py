@@ -222,10 +222,38 @@ class AnthropicProvider:
             messages=[{"role": "user", "content": content}],
         )
         u = getattr(message, "usage", None)
-        if u is not None and getattr(u, "cache_read_input_tokens", 0):
-            _LOG.debug("anthropic: из кэша %s токенов, обычных %s",
-                       u.cache_read_input_tokens, getattr(u, "input_tokens", "?"))
+        if u is not None:
+            _log_usage(f"anthropic/{self.model}", {
+                "promptTokenCount": (getattr(u, "input_tokens", 0) or 0)
+                + (getattr(u, "cache_read_input_tokens", 0) or 0),
+                "cachedContentTokenCount": getattr(u, "cache_read_input_tokens", 0),
+                "candidatesTokenCount": getattr(u, "output_tokens", 0),
+            })
         return message.content[0].text.strip()
+
+
+def _log_usage(name: str, usage: dict | None) -> None:
+    """Строка расхода в лог — единственный способ узнать, берётся ли кэш.
+
+    Правило из практики: если «из кэша» стабильно ноль при одинаковом начале
+    запросов, значит префикс что-то молча обесценивает (менявшаяся шапка,
+    несортированный JSON, разный набор правил). Без этой строки кэш проверить
+    нечем, и «мы же включили кэширование» остаётся верой.
+
+    У Gemini кэш НЕЯВНЫЙ: он включён сам на моделях 2.5 и новее и срабатывает,
+    когда запрос начинается так же, как недавний. Поэтому в шаблонах
+    неизменная часть стоит первой, а переменная — последней.
+    """
+    if not usage:
+        return
+    cached = int(usage.get("cachedContentTokenCount") or 0)
+    total = int(usage.get("promptTokenCount") or 0)
+    out = int(usage.get("candidatesTokenCount") or 0)
+    if not (total or out):
+        return
+    _LOG.info("%s: вход %s ток. (из кэша %s, %d%%), выход %s ток.",
+              name, total, cached,
+              round(100 * cached / total) if total else 0, out)
 
 
 # ---------------------------------------------------------------------------
@@ -254,6 +282,7 @@ class GeminiProvider(_KeyProviderMixin):
         out = _http_post_json(url, payload,
                               headers={"x-goog-api-key": self.api_key},
                               max_retries=self._retries)
+        _log_usage(f"gemini/{model}", out.get("usageMetadata"))
         try:
             return out["candidates"][0]["content"]["parts"][0]["text"].strip()
         except (KeyError, IndexError) as e:
