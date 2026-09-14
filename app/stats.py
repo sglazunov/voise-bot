@@ -15,7 +15,7 @@ import json
 import time
 from typing import Any
 
-from . import db, security
+from . import db, security, usage
 
 # How long writing minutes by hand takes, as a share of the meeting itself
 # (listening back + typing). Deliberately conservative; shown in the UI as an
@@ -63,6 +63,19 @@ def record(job: Any) -> None:
             "has_protocol": bool(a),
             "ok": getattr(job, "status", "") != "error",
         }
+        # Расход модели. В строке задачи он тоже есть, но строку через сутки
+        # стирает ретеншн, а «сколько команда потратила за месяц» нужно
+        # спрашивать спустя месяцы.
+        u = getattr(job, "llm_usage", None) or {}
+        by_model = u.get("by_model") or {}
+        row.update({
+            "tokens_in": int(u.get("in") or 0),
+            "tokens_cached": int(u.get("cached") or 0),
+            "tokens_out": int(u.get("out") or 0),
+            "llm_calls": int(u.get("calls") or 0),
+            "usd": usage.cost_usd(by_model),
+            "engines": ", ".join(sorted(by_model)) or None,
+        })
         if db.enabled():
             db.stats_add(row)
         else:
@@ -91,6 +104,19 @@ def summary(user: str, days: int = 30) -> dict:
     decisions = sum(int(r.get("decisions") or 0) for r in ok)
     protocols = sum(1 for r in ok if r.get("has_protocol"))
     failed = sum(1 for r in rows if not r.get("ok"))
+
+    # Расход модели: токены — всегда, деньги — только если цена задана хотя бы
+    # у части встреч. `priced` говорит, по скольким встречам сумма собрана:
+    # без этого «$2 за месяц» читалось бы как полная стоимость, даже если
+    # цена известна у одной встречи из сорока.
+    tok_in = sum(int(r.get("tokens_in") or 0) for r in rows)
+    tok_cached = sum(int(r.get("tokens_cached") or 0) for r in rows)
+    tok_out = sum(int(r.get("tokens_out") or 0) for r in rows)
+    llm_calls = sum(int(r.get("llm_calls") or 0) for r in rows)
+    priced = [r for r in rows if r.get("usd") is not None]
+    usd = round(sum(float(r.get("usd") or 0) for r in priced), 2) if priced else None
+    engines = sorted({e.strip() for r in rows
+                      for e in (r.get("engines") or "").split(",") if e.strip()})
 
     # Per-day counts for the trend bars (oldest -> newest).
     by_day: dict[str, int] = {}
@@ -127,6 +153,14 @@ def summary(user: str, days: int = 30) -> dict:
         "saved_coeff": MANUAL_MINUTES_COEFF,
         "by_day": [{"date": d, "count": c} for d, c in by_day.items()],
         "top": top,
+        "tokens_in": tok_in,
+        "tokens_cached": tok_cached,
+        "tokens_out": tok_out,
+        "llm_calls": llm_calls,
+        "tokens_per_meeting": round((tok_in + tok_out) / len(ok)) if ok else 0,
+        "usd": usd,
+        "usd_meetings": len(priced),
+        "engines": engines,
     }
 
 

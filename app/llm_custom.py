@@ -27,7 +27,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from . import config, logs
+from . import config, logs, usage
 from .llm_base import (GenerationCancelled, _KeyProviderMixin, _http_post_json,
                        _safe_url)
 
@@ -366,6 +366,27 @@ def detect(key: str, base_url: str = "", model: str = "") -> dict:
                       "host.docker.internal).")}
 
 
+def _report_usage(name: str, out: dict) -> None:
+    """Расход одного вызова — в сбор по задаче (app/usage), если он открыт.
+
+    Формат OpenAI-совместимый: usage.prompt_tokens / completion_tokens, а у
+    части шлюзов ещё и prompt_tokens_details.cached_tokens. Отсутствие блока —
+    норма (не все его отдают), тогда расход этого вызова просто неизвестен.
+    """
+    u = (out or {}).get("usage")
+    if not isinstance(u, dict) or not u:
+        return
+    details = u.get("prompt_tokens_details")
+    cached = (details or {}).get("cached_tokens") if isinstance(details, dict) else 0
+    total = int(u.get("prompt_tokens") or 0)
+    comp = int(u.get("completion_tokens") or 0)
+    if not (total or comp):
+        return
+    usage.record(name, total, int(cached or 0), comp)
+    log.info("%s: вход %s ток. (из кэша %s), выход %s ток.",
+              name, total, int(cached or 0), comp)
+
+
 def text_of(out: dict) -> tuple[str, str]:
     """Текст ответа и finish_reason из OpenAI-совместимого ответа.
 
@@ -465,6 +486,7 @@ class CustomProvider(_KeyProviderMixin):
                 raise
         if should_stop and should_stop():
             raise GenerationCancelled()
+        _report_usage(f"{self.name}/{self.model}", out)
         text, finish = text_of(out)
         if not text and (finish == "length" or "response_format" in payload):
             # Пустой ответ бывает по двум причинам, и обе лечатся ОДНИМ
@@ -482,6 +504,7 @@ class CustomProvider(_KeyProviderMixin):
                 payload["max_tokens"] = min(max(max_tokens, 1) * 2, _MAX_TOKENS_RETRY)
             out = _http_post_json(url, payload, self._headers(), timeout=300,
                                   max_retries=self._retries)
+            _report_usage(f"{self.name}/{self.model}", out)
             text, finish = text_of(out)
         if not text:
             more = ""

@@ -19,7 +19,8 @@ from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import Dict, Optional
 
-from . import config, db, formats, glossary, logs, meeting_series, names, redact
+from . import (config, db, formats, glossary, logs, meeting_series, names, redact,
+               usage)
 from .transcribe import transcribe_file
 
 log = logs.get("vtx.jobs")
@@ -124,6 +125,10 @@ class Job:
     error: Optional[str] = None
     duration: Optional[float] = None
     transcribe_sec: Optional[float] = None   # чистое время распознавания
+    # Расход модели на эту задачу: {"calls","in","cached","out","by_model"}.
+    # Копится за ВСЕ прогоны (первый + пересборки), потому что деньги тоже
+    # тратятся за все. Переживает ретеншн в meeting_stats (см. stats.record).
+    llm_usage: dict = field(default_factory=dict)
     speakers: Optional[int] = None
     diarization_error: Optional[str] = None  # why "who spoke" didn't run, if asked
     speaker_error: Optional[str] = None      # why video speaker-ID didn't run, if asked
@@ -498,10 +503,12 @@ class JobStore:
         if not txt_path.exists():
             raise ValueError("Нет расшифровки для перегенерации.")
         from .analyze import regen_topic_details
-        detailed[index] = regen_topic_details(
-            txt_path.read_text(encoding="utf-8"), detailed[index],
-            provider=provider or job.provider, keys=_owner_keys(job.owner),
-            user_notes=job.user_notes)
+        with usage.collect() as acc:
+            detailed[index] = regen_topic_details(
+                txt_path.read_text(encoding="utf-8"), detailed[index],
+                provider=provider or job.provider, keys=_owner_keys(job.owner),
+                user_notes=job.user_notes)
+        self._add_usage(job, acc)
         a["detailed"] = detailed
         a.pop("verification", None)   # indexes may shift meaning — cleared
         a["_edited"] = True
@@ -518,9 +525,14 @@ class JobStore:
         if not txt_path.exists():
             raise ValueError("Нет расшифровки — не по чему искать ответ.")
         from .analyze import ask_meeting
-        return ask_meeting(txt_path.read_text(encoding="utf-8"), question,
-                           provider=job.provider, keys=_owner_keys(job.owner),
-                           user_notes=job.user_notes)
+        # Вопрос по встрече — тоже вызов модели и тоже деньги команды:
+        # расшифровка уходит в запрос целиком или большими окнами.
+        with usage.collect() as acc:
+            answer = ask_meeting(txt_path.read_text(encoding="utf-8"), question,
+                                 provider=job.provider, keys=_owner_keys(job.owner),
+                                 user_notes=job.user_notes)
+        self._add_usage(job, acc)
+        return answer
 
     def index_search(self, job: Job) -> None:
         """Д14: (re)index this job's transcript + protocol for full-text search.
@@ -636,6 +648,19 @@ class JobStore:
         except Exception:  # noqa: BLE001
             log.warning("Память серии не обновлена (%s)", job.id, exc_info=True)
 
+    def _add_usage(self, job: Job, acc: dict) -> None:
+        """Долить расход прогона к расходу задачи.
+
+        Складываем, а не заменяем: пересборка — это ещё один полный проход по
+        встрече, и её токены тоже оплачены. Иначе счётчик показывал бы только
+        последний прогон и занижал расход команды.
+        """
+        if not acc or not acc.get("calls"):
+            return
+        total = dict(job.llm_usage or {})
+        usage._merge(total, acc)
+        self._set(job, llm_usage=total)
+
     def _maybe_verify(self, job: Job, result: dict, transcript: str) -> dict:
         """Д5: grounding pass over the fresh protocol (strict mode, on by
         default; per-team switch «strict_verify» in automation settings). Never
@@ -678,15 +703,17 @@ class JobStore:
             from .analyze import analyze_transcript, AnalysisCancelled
             from .docx_export import generate_report
 
-            result = analyze_transcript(
-                txt, provider=job.provider,
-                extra_instructions=self._preset_extra(job),
-                custom_prompt=job.analysis_prompt,
-                on_progress=self._on_analysis(job.id),
-                cancel_check=lambda: self._control.get(job.id, {}).get("cancel"),
-                keys=_owner_keys(job.owner),
-                user_notes=job.user_notes, context=context)
-            result = self._maybe_verify(job, result, txt)
+            with usage.collect() as acc:
+                result = analyze_transcript(
+                    txt, provider=job.provider,
+                    extra_instructions=self._preset_extra(job),
+                    custom_prompt=job.analysis_prompt,
+                    on_progress=self._on_analysis(job.id),
+                    cancel_check=lambda: self._control.get(job.id, {}).get("cancel"),
+                    keys=_owner_keys(job.owner),
+                    user_notes=job.user_notes, context=context)
+                result = self._maybe_verify(job, result, txt)
+            self._add_usage(job, acc)
             result = self._enforce_participants(job, result)
             self._remember_series(job, result)
             job.analysis = result
@@ -1162,16 +1189,18 @@ class JobStore:
                     from .analyze import analyze_transcript, AnalysisCancelled
                     from .docx_export import generate_report
 
-                    analysis_result = analyze_transcript(
-                        analysis_input, provider=job.provider,
-                        extra_instructions=self._preset_extra(job),
-                        custom_prompt=job.analysis_prompt,
-                        on_progress=self._on_analysis(job.id),
-                        cancel_check=lambda: self._control.get(job.id, {}).get("cancel"),
-                        keys=_owner_keys(job.owner),
-                        user_notes=job.user_notes, context=analysis_context)
-                    analysis_result = self._maybe_verify(
-                        job, analysis_result, analysis_input)
+                    with usage.collect() as acc:
+                        analysis_result = analyze_transcript(
+                            analysis_input, provider=job.provider,
+                            extra_instructions=self._preset_extra(job),
+                            custom_prompt=job.analysis_prompt,
+                            on_progress=self._on_analysis(job.id),
+                            cancel_check=lambda: self._control.get(job.id, {}).get("cancel"),
+                            keys=_owner_keys(job.owner),
+                            user_notes=job.user_notes, context=analysis_context)
+                        analysis_result = self._maybe_verify(
+                            job, analysis_result, analysis_input)
+                    self._add_usage(job, acc)
                     analysis_result = self._enforce_participants(job, analysis_result)
                     self._remember_series(job, analysis_result)
                     job.analysis = analysis_result

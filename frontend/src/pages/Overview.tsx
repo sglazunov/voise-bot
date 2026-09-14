@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   CalendarClock, Clock3, ListChecks, Timer, Users2, Gavel, FileText,
-  Radio, ShieldCheck, ArrowRight, Info, CheckCircle2, AlertTriangle,
+  Radio, ShieldCheck, ArrowRight, Info, CheckCircle2, AlertTriangle, Coins,
 } from "lucide-react";
 import { Page } from "../components/Layout";
 import { Card, Ellipsis, StatusBadge } from "../components/ui";
@@ -27,6 +27,14 @@ function Stat({ icon: Icon, n, label, hint }: { icon: any; n: React.ReactNode; l
 }
 
 /* Secondary figure — no plot, just the number. */
+/** 1 234 567 -> «1,2 млн»: точные цифры здесь не нужны, нужен порядок. */
+function fmtTok(n: number): string {
+  if (!n) return "—";
+  if (n >= 1e6) return `${(n / 1e6).toFixed(1).replace(".", ",")} млн`;
+  if (n >= 1e3) return `${Math.round(n / 1e3)} тыс.`;
+  return String(n);
+}
+
 function Mini({ icon: Icon, n, label }: { icon: any; n: React.ReactNode; label: string }) {
   return (
     <div className="glass2 rounded-2xl px-3.5 py-3 flex items-center gap-3">
@@ -164,6 +172,27 @@ export default function Overview() {
           ) : <div className="text-[13px] py-6 text-center" style={{ color: "var(--muted)" }}>Пока нет данных.</div>}
         </Card>
       </div>
+
+      {/* Расход модели: сколько токенов команда потратила за период.
+          Деньги показываем ТОЛЬКО когда цена модели задана (VTX_MODEL_PRICES) —
+          иначе «$0» читалось бы как «бесплатно». */}
+      {!!st?.llm_calls && (
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 mt-3.5">
+          <Mini icon={Coins} n={fmtTok(st.tokens_in + st.tokens_out)}
+            label={`Токенов за ${st.days} дн.`} />
+          <Mini icon={Coins} n={fmtTok(st.tokens_per_meeting)} label="Токенов на встречу" />
+          <Mini icon={Coins}
+            n={st.tokens_in ? `${Math.round(100 * st.tokens_cached / st.tokens_in)}%` : "—"}
+            label="Входа взято из кэша" />
+          <Mini icon={Coins}
+            n={st.usd != null ? `$${st.usd}` : "—"}
+            label={st.usd != null
+              ? (st.usd_meetings < st.meetings
+                  ? `Расход (по ${st.usd_meetings} из ${st.meetings} встреч)`
+                  : "Расход на ИИ")
+              : "Цена модели не задана"} />
+        </div>
+      )}
 
       {/* Secondary figures */}
       <div className="grid grid-cols-2 lg:grid-cols-5 gap-2.5 mt-3.5">

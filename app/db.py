@@ -75,7 +75,8 @@ JOB_SCALAR_COLS = [
     "speaker_error", "screen_error", "protocol_cloud_url", "delivery_error",
     "screen_segments", "analysis_error", "transcribe_sec",
 ]
-JOB_JSON_COLS = ["video_participants", "analysis", "docx_providers", "weeek_tasks"]
+JOB_JSON_COLS = ["video_participants", "analysis", "docx_providers", "weeek_tasks",
+                 "llm_usage"]
 JOB_COLS = JOB_SCALAR_COLS + JOB_JSON_COLS
 
 _SCHEMA = """
@@ -165,6 +166,10 @@ ALTER TABLE jobs ADD COLUMN IF NOT EXISTS preset TEXT;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS transcribe_sec DOUBLE PRECISION;
 -- Черновики задач для Weeek из протокола (см. app/weeek_tasks.py).
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS weeek_tasks JSONB;
+-- Расход модели на задачу (см. app/usage.py): токены входа/выхода, сколько
+-- взято из кэша, разбивка по моделям. Копится за все прогоны, включая
+-- пересборки, — деньги тратятся за каждый.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS llm_usage JSONB;
 CREATE TABLE IF NOT EXISTS search_docs (
     job_id     TEXT PRIMARY KEY,
     username   TEXT,
@@ -225,6 +230,16 @@ CREATE TABLE IF NOT EXISTS meeting_stats (
     ok            BOOLEAN DEFAULT TRUE
 );
 CREATE INDEX IF NOT EXISTS idx_meeting_stats_team_at ON meeting_stats(team, at);
+-- Расход модели на встречу. Живёт ЗДЕСЬ, а не только в jobs: строки задач
+-- стирает суточный ретеншн, а расход команды нужен за месяцы. Цена (usd)
+-- пишется, только если цена модели задана (VTX_MODEL_PRICES), иначе NULL —
+-- пустое место честнее, чем «0 ₽ за встречу».
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS tokens_in BIGINT;
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS tokens_cached BIGINT;
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS tokens_out BIGINT;
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS llm_calls INTEGER;
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS usd DOUBLE PRECISION;
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS engines TEXT;
 CREATE TABLE IF NOT EXISTS ai_context (
     username     TEXT PRIMARY KEY,
     global_text  TEXT DEFAULT ''
@@ -666,7 +681,9 @@ def search_query(team: str, q: str, limit: int = 20) -> list[dict]:
 # meeting_stats — outcome of each finished meeting (for the Overview metrics)
 # --------------------------------------------------------------------------- #
 _STAT_COLS = ["id", "team", "at", "title", "duration_sec", "speakers",
-              "tasks", "decisions", "participants", "has_protocol", "ok"]
+              "tasks", "decisions", "participants", "has_protocol", "ok",
+              "tokens_in", "tokens_cached", "tokens_out", "llm_calls", "usd",
+              "engines"]
 
 
 def stats_add(row: dict) -> None:

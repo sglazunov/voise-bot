@@ -38,7 +38,7 @@ from .llm_base import (                 # noqa: F401 — часть публич
     _http_post_json, _is_rate_limit, is_key_rejected, _retry_after, _safe_url,
 )
 from .llm_custom import CustomProvider, text_of  # noqa: F401 — часть публичного API
-from . import logs
+from . import logs, usage
 
 _LOG = logs.get("vtx.llm")
 
@@ -171,6 +171,7 @@ class GroqProvider(_KeyProviderMixin):
         headers = {"Authorization": f"Bearer {self.api_key}"}
         out = _http_post_json(url, payload, headers, timeout=180,
                               max_retries=self._retries)
+        _log_usage(f"{self.name}/{self.model}", _openai_usage(out))
         # Разбор общий с «своим ключом»: content бывает null (рассуждающие
         # модели) или списком кусков, и голое .strip() падало на None.
         text, _ = text_of(out)
@@ -232,7 +233,7 @@ class AnthropicProvider:
         return message.content[0].text.strip()
 
 
-def _log_usage(name: str, usage: dict | None) -> None:
+def _log_usage(name: str, usage_meta: dict | None) -> None:
     """Строка расхода в лог — единственный способ узнать, берётся ли кэш.
 
     Правило из практики: если «из кэша» стабильно ноль при одинаковом начале
@@ -244,16 +245,31 @@ def _log_usage(name: str, usage: dict | None) -> None:
     когда запрос начинается так же, как недавний. Поэтому в шаблонах
     неизменная часть стоит первой, а переменная — последней.
     """
-    if not usage:
+    if not usage_meta:
         return
-    cached = int(usage.get("cachedContentTokenCount") or 0)
-    total = int(usage.get("promptTokenCount") or 0)
-    out = int(usage.get("candidatesTokenCount") or 0)
+    cached = int(usage_meta.get("cachedContentTokenCount") or 0)
+    total = int(usage_meta.get("promptTokenCount") or 0)
+    out = int(usage_meta.get("candidatesTokenCount") or 0)
     if not (total or out):
         return
+    # Расход уходит в сбор по задаче (app/usage), если он открыт: так вызов
+    # провайдера оказывается привязан к встрече и к команде, не зная о них.
+    usage.record(name, total, cached, out)
     _LOG.info("%s: вход %s ток. (из кэша %s, %d%%), выход %s ток.",
               name, total, cached,
               round(100 * cached / total) if total else 0, out)
+
+
+def _openai_usage(out: dict) -> dict | None:
+    """Расход из OpenAI-совместимого ответа в тех же полях, что у Gemini."""
+    u = (out or {}).get("usage") or {}
+    if not isinstance(u, dict) or not u:
+        return None
+    details = u.get("prompt_tokens_details")
+    cached = (details or {}).get("cached_tokens") if isinstance(details, dict) else 0
+    return {"promptTokenCount": u.get("prompt_tokens") or 0,
+            "cachedContentTokenCount": cached or 0,
+            "candidatesTokenCount": u.get("completion_tokens") or 0}
 
 
 # ---------------------------------------------------------------------------
@@ -313,6 +329,11 @@ class YandexProvider:
                    "x-folder-id": self.folder}
         out = _http_post_json(url, payload, headers,
                               max_retries=self._retries)
+        u = ((out or {}).get("result") or {}).get("usage") or {}
+        _log_usage(f"yandex/{self.model}", {
+            "promptTokenCount": u.get("inputTextTokens") or 0,
+            "candidatesTokenCount": u.get("completionTokens") or 0,
+        } if u else None)
         try:
             return out["result"]["alternatives"][0]["message"]["text"].strip()
         except (KeyError, IndexError) as e:
