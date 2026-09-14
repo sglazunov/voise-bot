@@ -660,6 +660,13 @@ class JobStore:
         total = dict(job.llm_usage or {})
         usage._merge(total, acc)
         self._set(job, llm_usage=total)
+        # ⚠️ Строка метрик пишется при смене статуса, а вопрос по встрече и
+        # перегенерация темы случаются ПОСЛЕ того, как задача уже `done`: их
+        # токены копились в задаче и до метрик не доезжали (И3). Перезаписываем
+        # строку — она upsert по id задачи, дубля не будет.
+        if job.status in (STATUS_DONE, STATUS_ERROR, STATUS_CANCELLED):
+            from . import stats
+            stats.record(job)
 
     def _maybe_verify(self, job: Job, result: dict, transcript: str) -> dict:
         """Д5: grounding pass over the fresh protocol (strict mode, on by
@@ -918,7 +925,10 @@ class JobStore:
         # A finished job's outcome is recorded for the business metrics — job
         # rows themselves are purged by retention. Upsert by id, so re-running
         # (retry / reanalyze) just refreshes the row.
-        if kw.get("status") in (STATUS_DONE, STATUS_ERROR):
+        # ⚠️ Отменённая задача тоже пишется в метрики. Раньше условие ловило
+        # только done/error, и отменённая встреча исчезала бесследно — даже
+        # как отказ (И2 в docs/ТЗ-МЕТРИКИ.md).
+        if kw.get("status") in (STATUS_DONE, STATUS_ERROR, STATUS_CANCELLED):
             from . import stats
             stats.record(job)
             if kw.get("status") == STATUS_DONE:

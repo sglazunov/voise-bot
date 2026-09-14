@@ -1382,6 +1382,15 @@ def _speech_lines(text: str) -> tuple[list[str], list[set[str]]]:
 # место в разговоре (Т16). Понижение обязательно: до этой добавки доходят
 # ровно те пункты, на которых поиск с `_SUPPORT_MIN` уже вернул пустоту, и с
 # тем же порогом добавка не нашла бы ничего.
+# Версия ПРАВИЛ проверки. Метрика «доля подтверждённых пунктов» сравнима во
+# времени только внутри одной версии: ослабить порог или смягчить сверку — и
+# доля прыгнет на десятки процентов без единой правки протоколов. Поэтому
+# версия пишется рядом со значением в метрики (И18 в docs/ТЗ-МЕТРИКИ.md).
+#
+# ⚠️ Поднимать при ЛЮБОМ изменении `_SUPPORT_MIN`, `_APPROX_RATIO`, `_STEM_LEN`,
+# `_find_support`, `_Fragment.match` и размера окна поиска опоры.
+VERIFY_VERSION = "2026-09-14"
+
 _SUPPORT_MIN = 0.6
 _TIME_HINT_MIN = 0.35
 
@@ -1728,7 +1737,8 @@ def verify_protocol(result: dict, transcript_text: str, user_notes: str = "",
     _apply_transcript_times(result, ver, text, weak=not ver.get("error"))
 
     ver["stats"] = {"checked": len(points), "confirmed": len(points) - len(pending),
-                    "calls": calls, "failed_calls": failed_calls}
+                    "calls": calls, "failed_calls": failed_calls,
+                    "version": VERIFY_VERSION}
     # Acceptance rule: no owner without verbatim grounds. Unverified point →
     # flagged; verified point whose quote doesn't support the owner → owner «—».
     #

@@ -240,6 +240,32 @@ ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS tokens_out BIGINT;
 ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS llm_calls INTEGER;
 ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS usd DOUBLE PRECISION;
 ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS engines TEXT;
+-- Качество протокола. Всё это УЖЕ считается на каждой встрече (verification.
+-- stats, _quality, _dropped_topics, _dropped, _fallback, _edited) и жило ровно
+-- сутки внутри jobs.analysis, после чего стиралось ретеншном вместе с задачей.
+-- Здесь оно переживает ретеншн: без этого нельзя ответить, становится продукт
+-- лучше или хуже. Подробности — docs/ТЗ-МЕТРИКИ.md §3.
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS status TEXT;
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS protocol_ok BOOLEAN;
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS engine TEXT;
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS fallback BOOLEAN;
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS preset TEXT;
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS transcribe_sec DOUBLE PRECISION;
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS verify_checked INTEGER;
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS verify_confirmed INTEGER;
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS verify_mode TEXT;
+-- Версия правил проверки: доля подтверждённых сравнима только внутри одной.
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS verify_version TEXT;
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS topics INTEGER;
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS empty_topics INTEGER;
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS dropped_topics INTEGER;
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS dropped_items INTEGER;
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS summary_is_toc BOOLEAN;
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS edited BOOLEAN;
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS tasks_with_owner INTEGER;
+-- Расход по каждой модели отдельно: раньше by_model схлопывался в строку имён
+-- без чисел, и «сколько стоит Gemini против Groq» посчитать было нечем.
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS tokens_by_model JSONB;
 CREATE TABLE IF NOT EXISTS ai_context (
     username     TEXT PRIMARY KEY,
     global_text  TEXT DEFAULT ''
@@ -683,7 +709,14 @@ def search_query(team: str, q: str, limit: int = 20) -> list[dict]:
 _STAT_COLS = ["id", "team", "at", "title", "duration_sec", "speakers",
               "tasks", "decisions", "participants", "has_protocol", "ok",
               "tokens_in", "tokens_cached", "tokens_out", "llm_calls", "usd",
-              "engines"]
+              "engines",
+              "status", "protocol_ok", "engine", "fallback", "preset",
+              "transcribe_sec", "verify_checked", "verify_confirmed",
+              "verify_mode", "verify_version", "topics", "empty_topics",
+              "dropped_topics", "dropped_items", "summary_is_toc", "edited",
+              "tasks_with_owner", "tokens_by_model"]
+# Колонки, которые в файловом режиме и в Postgres лежат как JSON.
+_STAT_JSON_COLS = {"tokens_by_model"}
 
 
 def stats_add(row: dict) -> None:
@@ -693,7 +726,8 @@ def stats_add(row: dict) -> None:
         upd = ", ".join(f"{c}=EXCLUDED.{c}" for c in _STAT_COLS if c != "id")
         cur.execute(f"INSERT INTO meeting_stats ({cols}) VALUES ({ph}) "
                     f"ON CONFLICT (id) DO UPDATE SET {upd}",
-                    [row.get(c) for c in _STAT_COLS])
+                    [_json(row.get(c)) if c in _STAT_JSON_COLS else row.get(c)
+                     for c in _STAT_COLS])
 
 
 def stats_load(team: str, since: float) -> list[dict]:

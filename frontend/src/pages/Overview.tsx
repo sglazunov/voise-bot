@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import {
   CalendarClock, Clock3, ListChecks, Timer, Users2, Gavel, FileText,
   Radio, ShieldCheck, ArrowRight, Info, CheckCircle2, AlertTriangle, Coins,
+  BadgeCheck,
 } from "lucide-react";
 import { Page } from "../components/Layout";
 import { Card, Ellipsis, StatusBadge } from "../components/ui";
@@ -191,6 +192,35 @@ export default function Overview() {
                   ? `Расход (по ${st.usd_meetings} из ${st.meetings} встреч)`
                   : "Расход на ИИ")
               : "Цена модели не задана"} />
+        </div>
+      )}
+
+      {/* Качество протоколов. Все числа УЖЕ считались на каждой встрече и жили
+          сутки внутри задачи — теперь переживают ретеншн.
+          ⚠️ Доля подтверждённых показывается ТОЛЬКО рядом с числом
+          подтверждённых задач на час: саму долю легко «улучшить», выбросив
+          все неподтверждённые пункты. */}
+      {!!st?.verify_checked && (
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 mt-3.5">
+          <Mini icon={BadgeCheck}
+            n={st.confirmed_ratio != null ? `${Math.round(st.confirmed_ratio * 100)}%` : "—"}
+            label="Пунктов с цитатой-основанием" />
+          <Mini icon={BadgeCheck} n={st.confirmed_per_hour || "—"}
+            label="Подтверждённых пунктов на час" />
+          <Mini icon={BadgeCheck}
+            n={st.owner_ratio != null ? `${Math.round(st.owner_ratio * 100)}%` : "—"}
+            label="Задач с ответственным" />
+          <Mini icon={AlertTriangle}
+            n={st.drafts || (st.protocol_failed ? 0 : "—")}
+            label={st.protocol_failed
+              ? `Черновиков (не собрано: ${st.protocol_failed})`
+              : "Протоколов-черновиков"} />
+        </div>
+      )}
+      {st?.verify_versions && st.verify_versions.length > 1 && (
+        <div className="text-[12px] mt-2" style={{ color: "var(--muted)" }}>
+          ⚠️ За период правила проверки менялись ({st.verify_versions.join(", ")}) —
+          доля подтверждённых пунктов внутри периода несравнима.
         </div>
       )}
 
