@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 from contextlib import contextmanager
 
 from . import logs
@@ -27,9 +28,30 @@ from . import logs
 _LOG = logs.get("vtx.usage")
 _local = threading.local()
 
+# Стадии вызова модели (docs/ТЗ-МЕТРИКИ.md И8). Без них расход встречи —
+# одно число, и вопрос «куда ушли деньги» остаётся без ответа: проверка цитат
+# на длинной встрече стоит больше половины входа, а понять это можно, только
+# разделив вызовы по стадиям.
+MAP = "map"            # чтение фрагмента длинной встречи
+MERGE = "merge"        # уплотнение заметок перед сведением
+REDUCE = "reduce"      # сведение заметок в протокол (или единственный проход)
+VERIFY = "verify"      # проверка цитат
+REGEN = "regen"        # перегенерация одной темы
+ASK = "ask"            # вопрос по встрече
+_STAGES = (MAP, MERGE, REDUCE, VERIFY, REGEN, ASK)
+
+# Сколько вызовов одной задачи запоминать поимённо. Часовая встреча — это
+# десятки вызовов; потолок защищает от задачи, которую пересобирали весь день.
+_MAX_LOG = 400
+
 
 def _blank() -> dict:
-    return {"calls": 0, "in": 0, "cached": 0, "out": 0, "by_model": {}}
+    return {"calls": 0, "in": 0, "cached": 0, "out": 0, "by_model": {},
+            # Поимённый список вызовов: модель, токены, СТАДИЯ и цена НА МОМЕНТ
+            # ВЫЗОВА. ⚠️ Цену считаем здесь и больше не пересчитываем: прайсы
+            # меняются, и себестоимость прошлого месяца, посчитанная сегодняшними
+            # ценами, — выдумка.
+            "log": []}
 
 
 def _merge(dst: dict, src: dict) -> None:
@@ -40,6 +62,26 @@ def _merge(dst: dict, src: dict) -> None:
             model, {"calls": 0, "in": 0, "cached": 0, "out": 0})
         for k in ("calls", "in", "cached", "out"):
             e[k] += int(v.get(k) or 0)
+    if src.get("log"):
+        dst.setdefault("log", []).extend(src["log"])
+        del dst["log"][:-_MAX_LOG]
+
+
+@contextmanager
+def stage(code: str):
+    """Пометить, ЧЕМ занят движок внутри блока: карта, сведение, проверка…
+
+    Стадия живёт в потоке рядом со сбором и не проходит через `complete()`: у
+    него всюду сигнатура `(prompt, max_tokens, force_json) -> str`, и менять её
+    в семи провайдерах ради метрики нельзя. Вложенные стадии не складываются —
+    ближайшая побеждает (проверка внутри сборки протокола — это проверка).
+    """
+    prev = getattr(_local, "stage", None)
+    _local.stage = code if code in _STAGES else None
+    try:
+        yield
+    finally:
+        _local.stage = prev
 
 
 @contextmanager
@@ -61,11 +103,18 @@ def record(model: str, in_tokens: int, cached: int, out_tokens: int) -> None:
     acc = getattr(_local, "acc", None)
     if acc is None:
         return
-    _merge(acc, {"calls": 1, "in": int(in_tokens or 0), "cached": int(cached or 0),
-                 "out": int(out_tokens or 0),
-                 "by_model": {model or "?": {"calls": 1, "in": int(in_tokens or 0),
-                                             "cached": int(cached or 0),
-                                             "out": int(out_tokens or 0)}}})
+    name = model or "?"
+    one = {"calls": 1, "in": int(in_tokens or 0), "cached": int(cached or 0),
+           "out": int(out_tokens or 0)}
+    _merge(acc, {**one, "by_model": {name: dict(one)}})
+    # ⚠️ Цена берётся СЕЙЧАС и запоминается. Пересчитать потом нельзя: прайс
+    # поставщика меняется, и себестоимость августа в сентябрьских ценах — не
+    # измерение, а домысел (docs/ТЗ-МЕТРИКИ.md И8).
+    acc.setdefault("log", []).append(
+        {"model": name, "stage": getattr(_local, "stage", None), "at": time.time(),
+         "in": one["in"], "cached": one["cached"], "out": one["out"],
+         "usd": cost_usd({name: one})})
+    del acc["log"][:-_MAX_LOG]
 
 
 # --------------------------------------------------------------------------- #

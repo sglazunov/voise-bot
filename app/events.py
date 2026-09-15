@@ -37,6 +37,9 @@ ASKED = "question_asked"            # задал вопрос по встреч�
 REGEN = "topic_regenerated"         # перегенерировал тему
 REANALYZED = "protocol_reanalyzed"  # пересобрал протокол
 TASK_CREATED = "task_created"       # отправил задачу в трекер
+# Служебные (source=system): не ценность, а экономика и надёжность.
+LLM_CALL = "llm_call"               # один вызов модели: стадия, токены, цена
+BOT_JOINED = "bot_joined"           # бот вошёл на встречу и с какой задержкой
 
 # И12: «протокол породил действие». Открытие сюда НЕ входит — прочитали ≠
 # пригодилось, в этом весь смысл метрики.
@@ -107,6 +110,43 @@ def record(kind: str, *, user: str, job_id: str = "", source: str = HUMAN,
         _LOG.warning("Событие %s (job %s) не записано", kind, job_id,
                      exc_info=True)
         return False
+
+
+def record_many(rows: list[dict], *, user: str, job_id: str = "",
+                kind: str = LLM_CALL, source: str = SYSTEM) -> int:
+    """Записать пачку однотипных служебных событий ОДНОЙ операцией.
+
+    Вызовов модели на часовой встрече — десятки. Писать их по одному значило бы
+    десятки перезаписей файла журнала (и столько же запросов к базе) внутри
+    задачи, которая и так считает протокол.
+    """
+    if not rows:
+        return 0
+    try:
+        team = security.team_of(user or "")
+        if not team:
+            return 0
+        actor = security.pseudonym(user, team)
+        out = []
+        for i, r in enumerate(rows):
+            at = float(r.get("at") or time.time())
+            out.append({"id": f"{kind}:{job_id}:{uuid.uuid4().hex[:12]}",
+                        "team": team, "kind": kind, "job_id": job_id or "",
+                        # ⚠️ У служебного события actor — не «кто читал», а «чья
+                        # команда потратила». В метрики ценности такие события
+                        # не входят: их отсекает `human_rows`.
+                        "actor": actor, "source": source, "at": at,
+                        "extra": {k: v for k, v in r.items() if k != "at"}})
+        if db.enabled():
+            return db.events_add_many(out)
+        rows_all = _file_load(team)
+        rows_all.extend(out)
+        _file_save(team, rows_all)
+        return len(out)
+    except Exception:   # noqa: BLE001
+        _LOG.warning("Пачка событий %s (job %s) не записана", kind, job_id,
+                     exc_info=True)
+        return 0
 
 
 def load(team: str, since: float) -> list[dict]:

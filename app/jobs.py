@@ -664,8 +664,18 @@ class JobStore:
         """
         if not acc or not acc.get("calls"):
             return
+        # Поимённый список вызовов уезжает в журнал событий, а в задаче остаются
+        # только итоги. ⚠️ Хранить его ещё и в `Job.llm_usage` нельзя: это
+        # JSONB-колонка, которую переписывает КАЖДОЕ обновление задачи, а список
+        # растёт с каждой пересборкой.
+        calls_log = list(acc.get("log") or [])
+        if calls_log:
+            from . import events
+            events.record_many(calls_log, user=job.owner, job_id=job.id,
+                               kind=events.LLM_CALL)
         total = dict(job.llm_usage or {})
         usage._merge(total, acc)
+        total.pop("log", None)
         self._set(job, llm_usage=total)
         # ⚠️ Строка метрик пишется при смене статуса, а вопрос по встрече и
         # перегенерация темы случаются ПОСЛЕ того, как задача уже `done`: их

@@ -56,6 +56,9 @@ READ_WINDOW_SEC = float(__import__("os").getenv("VTX_READ_WINDOW_HOURS", "72")) 
 # показываются только при пяти и более читателях — иначе доля вычисляется
 # обратно до конкретного человека.
 _MIN_READERS = 5
+# Со скольких секунд вход бота считается опозданием — тот же порог, что и в
+# планировщике (`VTX_LATE_JOIN_SEC`), чтобы карточка и сводка не расходились.
+LATE_JOIN_SEC = float(__import__("os").getenv("VTX_LATE_JOIN_SEC", "120"))
 
 
 def _median(xs: list[float]) -> float | None:
@@ -64,6 +67,17 @@ def _median(xs: list[float]) -> float | None:
     xs = sorted(xs)
     mid = len(xs) // 2
     return xs[mid] if len(xs) % 2 else (xs[mid - 1] + xs[mid]) / 2
+
+
+# Стадии вызова модели по-русски — для «Обзора» и отчётов.
+STAGE_RU = {
+    "map": "чтение частей встречи",
+    "merge": "уплотнение заметок",
+    "reduce": "сборка протокола",
+    "verify": "проверка цитат",
+    "regen": "перегенерация тем",
+    "ask": "вопросы по встрече",
+}
 
 
 def stop_reason_ru(code: str | None) -> str:
@@ -182,6 +196,7 @@ def record_meeting(st: Any, outcome: str) -> None:
             "upload_error": (str(getattr(st, "upload_error", "") or "")[:300]
                              or None),
             "detail": (str(getattr(st, "detail", "") or "")[:300] or None),
+            "join_delay_sec": getattr(st, "join_delay_sec", None),
         }
         if db.enabled():
             db.stats_add(row)
@@ -345,7 +360,8 @@ def summary(user: str, days: int = 30) -> dict:
     # и «сколько встреч обработано» растёт от календаря клиента, а не от пользы
     # продукта. Ценность измеряется только потреблением, поэтому знаменатель —
     # собранные протоколы, а числитель берётся из событий ЧЕЛОВЕКА.
-    ev = events.human_rows(events.load(team, since))
+    all_ev = events.load(team, since)
+    ev = events.human_rows(all_ev)
     opens = events.by_job(ev, {events.OPENED})
     actions = events.by_job(ev, events.ACTIONS)
     built = [r for r in rows if r.get("protocol_ok")]
@@ -365,6 +381,27 @@ def summary(user: str, days: int = 30) -> dict:
     acted = [jid for jid in ready_at if actions.get(jid)]
     all_readers = {e.get("actor") for e in ev if e.get("kind") == events.OPENED}
 
+    # --- куда уходят деньги: расход по стадиям (§7, И8) -----------------------
+    # Общий расход встречи — одно число, и вопрос «за что заплатили» остаётся
+    # без ответа. Проверка цитат на длинной встрече стоит больше половины
+    # входа, и увидеть это можно, только разделив вызовы по стадиям.
+    # ⚠️ Деньги берутся из СОБЫТИЯ, где цена записана на момент вызова:
+    # пересчитать задним числом нельзя, прайсы меняются.
+    by_stage: dict[str, dict] = {}
+    for e in all_ev:
+        if e.get("kind") != events.LLM_CALL:
+            continue
+        x = _as_dict(e.get("extra"))
+        code = x.get("stage") or "прочее"
+        st_row = by_stage.setdefault(code, {"calls": 0, "in": 0, "out": 0,
+                                            "usd": 0.0, "priced": 0})
+        st_row["calls"] += 1
+        st_row["in"] += int(x.get("in") or 0)
+        st_row["out"] += int(x.get("out") or 0)
+        if x.get("usd") is not None:
+            st_row["usd"] += float(x["usd"])
+            st_row["priced"] += 1
+
     # --- исходы встреч (§14.2) ----------------------------------------------
     # Единица — ВСТРЕЧА, а не задача распознавания: клиенту всё равно, на каком
     # шаге сломалось, и провал планировщика («бот не пришёл») виден только
@@ -377,6 +414,13 @@ def summary(user: str, days: int = 30) -> dict:
     # провал бота.
     due = planned - by_outcome["skipped"]
     upload_failed = sum(1 for r in mrows if r.get("upload_error"))
+    # ⚠️ Явка разделяется на три отказа, потому что лечатся они по-разному:
+    # «не пришёл» — планировщик, «не пустили» — вёрстка Телемоста или вход в
+    # Яндекс, «опоздал» — бот дошёл, но начала разговора в записи нет.
+    join_failed = sum(1 for r in mrows if r.get("stop_reason") == "join_failed")
+    delays = [float(r.get("join_delay_sec")) for r in mrows
+              if r.get("join_delay_sec") is not None]
+    late = sum(1 for d in delays if d > LATE_JOIN_SEC)
     stop_reasons: dict[str, int] = {}
     for r in mrows:
         code = r.get("stop_reason")
@@ -420,6 +464,15 @@ def summary(user: str, days: int = 30) -> dict:
         "attendance": (round(by_outcome["recorded"] / due, 3)
                        if due >= _MIN_DENOM else None),
         "attendance_base": due,
+        # Разложение «не явился» на три причины (И36).
+        "join_failed": join_failed,
+        "late_joins": late,
+        "join_delay_median_sec": (round(_median(delays)) if delays else None),
+        # Вовремя — вошёл и начал писать в пределах порога. Это и есть
+        # «здоровый» вход; опоздавший бот формально записал встречу, но начало,
+        # где обычно и ставят задачи, потеряно.
+        "on_time": (round((by_outcome["recorded"] - late) / due, 3)
+                    if due >= _MIN_DENOM else None),
         # Запись осталась на сервере, потому что облако её не приняло.
         # Видео на сервере жить не должно — это прямой расход диска.
         "upload_failed": upload_failed,
@@ -449,6 +502,15 @@ def summary(user: str, days: int = 30) -> dict:
         "engines": engines,
         "by_engine": [dict(model=m, **v) for m, v in
                       sorted(by_engine.items(), key=lambda kv: -kv[1]["in"])],
+        # Расход по стадиям: карта / уплотнение / сведение / проверка /
+        # перегенерация / вопрос. `usd` показываем только там, где цена была
+        # известна у ВСЕХ вызовов стадии — частичная сумма врёт как полная.
+        "by_stage": [{"stage": code, "label": STAGE_RU.get(code, code),
+                      "calls": v["calls"], "in": v["in"], "out": v["out"],
+                      "usd": (round(v["usd"], 4)
+                              if v["priced"] == v["calls"] and v["calls"] else None)}
+                     for code, v in sorted(by_stage.items(),
+                                           key=lambda kv: -kv[1]["in"])],
         # --- качество ---
         "verify_checked": checked,
         "verify_confirmed": confirmed,

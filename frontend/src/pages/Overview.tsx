@@ -195,6 +195,25 @@ export default function Overview() {
         </div>
       )}
 
+      {/* Куда ушли деньги. Общий расход — одно число, и «за что заплатили»
+          остаётся без ответа: проверка цитат на длинной встрече стоит больше
+          половины входа, и видно это только в разбивке по стадиям. */}
+      {!!st?.by_stage?.length && (
+        <div className="glass2 rounded-2xl p-3 mt-2.5 text-[12.5px]">
+          <div className="font-semibold mb-2">Расход по стадиям</div>
+          <div className="grid gap-1.5">
+            {st.by_stage.map((x: any) => (
+              <div key={x.stage} className="flex justify-between gap-2">
+                <Ellipsis>{x.label}</Ellipsis>
+                <span className="flex-none" style={{ color: "var(--muted)" }}>
+                  {fmtTok(x.in + x.out)} · {x.calls} выз.
+                  {x.usd != null ? ` · $${x.usd}` : ""}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Качество протоколов. Все числа УЖЕ считались на каждой встрече и жили
           сутки внутри задачи — теперь переживают ретеншн.
           ⚠️ Доля подтверждённых показывается ТОЛЬКО рядом с числом
@@ -255,15 +274,24 @@ export default function Overview() {
           <Mini icon={Video} n={`${st.recorded} из ${st.planned}`}
             label={st.skipped ? `Записано (отсеяно: ${st.skipped})` : "Записано из запланированных"} />
           <Mini icon={ShieldCheck}
-            n={st.attendance != null ? `${Math.round(st.attendance * 100)}%` : "—"}
-            label={st.attendance != null ? "Явка бота"
+            n={st.on_time != null ? `${Math.round(st.on_time * 100)}%` : "—"}
+            label={st.on_time != null ? "Вошёл вовремя"
               : `Явка: мало данных (${st.attendance_base} встр.)`} />
           <Mini icon={AlertTriangle} n={st.missed + st.rec_failed || "—"}
-            label={st.rec_failed
-              ? `Не записано (сорвалось: ${st.rec_failed})`
-              : "Бот не пришёл"} />
+            label={st.join_failed
+              ? `Не записано (не пустили: ${st.join_failed})`
+              : st.rec_failed
+                ? `Не записано (сорвалось: ${st.rec_failed})`
+                : "Бот не пришёл"} />
           <Mini icon={CloudOff} n={st.upload_failed || "—"}
             label="Записей осталось на сервере" />
+        </div>
+      )}
+      {(!!st?.late_joins || st?.join_delay_median_sec != null) && (
+        <div className="text-[12px] mt-2" style={{ color: "var(--muted)" }}>
+          Вход бота: обычная задержка {st.join_delay_median_sec} с
+          {st.late_joins ? ` · опоздал на ${st.late_joins} встреч${st.late_joins === 1 ? "у" : ""}
+            — начало разговора в запись не попало` : ""}
         </div>
       )}
       {!!st?.by_stop_reason?.length && (

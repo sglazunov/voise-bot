@@ -25,7 +25,7 @@ import time
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from . import config, llm, logs, names, protocol_quality
+from . import config, llm, logs, names, protocol_quality, usage
 
 # Схемы и тексты промптов вынесены в соседние модули: 450 строк деклараций и
 # русского текста без единой ветки логики мешали читать сам конвейер. Имена
@@ -613,17 +613,19 @@ def analyze_transcript(transcript_text: str, provider: str | None = None,
         if custom:
             prompt = _with_notes(custom + "\n\n" + ctx_full + "Транскрипция:\n" + text,
                                  user_notes)
-            raw = _stream_complete(backend, _with_extra(prompt, extra_instructions),
-                                   10000, on_progress, "Генерация протокола…",
-                                   cancel_check=cancel_check)
+            with usage.stage(usage.REDUCE):
+                raw = _stream_complete(backend, _with_extra(prompt, extra_instructions),
+                                       10000, on_progress, "Генерация протокола…",
+                                       cancel_check=cancel_check)
             result = _extract_json(raw)
         else:
             prompt = _with_extra(
                 _with_notes(_PROMPT_TEMPLATE.format(transcript=text, context=ctx_full),
                             user_notes),
                 extra_instructions)
-            result = _protocol_from(backend, prompt, on_progress,
-                                    "Генерация протокола…", cancel_check)
+            with usage.stage(usage.REDUCE):
+                result = _protocol_from(backend, prompt, on_progress,
+                                        "Генерация протокола…", cancel_check)
     else:
         chunks = _split_chunks(text)
         n = len(chunks)
@@ -632,9 +634,11 @@ def analyze_transcript(transcript_text: str, provider: str | None = None,
             _ck()  # cancel between chunks
             stage = f"Читаю встречу: часть {i} из {n}…"
             try:
-                m = _complete_validated(
-                    backend, _MAP_TEMPLATE.format(i=i, n=n, chunk=chunk, context=ctx_map),
-                    MapNotes, 3500, on_progress, stage, cancel_check)
+                with usage.stage(usage.MAP):
+                    m = _complete_validated(
+                        backend,
+                        _MAP_TEMPLATE.format(i=i, n=n, chunk=chunk, context=ctx_map),
+                        MapNotes, 3500, on_progress, stage, cancel_check)
             except _SchemaMiss as e:
                 # The model's notes didn't fit the schema even after a retry —
                 # keep them as one flat topic rather than losing the chunk.
@@ -671,12 +675,13 @@ def analyze_transcript(transcript_text: str, provider: str | None = None,
                 stage = (f"Уплотняю заметки: {j // 2 + 1} из "
                          f"{(len(maps) + 1) // 2}…")
                 try:
-                    mm = _complete_validated(
-                        backend,
-                        _MERGE_TEMPLATE.format(
-                            a=json.dumps(a, ensure_ascii=False),
-                            b=json.dumps(b, ensure_ascii=False)),
-                        MapNotes, 3500, on_progress, stage, cancel_check)
+                    with usage.stage(usage.MERGE):
+                        mm = _complete_validated(
+                            backend,
+                            _MERGE_TEMPLATE.format(
+                                a=json.dumps(a, ensure_ascii=False),
+                                b=json.dumps(b, ensure_ascii=False)),
+                            MapNotes, 3500, on_progress, stage, cancel_check)
                 except AnalysisCancelled:
                     raise
                 except Exception:  # noqa: BLE001 — degrade, the merge is an optimisation
@@ -693,9 +698,10 @@ def analyze_transcript(transcript_text: str, provider: str | None = None,
                 + "Ниже — структурированные заметки (JSON) по "
                 "последовательным частям встречи, в хронологическом порядке; "
                 "объедини их в итог по требованиям выше:\n" + notes, user_notes)
-            raw = _stream_complete(backend, _with_extra(prompt, extra_instructions),
-                                   10000, on_progress, "Свожу протокол…",
-                                   cancel_check=cancel_check)
+            with usage.stage(usage.REDUCE):
+                raw = _stream_complete(backend, _with_extra(prompt, extra_instructions),
+                                       10000, on_progress, "Свожу протокол…",
+                                       cancel_check=cancel_check)
             result = _extract_json(raw)
         else:
             prompt = _with_extra(
@@ -706,8 +712,9 @@ def analyze_transcript(transcript_text: str, provider: str | None = None,
                 warning = ("Протокол мог потерять детали: у движка "
                            f"«{backend.name}» осталось мало лимита на ответ. "
                            "Попробуйте «Пересобрать» другим движком.")
-            result = _protocol_from(backend, prompt, on_progress,
-                                    "Свожу протокол…", cancel_check)
+            with usage.stage(usage.REDUCE):
+                result = _protocol_from(backend, prompt, on_progress,
+                                        "Свожу протокол…", cancel_check)
 
     # Normalise — guarantee the shape the rest of the app expects.
     result.setdefault("summary", "")
@@ -1679,9 +1686,10 @@ def verify_protocol(result: dict, transcript_text: str, user_notes: str = "",
                      f"пункты {batch[0][0]}–{batch[-1][0]})…")
             calls += 1
             try:
-                out = _complete_validated(backend, prompt, EvidenceList,
-                                          _verify_max_tokens(len(batch)),
-                                          on_progress, stage, cancel_check)
+                with usage.stage(usage.VERIFY):
+                    out = _complete_validated(backend, prompt, EvidenceList,
+                                              _verify_max_tokens(len(batch)),
+                                              on_progress, stage, cancel_check)
             except AnalysisCancelled:
                 raise
             except Exception as e:  # noqa: BLE001 — verification must not kill the job
@@ -1850,8 +1858,9 @@ def regen_topic_details(transcript_text: str, topic: dict,
         f"Текущее описание: {topic.get('details', '')}\n\n"
         + _with_notes("Расшифровка:\n" + text, user_notes))
     try:
-        out = _complete_validated(backend, prompt, ProtoTopic, 3000,
-                                  None, "Перегенерирую раздел…")
+        with usage.stage(usage.REGEN):
+            out = _complete_validated(backend, prompt, ProtoTopic, 3000,
+                                      None, "Перегенерирую раздел…")
     except _SchemaMiss as e:
         out = {"topic": topic.get("topic", ""), "details": e.raw[:4000]}
     return {"topic": (out.get("topic") or topic.get("topic") or "").strip(),
@@ -1965,5 +1974,6 @@ def ask_meeting(transcript_text: str, question: str,
         "обсуждалось» и ничего не выдумывай.\n\n"
         + _with_notes("", user_notes)
         + f"Фрагменты расшифровки:\n{fragments}\n\nВопрос: {question}")
-    return _stream_complete(backend, prompt, 1500, None, "Ищу ответ…",
-                            force_json=False).strip()
+    with usage.stage(usage.ASK):
+        return _stream_complete(backend, prompt, 1500, None, "Ищу ответ…",
+                                force_json=False).strip()

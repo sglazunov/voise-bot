@@ -2,7 +2,8 @@
 
 Public surface:
   readiness(cfg)                          -> what's installed / still missing
-  record_meeting(url, out_path, cfg, ...) -> {ok, path, reason} | {ok: False, error}
+  record_meeting(url, out_path, cfg, ...) -> {ok, path, reason, joined_at}
+                                          | {ok: False, reason, error}
 
 The bot join (browser.py) and the capture (capture.py) are kept separate so the
 capture backend (x11grab + PulseAudio) sits behind one interface, and so
@@ -129,15 +130,20 @@ def record_meeting(url: str, out_path: str, cfg: dict,
     # ещё на входе в звонок — тогда здесь был бы NameError вместо диагностики.
     audio_state = {"silent_since": None, "warned": False, "had_silence": False,
                    "had_speech": False, "ended_by_silence": False}
+    joined_at = None      # см. audio_state: обработчик сбоя читает и это
     try:
         if not bot.join(url, should_stop=should_stop):
             shot = str(Path(out_path).with_suffix(".join-failed.png"))
             bot.screenshot(shot)
-            return {"ok": False,
+            # ⚠️ «Не пустили» и «бот не пришёл» — РАЗНЫЕ отказы, и лечатся
+            # по-разному (вёрстка Телемоста против планировщика). Раньше эта
+            # ветка не возвращала `reason`, и в метрике они сливались.
+            return {"ok": False, "reason": "join_failed",
                     "error": "Не удалось войти в встречу (см. скриншот). "
                              "Возможно, изменилась вёрстка Телемоста или встреча "
                              "требует входа в Яндекс.",
                     "screenshot": shot}
+        joined_at = time.time()
 
         max_sec = int(cfg.get("max_meeting_min", 240)) * 60
         alone_sec = int(cfg.get("end_when_alone_sec", 90))
@@ -253,6 +259,10 @@ def record_meeting(url: str, out_path: str, cfg: dict,
                     "error": "Файл записи пуст — проверьте аудио-устройство и ffmpeg."}
         return {"ok": True, "path": out_path, "reason": reason,
                 "size": p.stat().st_size,
+                # Когда бот действительно оказался в звонке. Планировщик считает
+                # от этого «явку» (docs/ТЗ-МЕТРИКИ.md И36): не пришёл / опоздал /
+                # не пустили — три разных отказа, и лечатся они по-разному.
+                "joined_at": joined_at,
                 "audio_warning": audio_state["had_silence"]}
     except Exception as e:  # noqa: BLE001
         try:
@@ -272,6 +282,7 @@ def record_meeting(url: str, out_path: str, cfg: dict,
                     "продолжаем обработку.")
                 return {"ok": True, "path": out_path, "reason": "error",
                         "size": done.stat().st_size,
+                        "joined_at": joined_at,
                         "audio_warning": audio_state["had_silence"],
                         "warning": f"Запись прервана ошибкой: {e}"}
         except Exception:      # noqa: BLE001 — спасение файла не обязано работать

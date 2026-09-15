@@ -286,6 +286,9 @@ ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS stop_reason TEXT;
 ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS upload_error TEXT;
 -- Человеческая причина пропуска/отказа — то, что видит пользователь в карточке.
 ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS detail TEXT;
+-- На сколько секунд бот опоздал в звонок. «Явка» — это не только «пришёл или
+-- нет»: бот, вошедший к середине, теряет начало, где обычно и ставят задачи.
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS join_delay_sec DOUBLE PRECISION;
 CREATE TABLE IF NOT EXISTS ai_context (
     username     TEXT PRIMARY KEY,
     global_text  TEXT DEFAULT ''
@@ -719,6 +722,21 @@ def event_add(row: dict) -> bool:
         return bool(cur.rowcount)
 
 
+def events_add_many(rows: list[dict]) -> int:
+    """Пачка событий одним запросом: вызовов модели на встрече — десятки."""
+    if not rows:
+        return 0
+    with _conn() as conn, _cur(conn) as cur:
+        cols = ", ".join(_EVENT_COLS)
+        ph = ", ".join(["%s"] * len(_EVENT_COLS))
+        cur.executemany(
+            f"INSERT INTO product_events ({cols}) VALUES ({ph}) "
+            "ON CONFLICT (id) DO NOTHING",
+            [[_json(r.get(c)) if c == "extra" else r.get(c)
+              for c in _EVENT_COLS] for r in rows])
+        return len(rows)
+
+
 def events_load(team: str, since: float) -> list[dict]:
     with _conn() as conn, _cur(conn) as cur:
         cur.execute(f"SELECT {', '.join(_EVENT_COLS)} FROM product_events "
@@ -784,7 +802,8 @@ _STAT_COLS = ["id", "team", "at", "title", "duration_sec", "speakers",
               "verify_mode", "verify_version", "topics", "empty_topics",
               "dropped_topics", "dropped_items", "summary_is_toc", "edited",
               "tasks_with_owner", "tokens_by_model",
-              "kind", "stop_reason", "upload_error", "detail"]
+              "kind", "stop_reason", "upload_error", "detail",
+              "join_delay_sec"]
 # Колонки, которые в файловом режиме и в Postgres лежат как JSON.
 _STAT_JSON_COLS = {"tokens_by_model"}
 

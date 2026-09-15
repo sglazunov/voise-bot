@@ -38,6 +38,10 @@ _TICK_SEC = 15
 # Слоты одной задачи в этом окне считаются ОДНОЙ встречей с переносом
 # времени (недельный recurring — 7 суток, не попадает).
 _RESLOT_WINDOW_SEC = 20 * 3600  # loop granularity; actual Weeek polling honours poll_interval_sec
+# Со скольких секунд вход считается ОПОЗДАНИЕМ (docs/ТЗ-МЕТРИКИ.md И36: «вошёл и
+# начал писать в пределах двух минут»). Пришёл, но к середине встречи — это не
+# успех: начала разговора, где обычно и ставят задачи, в записи нет.
+_LATE_JOIN_SEC = float(os.getenv("VTX_LATE_JOIN_SEC", "120"))
 
 
 @dataclass
@@ -61,6 +65,10 @@ class MeetingState:
     stop_reason: str | None = None
     rec_bytes: int = 0                # размер записи: немая встреча видна сразу
     recorded_sec: float = 0.0         # сколько длилась запись (по часам сервера)
+    # На сколько секунд бот опоздал в звонок относительно времени встречи.
+    # «Явка бота» (docs/ТЗ-МЕТРИКИ.md И36) — это не только «пришёл или нет»:
+    # опоздавший на десять минут бот теряет начало, где обычно и ставят задачи.
+    join_delay_sec: float | None = None
     do_protocol: bool = False         # whether this meeting also builds a protocol
     record_flag: bool | None = None   # Weeek checkbox «Запись встречи»: True/False/unset
     stop_flag: bool = False           # manual "stop this recording"
@@ -764,6 +772,13 @@ class Scheduler:
             st.stop_reason = res.get("reason") or None
             st.rec_bytes = int(res.get("size") or 0)
             st.recorded_sec = max(0.0, time.time() - rec_started)
+            joined_at = res.get("joined_at")
+            if joined_at and st.start is not None:
+                st.join_delay_sec = float(joined_at) - st.start.timestamp()
+                if st.join_delay_sec > _LATE_JOIN_SEC:
+                    log(f"⚠ Бот вошёл на встречу с опозданием на "
+                        f"{int(st.join_delay_sec // 60)} мин — начало разговора "
+                        "в запись не попало.")
             if st.stop_reason:
                 log("Запись остановлена: "
                     f"{stats.stop_reason_ru(st.stop_reason)}.")
