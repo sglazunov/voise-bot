@@ -140,6 +140,9 @@ _DEFAULTS: dict[str, Any] = {
     "weeek_tasks_default_due_days": None,  # срок по умолчанию (дней от встречи)
     "weeek_user_map": {},              # {"имя в протоколе": "userId в Weeek"}
     "weeek_members_cache": {"at": 0, "members": []},  # кэш GET /ws/members (сутки)
+    # --- экономика команды (docs/ТЗ-МЕТРИКИ.md §7) — заполняет владелец сервиса ---
+    "subscription_rub": None,          # подписка команды, ₽ в месяц; None = не продаётся
+    "support_hours_month": 0.0,        # часов поддержки владельца на эту команду в месяц
 }
 
 

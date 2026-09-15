@@ -73,9 +73,10 @@ JOB_SCALAR_COLS = [
     "delete_audio_when_done", "status", "progress", "created_at", "started_at",
     "finished_at", "error", "duration", "speakers", "diarization_error",
     "speaker_error", "screen_error", "protocol_cloud_url", "delivery_error",
-    "screen_segments", "analysis_error", "transcribe_sec",
+    "screen_segments", "analysis_error", "transcribe_sec", "stop_reason",
 ]
-JOB_JSON_COLS = ["video_participants", "analysis", "docx_providers", "weeek_tasks"]
+JOB_JSON_COLS = ["video_participants", "analysis", "docx_providers", "weeek_tasks",
+                 "llm_usage"]
 JOB_COLS = JOB_SCALAR_COLS + JOB_JSON_COLS
 
 _SCHEMA = """
@@ -165,6 +166,13 @@ ALTER TABLE jobs ADD COLUMN IF NOT EXISTS preset TEXT;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS transcribe_sec DOUBLE PRECISION;
 -- Черновики задач для Weeek из протокола (см. app/weeek_tasks.py).
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS weeek_tasks JSONB;
+-- Расход модели на задачу (см. app/usage.py): токены входа/выхода, сколько
+-- взято из кэша, разбивка по моделям. Копится за все прогоны, включая
+-- пересборки, — деньги тратятся за каждый.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS llm_usage JSONB;
+-- Чем кончилась запись, из которой взялась задача (silence, max_duration,
+-- chat_stop…). Рекордер возвращал это всегда, но никто не читал.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS stop_reason TEXT;
 CREATE TABLE IF NOT EXISTS search_docs (
     job_id     TEXT PRIMARY KEY,
     username   TEXT,
@@ -225,6 +233,70 @@ CREATE TABLE IF NOT EXISTS meeting_stats (
     ok            BOOLEAN DEFAULT TRUE
 );
 CREATE INDEX IF NOT EXISTS idx_meeting_stats_team_at ON meeting_stats(team, at);
+-- Расход модели на встречу. Живёт ЗДЕСЬ, а не только в jobs: строки задач
+-- стирает суточный ретеншн, а расход команды нужен за месяцы. Цена (usd)
+-- пишется, только если цена модели задана (VTX_MODEL_PRICES), иначе NULL —
+-- пустое место честнее, чем «0 ₽ за встречу».
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS tokens_in BIGINT;
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS tokens_cached BIGINT;
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS tokens_out BIGINT;
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS llm_calls INTEGER;
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS usd DOUBLE PRECISION;
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS engines TEXT;
+-- Качество протокола. Всё это УЖЕ считается на каждой встрече (verification.
+-- stats, _quality, _dropped_topics, _dropped, _fallback, _edited) и жило ровно
+-- сутки внутри jobs.analysis, после чего стиралось ретеншном вместе с задачей.
+-- Здесь оно переживает ретеншн: без этого нельзя ответить, становится продукт
+-- лучше или хуже. Подробности — docs/ТЗ-МЕТРИКИ.md §3.
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS status TEXT;
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS protocol_ok BOOLEAN;
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS engine TEXT;
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS fallback BOOLEAN;
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS preset TEXT;
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS transcribe_sec DOUBLE PRECISION;
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS verify_checked INTEGER;
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS verify_confirmed INTEGER;
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS verify_mode TEXT;
+-- Версия правил проверки: доля подтверждённых сравнима только внутри одной.
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS verify_version TEXT;
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS topics INTEGER;
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS empty_topics INTEGER;
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS dropped_topics INTEGER;
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS dropped_items INTEGER;
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS summary_is_toc BOOLEAN;
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS edited BOOLEAN;
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS tasks_with_owner INTEGER;
+-- Расход по каждой модели отдельно: раньше by_model схлопывался в строку имён
+-- без чисел, и «сколько стоит Gemini против Groq» посчитать было нечем.
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS tokens_by_model JSONB;
+-- Исходы встречи (docs/ТЗ-МЕТРИКИ.md §14.2). До этого метрика знала только те
+-- встречи, по которым СОЗДАЛАСЬ задача распознавания: пропущенная, отфильтрованная
+-- и сорвавшаяся запись не оставляли следа вообще, а «явка бота» (И36) требует
+-- знаменателя из ЗАПЛАНИРОВАННЫХ встреч. Поэтому строки теперь двух видов:
+--   kind='job'     — задача распознавания (всё, что было раньше; NULL у старых строк);
+--   kind='meeting' — исход встречи у планировщика (missed|skipped|rec_error|recorded).
+-- Считать их вместе нельзя: у записанной встречи есть и та, и другая строка.
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS kind TEXT;
+-- Почему остановилась запись: silence|max_duration|chat_stop|call_ended|
+-- left_call|nobody_joined|thinned_out|stopped|error. Рекордер возвращал это с
+-- самого начала, а планировщик не читал — четырёхчасовые записи пустой комнаты
+-- разбирались руками именно поэтому.
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS stop_reason TEXT;
+-- Запись не уехала в облако (текст причины). Видео не должно жить на сервере.
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS upload_error TEXT;
+-- Человеческая причина пропуска/отказа — то, что видит пользователь в карточке.
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS detail TEXT;
+-- На сколько секунд бот опоздал в звонок. «Явка» — это не только «пришёл или
+-- нет»: бот, вошедший к середине, теряет начало, где обычно и ставят задачи.
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS join_delay_sec DOUBLE PRECISION;
+-- Были периоды без звука (пустые минуты платятся трижды — И32).
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS silent BOOLEAN;
+-- Отчёт клиенту (И58): вопросы без ответа и задачи прошлой встречи без упоминания.
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS unanswered INTEGER;
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS carried_stale INTEGER;
+-- Связь строки встречи со строкой задачи: без неё себестоимость записи и
+-- себестоимость модели одной встречи не складываются (И27).
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS job_id TEXT;
 CREATE TABLE IF NOT EXISTS ai_context (
     username     TEXT PRIMARY KEY,
     global_text  TEXT DEFAULT ''
@@ -240,6 +312,22 @@ CREATE TABLE IF NOT EXISTS meeting_series (
     username    TEXT PRIMARY KEY,
     data        JSONB NOT NULL
 );
+-- Продуктовые события: что сделал ЧЕЛОВЕК (docs/ТЗ-МЕТРИКИ.md §4).
+-- Человек обозначен ПСЕВДОНИМОМ (security.pseudonym), логина здесь нет и
+-- содержимого разговора — тоже: только вид действия, встреча и время.
+-- Первичный ключ несёт дедупликацию «встреча + человек + сутки» (И7): иначе
+-- «доля прочитанных протоколов» считала бы не читателей, а нажатия.
+CREATE TABLE IF NOT EXISTS product_events (
+    id       TEXT PRIMARY KEY,
+    team     TEXT NOT NULL,
+    kind     TEXT NOT NULL,
+    job_id   TEXT,
+    actor    TEXT,
+    source   TEXT,
+    at       DOUBLE PRECISION,
+    extra    JSONB
+);
+CREATE INDEX IF NOT EXISTS idx_product_events_team_at ON product_events(team, at);
 """
 
 
@@ -616,11 +704,59 @@ def delete_user_data(user: str) -> None:
                       "meeting_series"):
             cur.execute(f"DELETE FROM {table} WHERE username=%s", (user,))
         cur.execute("DELETE FROM meeting_stats WHERE team=%s", (user,))
+        # И68: полное удаление по требованию — журнал событий тоже данные команды.
+        cur.execute("DELETE FROM product_events WHERE team=%s", (user,))
 
 
 # --------------------------------------------------------------------------- #
 # search_docs — full-text index over the team's transcripts + protocols (Д14)
 # --------------------------------------------------------------------------- #
+_EVENT_COLS = ["id", "team", "kind", "job_id", "actor", "source", "at", "extra"]
+
+
+def event_add(row: dict) -> bool:
+    """Записать событие. False — такое уже было (дедуп по первичному ключу).
+
+    ⚠️ `DO NOTHING`, а не `DO UPDATE`: на первом событии стоит «время до
+    первого открытия» (И11), и перезапись сдвигала бы его на последнее.
+    """
+    with _conn() as conn, _cur(conn) as cur:
+        cols = ", ".join(_EVENT_COLS)
+        ph = ", ".join(["%s"] * len(_EVENT_COLS))
+        cur.execute(f"INSERT INTO product_events ({cols}) VALUES ({ph}) "
+                    "ON CONFLICT (id) DO NOTHING",
+                    [_json(row.get(c)) if c == "extra" else row.get(c)
+                     for c in _EVENT_COLS])
+        return bool(cur.rowcount)
+
+
+def events_add_many(rows: list[dict]) -> int:
+    """Пачка событий одним запросом: вызовов модели на встрече — десятки."""
+    if not rows:
+        return 0
+    with _conn() as conn, _cur(conn) as cur:
+        cols = ", ".join(_EVENT_COLS)
+        ph = ", ".join(["%s"] * len(_EVENT_COLS))
+        cur.executemany(
+            f"INSERT INTO product_events ({cols}) VALUES ({ph}) "
+            "ON CONFLICT (id) DO NOTHING",
+            [[_json(r.get(c)) if c == "extra" else r.get(c)
+              for c in _EVENT_COLS] for r in rows])
+        return len(rows)
+
+
+def events_load(team: str, since: float) -> list[dict]:
+    with _conn() as conn, _cur(conn) as cur:
+        cur.execute(f"SELECT {', '.join(_EVENT_COLS)} FROM product_events "
+                    "WHERE team=%s AND at >= %s ORDER BY at", (team, since))
+        return [{c: r.get(c) for c in _EVENT_COLS} for r in cur.fetchall()]
+
+
+def events_delete(team: str) -> None:
+    with _conn() as conn, _cur(conn) as cur:
+        cur.execute("DELETE FROM product_events WHERE team=%s", (team,))
+
+
 def search_save(job_id: str, team: str, title: str, body: str,
                 created_at: float) -> None:
     with _conn() as conn, _cur(conn) as cur:
@@ -666,7 +802,18 @@ def search_query(team: str, q: str, limit: int = 20) -> list[dict]:
 # meeting_stats — outcome of each finished meeting (for the Overview metrics)
 # --------------------------------------------------------------------------- #
 _STAT_COLS = ["id", "team", "at", "title", "duration_sec", "speakers",
-              "tasks", "decisions", "participants", "has_protocol", "ok"]
+              "tasks", "decisions", "participants", "has_protocol", "ok",
+              "tokens_in", "tokens_cached", "tokens_out", "llm_calls", "usd",
+              "engines",
+              "status", "protocol_ok", "engine", "fallback", "preset",
+              "transcribe_sec", "verify_checked", "verify_confirmed",
+              "verify_mode", "verify_version", "topics", "empty_topics",
+              "dropped_topics", "dropped_items", "summary_is_toc", "edited",
+              "tasks_with_owner", "tokens_by_model",
+              "kind", "stop_reason", "upload_error", "detail",
+              "join_delay_sec", "silent", "unanswered", "carried_stale", "job_id"]
+# Колонки, которые в файловом режиме и в Postgres лежат как JSON.
+_STAT_JSON_COLS = {"tokens_by_model"}
 
 
 def stats_add(row: dict) -> None:
@@ -676,7 +823,8 @@ def stats_add(row: dict) -> None:
         upd = ", ".join(f"{c}=EXCLUDED.{c}" for c in _STAT_COLS if c != "id")
         cur.execute(f"INSERT INTO meeting_stats ({cols}) VALUES ({ph}) "
                     f"ON CONFLICT (id) DO UPDATE SET {upd}",
-                    [row.get(c) for c in _STAT_COLS])
+                    [_json(row.get(c)) if c in _STAT_JSON_COLS else row.get(c)
+                     for c in _STAT_COLS])
 
 
 def stats_load(team: str, since: float) -> list[dict]:

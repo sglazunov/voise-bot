@@ -67,3 +67,51 @@ class TestTaskMatching:
         m = evaluate_case(_proto(
             tasks=[{"task": "Выкатить теги на прод до среды", "owner": "Кирилл С."}]), REF)
         assert m["owner_accuracy"] == 1.0
+
+
+class TestFacts:
+    """И23: эталон — чек-лист обязательных фактов, а не идеальный протокол."""
+
+    FACTS = [
+        {"fact": "Выкатить теги на прод до среды", "kind": "task", "owner": "Кирилл"},
+        {"fact": "Оставить пять базовых фильтров", "kind": "decision"},
+        {"fact": "тип периода привязан к ролям", "kind": "status", "status": "не сделано"},
+    ]
+
+    def test_факт_ищется_по_всему_протоколу(self):
+        # Решение модель записала как задачу — факт всё равно есть.
+        m = run_eval.evaluate_facts(_proto(
+            tasks=[{"task": "Выкатка тегов на прод (до среды)", "owner": "Кирилл"},
+                   {"task": "Оставить в карточке пять базовых фильтров", "owner": ""}]),
+            self.FACTS)
+        assert m["facts_found"] == 2 and m["facts_total"] == 3
+        assert m["facts_coverage"] == round(2 / 3, 3)
+        assert m["missed_facts"] == ["тип периода привязан к ролям"]
+
+    def test_ответственный_и_статус_сверяются_только_где_заданы(self):
+        proto = _proto(tasks=[{"task": "Выкатить теги на прод до среды", "owner": "Мария"}])
+        proto["statuses"] = [{"item": "тип периода привязан к ролям",
+                              "status": "не сделано", "note": ""}]
+        m = run_eval.evaluate_facts(proto, self.FACTS)
+        assert m["facts_owner_accuracy"] == 0.0      # Мария вместо Кирилла
+        assert m["facts_status_accuracy"] == 1.0
+
+    def test_без_фактов_метрика_пустая_а_не_ноль(self):
+        m = run_eval.evaluate_facts(_proto(), [])
+        assert m["facts_coverage"] is None
+
+    def test_evaluate_case_несёт_факты_и_опору(self):
+        proto = _proto(tasks=[{"task": "Выкатить теги на прод до среды", "owner": "Кирилл"}])
+        proto["verification"] = {"tasks": [{"ok": True}], "decisions": [{"ok": False}, None]}
+        m = evaluate_case(proto, {**REF, "facts": self.FACTS[:1]})
+        assert m["facts_coverage"] == 1.0
+        assert m["unsupported_share"] == 0.5          # None — не проверено, не в счёт
+
+
+class TestClosedCases:
+    def test_закрытый_кейс_узнаётся_по_meta(self, tmp_path):
+        d = tmp_path / "c"
+        d.mkdir()
+        assert run_eval._is_closed(d) is False
+        (d / "meta.json").write_text('{"closed": true}', encoding="utf-8")
+        assert run_eval._is_closed(d) is True

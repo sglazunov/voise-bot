@@ -58,3 +58,24 @@ def test_чистое_время_распознавания_хранится():
     assert "transcribe_sec" in db.JOB_SCALAR_COLS
     assert hasattr(Job(id="x", filename="x", audio_path="y", language="ru",
                        diarize=False), "transcribe_sec")
+
+
+def test_все_поля_задачи_есть_в_колонках():
+    """⚠️ Поле, добавленное в `Job`, но не в `JOB_COLS`, МОЛЧА пропадает на
+    Postgres: `job_upsert` пишет только перечисленные колонки, а `jobs_load`
+    только их и читает — после перезапуска значение оказывается умолчанием.
+    Ровно так уже терялись настройки (K1 ревью: модель отстала на 11 ключей).
+    """
+    from dataclasses import fields
+    from app.jobs import Job
+    missing = [f.name for f in fields(Job) if f.name not in db.JOB_COLS]
+    assert not missing, f"поля Job без колонки в БД: {missing}"
+
+
+def test_колонки_метрик_объявлены_в_схеме():
+    """То же для `meeting_stats`: колонка в `_STAT_COLS` без DDL уронит INSERT
+    на живой базе, а юнит-тесты этого не увидят — они работают в файловом
+    режиме."""
+    missing = [c for c in db._STAT_COLS
+               if not re.search(rf"\b{c}\b", db._SCHEMA)]
+    assert not missing, f"нет в схеме meeting_stats: {missing}"

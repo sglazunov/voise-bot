@@ -317,6 +317,15 @@ export default function Recognition() {
       loadJobs();
     } catch (e: any) { toast(e.message, true); }
   }
+  // «Протокол открыл ЧЕЛОВЕК» — главная метрика ценности (ТЗ-МЕТРИКИ И7, И9).
+  // ⚠️ Звать ТОЛЬКО из обработчика клика. Из загрузки детали, опроса статуса
+  // или восстановления выбранной встречи при перезагрузке страницы — НЕЛЬЗЯ:
+  // тогда метрика чтения станет метрикой трафика. Сервер сам отбрасывает
+  // встречи без протокола и повторы того же человека за сутки; ошибку глушим —
+  // аналитика не должна мешать человеку читать.
+  function markOpened(id: string) {
+    api.post(`/api/jobs/${id}/opened`).catch(() => {});
+  }
   // Delivery only (cloud upload + Weeek link) — no expensive LLM re-run.
   async function redeliver(id: string) {
     try { const r = await api.post(`/api/jobs/${id}/redeliver`); toast(r.detail || "Прикреплено"); loadJobs(); }
@@ -531,7 +540,7 @@ export default function Recognition() {
                 </button>
               )) : <div className="text-[12.5px] py-2" style={{ color: "var(--muted)" }}>Ничего не найдено.</div>
             ) : shownJobs.length ? shownJobs.map((j) => (
-              <button key={j.id} onClick={() => { setSel(j.id); setTab("protocol"); }}
+              <button key={j.id} onClick={() => { setSel(j.id); setTab("protocol"); markOpened(j.id); }}
                 className="w-full glass2 rounded-2xl px-3.5 py-3 mb-2 flex items-center gap-3 text-left transition"
                 style={sel === j.id ? { borderColor: "var(--accent)" } : {}}>
                 <div className="grid place-items-center rounded-xl flex-none" style={{ width: 36, height: 36, background: "rgba(45,212,191,.13)" }}>
@@ -659,7 +668,7 @@ export default function Recognition() {
               <div className="flex items-center gap-2 mb-3 flex-wrap">
                 <div className="glass2 rounded-full p-1 flex gap-1">
                   {(["protocol", "transcript"] as const).map((t) => (
-                    <button key={t} onClick={() => setTab(t)}
+                    <button key={t} onClick={() => { setTab(t); if (t === "protocol") markOpened(detail.id); }}
                       className="rounded-full px-3.5 py-1.5 text-[12.5px] font-semibold transition"
                       style={tab === t ? { background: "linear-gradient(90deg,var(--accent),var(--accent2))", color: "var(--accent-ink)" } : { color: "var(--muted)" }}>
                       {t === "protocol" ? "Протокол" : "Расшифровка"}</button>

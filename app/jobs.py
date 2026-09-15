@@ -19,7 +19,8 @@ from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import Dict, Optional
 
-from . import config, db, formats, glossary, logs, meeting_series, names, redact
+from . import (config, db, formats, glossary, logs, meeting_series, names, redact,
+               usage)
 from .transcribe import transcribe_file
 
 log = logs.get("vtx.jobs")
@@ -113,6 +114,11 @@ class Job:
     context_hint: str = ""           # matches saved AI-context projects (meeting/project name)
     user_notes: str = ""             # participant's own live notes — the protocol's skeleton (Д6)
     preset: str = ""                 # protocol preset (Д11): planerka|design|demo|one_on_one|custom
+    # Почему остановилась запись, из которой взялась эта задача: silence |
+    # max_duration | chat_stop | call_ended | left_call | nobody_joined |
+    # thinned_out | stopped | error. Рекордер возвращает это с самого начала,
+    # но никто не читал — переживает ретеншн в meeting_stats.
+    stop_reason: str = ""
     delete_audio_when_done: bool = False  # delete the source media after processing
                                           # (recordings already sent to the UI's cloud)
     owner: str = ""                  # the login that owns this job (isolation)
@@ -124,6 +130,10 @@ class Job:
     error: Optional[str] = None
     duration: Optional[float] = None
     transcribe_sec: Optional[float] = None   # чистое время распознавания
+    # Расход модели на эту задачу: {"calls","in","cached","out","by_model"}.
+    # Копится за ВСЕ прогоны (первый + пересборки), потому что деньги тоже
+    # тратятся за все. Переживает ретеншн в meeting_stats (см. stats.record).
+    llm_usage: dict = field(default_factory=dict)
     speakers: Optional[int] = None
     diarization_error: Optional[str] = None  # why "who spoke" didn't run, if asked
     speaker_error: Optional[str] = None      # why video speaker-ID didn't run, if asked
@@ -233,7 +243,8 @@ class JobStore:
                deliver_protocol_cloud: bool = False, deliver_weeek_task: str = "",
                context_hint: str = "", model: str = "",
                delete_audio_when_done: bool = False, owner: str = "",
-               user_notes: str = "", preset: str = "") -> Job:
+               user_notes: str = "", preset: str = "",
+               stop_reason: str = "") -> Job:
         job = Job(
             id=uuid.uuid4().hex[:12],
             filename=filename,
@@ -254,6 +265,7 @@ class JobStore:
             context_hint=(context_hint or "").strip(),
             user_notes=(user_notes or "").strip(),
             preset=(preset or "").strip(),
+            stop_reason=(stop_reason or "").strip(),
             delete_audio_when_done=delete_audio_when_done,
             owner=_team(owner),   # jobs belong to the TEAM, not the individual
         )
@@ -498,10 +510,12 @@ class JobStore:
         if not txt_path.exists():
             raise ValueError("Нет расшифровки для перегенерации.")
         from .analyze import regen_topic_details
-        detailed[index] = regen_topic_details(
-            txt_path.read_text(encoding="utf-8"), detailed[index],
-            provider=provider or job.provider, keys=_owner_keys(job.owner),
-            user_notes=job.user_notes)
+        with usage.collect() as acc:
+            detailed[index] = regen_topic_details(
+                txt_path.read_text(encoding="utf-8"), detailed[index],
+                provider=provider or job.provider, keys=_owner_keys(job.owner),
+                user_notes=job.user_notes)
+        self._add_usage(job, acc, rerun=True)
         a["detailed"] = detailed
         a.pop("verification", None)   # indexes may shift meaning — cleared
         a["_edited"] = True
@@ -518,9 +532,14 @@ class JobStore:
         if not txt_path.exists():
             raise ValueError("Нет расшифровки — не по чему искать ответ.")
         from .analyze import ask_meeting
-        return ask_meeting(txt_path.read_text(encoding="utf-8"), question,
-                           provider=job.provider, keys=_owner_keys(job.owner),
-                           user_notes=job.user_notes)
+        # Вопрос по встрече — тоже вызов модели и тоже деньги команды:
+        # расшифровка уходит в запрос целиком или большими окнами.
+        with usage.collect() as acc:
+            answer = ask_meeting(txt_path.read_text(encoding="utf-8"), question,
+                                 provider=job.provider, keys=_owner_keys(job.owner),
+                                 user_notes=job.user_notes)
+        self._add_usage(job, acc)
+        return answer
 
     def index_search(self, job: Job) -> None:
         """Д14: (re)index this job's transcript + protocol for full-text search.
@@ -636,6 +655,41 @@ class JobStore:
         except Exception:  # noqa: BLE001
             log.warning("Память серии не обновлена (%s)", job.id, exc_info=True)
 
+    def _add_usage(self, job: Job, acc: dict, rerun: bool = False) -> None:
+        """Долить расход прогона к расходу задачи.
+
+        Складываем, а не заменяем: пересборка — это ещё один полный проход по
+        встрече, и её токены тоже оплачены. Иначе счётчик показывал бы только
+        последний прогон и занижал расход команды.
+        """
+        if not acc or not acc.get("calls"):
+            return
+        # Поимённый список вызовов уезжает в журнал событий, а в задаче остаются
+        # только итоги. ⚠️ Хранить его ещё и в `Job.llm_usage` нельзя: это
+        # JSONB-колонка, которую переписывает КАЖДОЕ обновление задачи, а список
+        # растёт с каждой пересборкой.
+        calls_log = list(acc.get("log") or [])
+        if calls_log:
+            from . import events
+            # Пересборка — повторная себестоимость ТОЙ ЖЕ встречи (И27, И32):
+            # без пометки маржа выглядит лучше реальности ровно у тех клиентов,
+            # кто пересобирает чаще.
+            if rerun:
+                calls_log = [{**c, "rerun": True} for c in calls_log]
+            events.record_many(calls_log, user=job.owner, job_id=job.id,
+                               kind=events.LLM_CALL)
+        total = dict(job.llm_usage or {})
+        usage._merge(total, acc)
+        total.pop("log", None)
+        self._set(job, llm_usage=total)
+        # ⚠️ Строка метрик пишется при смене статуса, а вопрос по встрече и
+        # перегенерация темы случаются ПОСЛЕ того, как задача уже `done`: их
+        # токены копились в задаче и до метрик не доезжали (И3). Перезаписываем
+        # строку — она upsert по id задачи, дубля не будет.
+        if job.status in (STATUS_DONE, STATUS_ERROR, STATUS_CANCELLED):
+            from . import stats
+            stats.record(job)
+
     def _maybe_verify(self, job: Job, result: dict, transcript: str) -> dict:
         """Д5: grounding pass over the fresh protocol (strict mode, on by
         default; per-team switch «strict_verify» in automation settings). Never
@@ -678,15 +732,17 @@ class JobStore:
             from .analyze import analyze_transcript, AnalysisCancelled
             from .docx_export import generate_report
 
-            result = analyze_transcript(
-                txt, provider=job.provider,
-                extra_instructions=self._preset_extra(job),
-                custom_prompt=job.analysis_prompt,
-                on_progress=self._on_analysis(job.id),
-                cancel_check=lambda: self._control.get(job.id, {}).get("cancel"),
-                keys=_owner_keys(job.owner),
-                user_notes=job.user_notes, context=context)
-            result = self._maybe_verify(job, result, txt)
+            with usage.collect() as acc:
+                result = analyze_transcript(
+                    txt, provider=job.provider,
+                    extra_instructions=self._preset_extra(job),
+                    custom_prompt=job.analysis_prompt,
+                    on_progress=self._on_analysis(job.id),
+                    cancel_check=lambda: self._control.get(job.id, {}).get("cancel"),
+                    keys=_owner_keys(job.owner),
+                    user_notes=job.user_notes, context=context)
+                result = self._maybe_verify(job, result, txt)
+            self._add_usage(job, acc, rerun=True)
             result = self._enforce_participants(job, result)
             self._remember_series(job, result)
             job.analysis = result
@@ -891,7 +947,10 @@ class JobStore:
         # A finished job's outcome is recorded for the business metrics — job
         # rows themselves are purged by retention. Upsert by id, so re-running
         # (retry / reanalyze) just refreshes the row.
-        if kw.get("status") in (STATUS_DONE, STATUS_ERROR):
+        # ⚠️ Отменённая задача тоже пишется в метрики. Раньше условие ловило
+        # только done/error, и отменённая встреча исчезала бесследно — даже
+        # как отказ (И2 в docs/ТЗ-МЕТРИКИ.md).
+        if kw.get("status") in (STATUS_DONE, STATUS_ERROR, STATUS_CANCELLED):
             from . import stats
             stats.record(job)
             if kw.get("status") == STATUS_DONE:
@@ -1162,16 +1221,18 @@ class JobStore:
                     from .analyze import analyze_transcript, AnalysisCancelled
                     from .docx_export import generate_report
 
-                    analysis_result = analyze_transcript(
-                        analysis_input, provider=job.provider,
-                        extra_instructions=self._preset_extra(job),
-                        custom_prompt=job.analysis_prompt,
-                        on_progress=self._on_analysis(job.id),
-                        cancel_check=lambda: self._control.get(job.id, {}).get("cancel"),
-                        keys=_owner_keys(job.owner),
-                        user_notes=job.user_notes, context=analysis_context)
-                    analysis_result = self._maybe_verify(
-                        job, analysis_result, analysis_input)
+                    with usage.collect() as acc:
+                        analysis_result = analyze_transcript(
+                            analysis_input, provider=job.provider,
+                            extra_instructions=self._preset_extra(job),
+                            custom_prompt=job.analysis_prompt,
+                            on_progress=self._on_analysis(job.id),
+                            cancel_check=lambda: self._control.get(job.id, {}).get("cancel"),
+                            keys=_owner_keys(job.owner),
+                            user_notes=job.user_notes, context=analysis_context)
+                        analysis_result = self._maybe_verify(
+                            job, analysis_result, analysis_input)
+                    self._add_usage(job, acc)
                     analysis_result = self._enforce_participants(job, analysis_result)
                     self._remember_series(job, analysis_result)
                     job.analysis = analysis_result

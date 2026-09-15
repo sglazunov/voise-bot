@@ -73,6 +73,23 @@ class StatusNote(BaseModel):
     quote: str | None = None
 
 
+class CaveatNote(BaseModel):
+    """Оговорка о состоянии системы, сказанная ПО ХОДУ демо или рассказа:
+    «инсерты временно отключил», «конфиги пока в JSON, БД не трогал», «на
+    вкладке импорта есть скрытый функционал», «третья вкладка — заглушка».
+
+    Это не решение, не задача и не ответ на вопрос — поэтому раньше такие факты
+    не попадали никуда: демо на 20 минут ужималось в пять предложений темы, а
+    тестировщик, читавший протокол вместо записи, узнавал про скрытую вкладку
+    только из сырой расшифровки (протокол CRM 15.09.2026)."""
+    model_config = ConfigDict(extra="ignore", coerce_numbers_to_str=True)
+    t: str | None = None
+    item: str = ""
+    kind: str = ""
+    note: str = ""
+    quote: str | None = None
+
+
 class MapNotes(BaseModel):
     model_config = ConfigDict(extra="ignore", coerce_numbers_to_str=True)
     time_range: str = ""
@@ -81,6 +98,7 @@ class MapNotes(BaseModel):
     decisions: list[DecisionNote] = Field(default_factory=list)
     tasks: list[TaskNote] = Field(default_factory=list)
     statuses: list[StatusNote] = Field(default_factory=list)
+    caveats: list[CaveatNote] = Field(default_factory=list)
 
 
 # Final-protocol models are deliberately null-tolerant: a weak cloud model
@@ -112,6 +130,13 @@ class ProtoStatus(BaseModel):
     note: str | None = ""
 
 
+class ProtoCaveat(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    item: str | None = ""
+    kind: str | None = ""
+    note: str | None = ""
+
+
 class Protocol(BaseModel):
     model_config = ConfigDict(extra="ignore", coerce_numbers_to_str=True)
     participants: list[ProtoParticipant] = Field(default_factory=list)
@@ -124,4 +149,5 @@ class Protocol(BaseModel):
     tasks: list[ProtoTask] = Field(default_factory=list)
     minor_tasks: list[ProtoTask] = Field(default_factory=list)
     statuses: list[ProtoStatus] = Field(default_factory=list)
+    caveats: list[ProtoCaveat] = Field(default_factory=list)
 

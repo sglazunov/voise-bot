@@ -167,12 +167,44 @@ class TestVerifyFailure:
         assert "выполнена не полностью" in text
 
     def test_points_are_verified_in_batches(self, monkeypatch):
+        """Пункты бьются на батчи по `_VERIFY_BATCH` — и не мельче.
+
+        Каждый батч несёт ВЕСЬ фрагмент расшифровки, поэтому лишний батч —
+        лишняя копия встречи во входе. Раньше батч был 15, и 40 пунктов
+        стоили трёх копий расшифровки вместо одной."""
+        n = analyze._VERIFY_BATCH * 2 + 5
         answers = [json.dumps({"items": []}) for _ in range(3)]
         backend = FakeBackend(answers)
         monkeypatch.setattr(analyze.llm, "get_provider_chain", lambda *a, **k: backend)
-        res = verify_protocol(_proto(40), "[00:01] речь речь речь")
+        res = verify_protocol(_proto(n), "[00:01] речь речь речь")
         assert res["verification"]["stats"]["calls"] == 3
-        assert all(p.count(") [tasks]") <= 15 for p in backend.prompts)
+        assert all(p.count(") [tasks]") <= analyze._VERIFY_BATCH
+                   for p in backend.prompts)
+
+    def test_batch_that_did_not_fit_is_halved_not_abandoned(self, monkeypatch):
+        """Не поместившийся ответ на крупный батч разрезается пополам.
+
+        Единственная причина осечки на большом батче — обрезанный ответ (К2),
+        и половина пунктов помещается заведомо. Раньше любая осечка ставила
+        verification.error и обрывала проверку ВСЕГО протокола."""
+        n = analyze._VERIFY_BATCH
+        answers = [RuntimeError("ответ обрезан")] + [
+            json.dumps({"items": []}) for _ in range(4)]
+        backend = FakeBackend(answers)
+        monkeypatch.setattr(analyze.llm, "get_provider_chain", lambda *a, **k: backend)
+        res = verify_protocol(_proto(n), "[00:01] речь речь речь")
+        ver = res["verification"]
+        assert not ver.get("error"), "осечка батча не должна ронять проверку"
+        assert ver["stats"]["calls"] == 3            # один крупный + две половины
+        halves = [p.count(") [tasks]") for p in backend.prompts[1:]]
+        assert sum(halves) == n and max(halves) <= n // 2 + 1
+
+    def test_small_batch_failure_still_reports_error(self, monkeypatch):
+        """Дробить бесконечно нельзя: на маленьком батче осечка — это отказ."""
+        backend = FakeBackend([RuntimeError("503")])
+        monkeypatch.setattr(analyze.llm, "get_provider_chain", lambda *a, **k: backend)
+        res = verify_protocol(_proto(3), "[00:01] речь речь речь")
+        assert res["verification"]["error"]
 
 
 class TestTopicsAndOwners:

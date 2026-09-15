@@ -74,9 +74,15 @@ HF_TOKEN = os.getenv("HF_TOKEN", "")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 ANALYSIS_MODEL = os.getenv("VTX_ANALYSIS_MODEL", "claude-sonnet-4-6")
 
-# --- Free: Groq cloud (free tier; get a key at https://console.groq.com) ---
+# --- Groq cloud (ключ на https://console.groq.com) ---
+# ⚠️ Llama у Groq уехала в Enterprise (14.09.2026): `llama-3.3-70b-versatile` и
+# `llama-3.1-8b-instant` в каталоге помечены «Contact Sales», и обычный ключ
+# получает по ним отказ. Именно это, а не удаление модели, и выглядело как
+# «Groq умер»: каждый откат тратил вызов впустую.
+# Рабочая замена на обычном ключе — gpt-oss, и она заметно дешевле всего
+# остального в проекте: $0.15 за миллион входа против $2 у Sonnet.
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-GROQ_MODEL = os.getenv("VTX_GROQ_MODEL", "llama-3.3-70b-versatile")
+GROQ_MODEL = os.getenv("VTX_GROQ_MODEL", "openai/gpt-oss-120b")
 
 # --- Google Gemini (free tier; key at https://aistudio.google.com/apikey) ---
 # Pin a CONCRETE model (not the gemini-flash-latest alias) so behaviour and free
@@ -114,7 +120,7 @@ PROVIDER_LABELS = {
     # поставщиков меняется, а писать новый класс под каждого — тупик.
     "custom": "Любой провайдер по ключу (OpenAI-совместимый)",
     "ollama": "Локально · Ollama (бесплатно, оффлайн)",
-    "groq": "Groq · Llama (бесплатно, облако)",
+    "groq": "Groq · GPT-OSS (быстрый и дешёвый, облако)",
     "gemini": "Google Gemini (по ключу)",
     "yandex": "YandexGPT (ключ + folder id)",
     "gigachat": "GigaChat / Sber (по ключу)",
@@ -209,9 +215,12 @@ CUSTOM_NON_CHAT = (
 # Chosen from the UI as "<provider>:<model>"; the first entry is the default.
 # Weaker/cheaper tiers are faster; stronger tiers give better protocols.
 PROVIDER_MODELS = {
+    # Llama отсюда убрана намеренно: у Groq она только по Enterprise-договору,
+    # и обычный ключ получает по ней отказ. Держать её в списке — значит
+    # предлагать человеку выбрать заведомо неработающее.
     "groq": [
-        {"value": "llama-3.3-70b-versatile", "label": "Llama 3.3 70B · мощная (по умолчанию)"},
-        {"value": "llama-3.1-8b-instant", "label": "Llama 3.1 8B · быстрая/лёгкая"},
+        {"value": "openai/gpt-oss-120b", "label": "GPT-OSS 120B · мощная (по умолчанию)"},
+        {"value": "openai/gpt-oss-20b", "label": "GPT-OSS 20B · быстрая/дешёвая"},
     ],
     "gigachat": [
         {"value": "GigaChat", "label": "GigaChat Lite · базовая (быстро)"},
@@ -252,7 +261,18 @@ KEY_TTL_DAYS: dict[str, int] = {}
 # its own (HTTP 413 "Request too large"), no matter how many keys you have — every
 # account of the same tier has the same cap. We size each request to fit.
 # Extra keys still help: they multiply the per-MINUTE throughput (see llm.py).
-PROVIDER_TPM = {"groq": int(os.getenv("VTX_GROQ_TPM", "12000"))}
+# ⚠️ Число делает ДВЕ работы: ограничивает размер запроса по минутному лимиту и
+# служит оценкой окна контекста (analyze._ctx_budget). Поэтому это МЕНЬШЕЕ из
+# двух — лимита тарифа и окна модели.
+#
+# По умолчанию стоит ТАРИФ РАЗРАБОТЧИКА: у gpt-oss 250 000 токенов в минуту при
+# окне 131 072, поэтому берём 120 000 — окно с запасом, а не минутный лимит.
+#
+# ⚠️ На БЕСПЛАТНОМ тарифе у gpt-oss-120b всего 8 000 токенов в минуту и 200 000
+# в сутки: один кусок карты (~12 000) не влезает в минуту вовсе, а часовая
+# встреча съедает 46 % СУТОЧНОГО лимита. Там Groq для протоколов непригоден —
+# ставить VTX_GROQ_TPM=8000 и выключать движок через VTX_PROVIDER_DISABLED.
+PROVIDER_TPM = {"groq": int(os.getenv("VTX_GROQ_TPM", "120000"))}
 
 
 def custom_env_extra() -> str:

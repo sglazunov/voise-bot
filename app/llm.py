@@ -33,10 +33,14 @@ from . import config
 # отмена генерации, протокол провайдера. Имена ре-экспортируются: снаружи и в
 # тестах обращаются к llm.X.
 from .llm_base import (                 # noqa: F401 — часть публичного API
-    GenerationCancelled, LLMProvider, _KeyProviderMixin,
+    CACHE_MARK, GenerationCancelled, LLMProvider, _KeyProviderMixin,
+    cache_parts, cache_strip,
     _http_post_json, _is_rate_limit, is_key_rejected, _retry_after, _safe_url,
 )
 from .llm_custom import CustomProvider, text_of  # noqa: F401 — часть публичного API
+from . import logs, usage
+
+_LOG = logs.get("vtx.llm")
 
 
 # ---------------------------------------------------------------------------
@@ -167,6 +171,7 @@ class GroqProvider(_KeyProviderMixin):
         headers = {"Authorization": f"Bearer {self.api_key}"}
         out = _http_post_json(url, payload, headers, timeout=180,
                               max_retries=self._retries)
+        _log_usage(f"{self.name}/{self.model}", _openai_usage(out))
         # Разбор общий с «своим ключом»: content бывает null (рассуждающие
         # модели) или списком кусков, и голое .strip() падало на None.
         text, _ = text_of(out)
@@ -181,6 +186,11 @@ class AnthropicProvider:
     """Anthropic Claude. Paid per token, highest quality."""
 
     name = "anthropic"
+    # Единственный движок в проекте, который умеет кэш промпта: неизменная
+    # часть запроса (правила, схема, контекст команды) помечается
+    # `llm_base.CACHE_MARK` и уходит отдельными блоками с `cache_control`.
+    # Остальные провайдеры метку просто не видят — её вырезает цепочка.
+    cache_aware = True
 
     def __init__(self, model: str | None = None, api_key: str | None = None,
                  extra: str | None = None) -> None:
@@ -197,13 +207,69 @@ class AnthropicProvider:
                 "Пакет anthropic не установлен. Выполните: pip install anthropic"
             )
         client = anthropic.Anthropic(api_key=self.api_key)
+        # Промпт уходит блоками: у всех, кроме последнего, стоит
+        # `cache_control` — их содержимое одинаково от запроса к запросу
+        # (правила и схема — у всех встреч, контекст — у всех кусков одной).
+        # Без меток это ровно один блок, то есть прежнее поведение.
+        content = [
+            {"type": "text", "text": text}
+            | ({"cache_control": {"type": "ephemeral"}} if cached else {})
+            for text, cached in cache_parts(prompt)
+        ]
         message = client.messages.create(
             model=self.model,
             max_tokens=max_tokens,
             temperature=0.1,
-            messages=[{"role": "user", "content": prompt}],
+            messages=[{"role": "user", "content": content}],
         )
+        u = getattr(message, "usage", None)
+        if u is not None:
+            _log_usage(f"anthropic/{self.model}", {
+                "promptTokenCount": (getattr(u, "input_tokens", 0) or 0)
+                + (getattr(u, "cache_read_input_tokens", 0) or 0),
+                "cachedContentTokenCount": getattr(u, "cache_read_input_tokens", 0),
+                "candidatesTokenCount": getattr(u, "output_tokens", 0),
+            })
         return message.content[0].text.strip()
+
+
+def _log_usage(name: str, usage_meta: dict | None) -> None:
+    """Строка расхода в лог — единственный способ узнать, берётся ли кэш.
+
+    Правило из практики: если «из кэша» стабильно ноль при одинаковом начале
+    запросов, значит префикс что-то молча обесценивает (менявшаяся шапка,
+    несортированный JSON, разный набор правил). Без этой строки кэш проверить
+    нечем, и «мы же включили кэширование» остаётся верой.
+
+    У Gemini кэш НЕЯВНЫЙ: он включён сам на моделях 2.5 и новее и срабатывает,
+    когда запрос начинается так же, как недавний. Поэтому в шаблонах
+    неизменная часть стоит первой, а переменная — последней.
+    """
+    if not usage_meta:
+        return
+    cached = int(usage_meta.get("cachedContentTokenCount") or 0)
+    total = int(usage_meta.get("promptTokenCount") or 0)
+    out = int(usage_meta.get("candidatesTokenCount") or 0)
+    if not (total or out):
+        return
+    # Расход уходит в сбор по задаче (app/usage), если он открыт: так вызов
+    # провайдера оказывается привязан к встрече и к команде, не зная о них.
+    usage.record(name, total, cached, out)
+    _LOG.info("%s: вход %s ток. (из кэша %s, %d%%), выход %s ток.",
+              name, total, cached,
+              round(100 * cached / total) if total else 0, out)
+
+
+def _openai_usage(out: dict) -> dict | None:
+    """Расход из OpenAI-совместимого ответа в тех же полях, что у Gemini."""
+    u = (out or {}).get("usage") or {}
+    if not isinstance(u, dict) or not u:
+        return None
+    details = u.get("prompt_tokens_details")
+    cached = (details or {}).get("cached_tokens") if isinstance(details, dict) else 0
+    return {"promptTokenCount": u.get("prompt_tokens") or 0,
+            "cachedContentTokenCount": cached or 0,
+            "candidatesTokenCount": u.get("completion_tokens") or 0}
 
 
 # ---------------------------------------------------------------------------
@@ -232,6 +298,7 @@ class GeminiProvider(_KeyProviderMixin):
         out = _http_post_json(url, payload,
                               headers={"x-goog-api-key": self.api_key},
                               max_retries=self._retries)
+        _log_usage(f"gemini/{model}", out.get("usageMetadata"))
         try:
             return out["candidates"][0]["content"]["parts"][0]["text"].strip()
         except (KeyError, IndexError) as e:
@@ -262,6 +329,11 @@ class YandexProvider:
                    "x-folder-id": self.folder}
         out = _http_post_json(url, payload, headers,
                               max_retries=self._retries)
+        u = ((out or {}).get("result") or {}).get("usage") or {}
+        _log_usage(f"yandex/{self.model}", {
+            "promptTokenCount": u.get("inputTextTokens") or 0,
+            "candidatesTokenCount": u.get("completionTokens") or 0,
+        } if u else None)
         try:
             return out["result"]["alternatives"][0]["message"]["text"].strip()
         except (KeyError, IndexError) as e:
@@ -387,8 +459,17 @@ def get_provider(name: str | None, keys: dict | None = None) -> LLMProvider:
     resolved = config.resolve_provider(base, keys)
     cls = _PROVIDERS[resolved]
     if resolved == "ollama":
-        return cls(model=model)
+        inst = cls(model=model)
+        inst.key_owner = usage.SERVICE_KEY     # локальный движок — наш сервер
+        return inst
     creds = config.provider_creds(resolved, keys) or [("", "")]
+    # Чей ключ. Команда со своим ключом стоит владельцу сервиса ноль за модель
+    # (И34) — это влияет на тариф, и в расходе такие вызовы помечаются отдельно.
+    # У «своего ключа» в пуле могут лежать и ключ команды, и ключ из .env: пул
+    # помечается ключом команды, если в нём есть хоть один её ключ, — занизить
+    # долю сервиса безопаснее, чем завысить долю клиента.
+    own = [e for e in ((keys or {}).get(resolved) or []) if e.get("key")]
+    key_owner = usage.TEAM_KEY if own else usage.SERVICE_KEY
     if resolved == "custom" and model:
         # Под «своим ключом» лежат подключения к РАЗНЫМ сервисам, и ключ одного
         # к моделям другого отношения не имеет: запрос модели Yandex Cloud с
@@ -398,8 +479,11 @@ def get_provider(name: str | None, keys: dict | None = None) -> LLMProvider:
         creds = _creds_with_model(creds, model) or creds
     if len(creds) == 1:
         k, ex = creds[0]
-        return cls(model=model, api_key=k, extra=ex)
-    return _RotatingProvider(cls, model, creds)
+        inst = cls(model=model, api_key=k, extra=ex)
+    else:
+        inst = _RotatingProvider(cls, model, creds)
+    inst.key_owner = key_owner
+    return inst
 
 
 def _creds_with_model(creds: list[tuple[str, str]], model: str) -> list[tuple[str, str]]:
@@ -473,6 +557,9 @@ class _RotatingProvider:
         # ДВУХ ключах отмена в потоке молча переставала работать: цепочка
         # смотрит на тип, а тип здесь — обёртка, а не сам провайдер.
         self.accepts_should_stop = getattr(cls, "accepts_should_stop", False)
+        # Тот же приём, что и выше: цепочка смотрит на ПРИЗНАК, а не на тип, а
+        # тип здесь — обёртка ротации, а не сам провайдер.
+        self.cache_aware = getattr(cls, "cache_aware", False)
 
     @property
     def model(self) -> str:
@@ -656,12 +743,20 @@ class _FallbackChain:
             if i in self._excluded:
                 continue
             b = self._backends[i]
+            # Метки кэша — договорённость между analyze и Anthropic. Всем
+            # остальным движкам промпт уходит ровно таким, каким был раньше:
+            # вырезаем метку ЗДЕСЬ, в единственном месте, где известно, какой
+            # движок сейчас пробуют, — чтобы не править каждого провайдера и
+            # не забыть нового.
+            p = prompt if getattr(b, "cache_aware", False) else cache_strip(prompt)
+            # Чей ключ сейчас платит — знает только цепочка (И34).
+            usage.set_key_owner(getattr(b, "key_owner", None))
             # The caller sized max_tokens for the PRIMARY provider; re-clamp for
             # the one actually being tried, or Groq rejects the request with 413.
             mt = max_tokens
             tpm = config.PROVIDER_TPM.get(str(getattr(b, "name", "")).split(":")[0])
             if tpm:
-                mt = max(1200, min(mt, tpm - len(prompt) // 3 - 400))
+                mt = max(1200, min(mt, tpm - len(p) // 3 - 400))
                 # A big request (the final protocol asks for >=8000 tokens) that
                 # this provider can only answer with <4000 would come back
                 # TRUNCATED — broken JSON, lost detail. Prefer a provider that
@@ -678,7 +773,7 @@ class _FallbackChain:
                     continue
             try:
                 if isinstance(b, OllamaProvider):
-                    out = b.complete(prompt, max_tokens=mt, force_json=force_json,
+                    out = b.complete(p, max_tokens=mt, force_json=force_json,
                                      on_token=on_token, should_stop=should_stop,
                                      json_schema=json_schema)
                 elif getattr(b, "accepts_should_stop", False):
@@ -686,10 +781,10 @@ class _FallbackChain:
                     # действовать внутри него, а не только между вызовами.
                     # Проверяем ПРИЗНАК, а не тип: при нескольких ключах здесь
                     # лежит обёртка ротации, и проверка типа её не узнавала.
-                    out = b.complete(prompt, mt, force_json,
+                    out = b.complete(p, mt, force_json,
                                      should_stop=should_stop)
                 else:
-                    out = b.complete(prompt, mt, force_json)
+                    out = b.complete(p, mt, force_json)
                 self._i = i
                 # Почему выбранный движок не отработал. Раньше это молча
                 # терялось: человек выбирал DeepSeek, протокол собирал Gemini,
@@ -705,10 +800,12 @@ class _FallbackChain:
         # Никто не ответил — пробуем отложенных. Урезанный протокол лучше, чем
         # полное отсутствие протокола после часа распознавания.
         for i, b, mt in tight:
+            pt = prompt if getattr(b, "cache_aware", False) else cache_strip(prompt)
+            usage.set_key_owner(getattr(b, "key_owner", None))
             try:
-                out = (b.complete(prompt, mt, force_json, should_stop=should_stop)
+                out = (b.complete(pt, mt, force_json, should_stop=should_stop)
                        if getattr(b, "accepts_should_stop", False)
-                       else b.complete(prompt, mt, force_json))
+                       else b.complete(pt, mt, force_json))
                 self._i = i
                 for msg in errors:
                     if msg not in self.skipped and len(self.skipped) < 3:

@@ -25,7 +25,7 @@ import time
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from . import config, llm, logs, names, protocol_quality
+from . import config, llm, logs, names, protocol_quality, usage
 
 # Схемы и тексты промптов вынесены в соседние модули: 450 строк деклараций и
 # русского текста без единой ветки логики мешали читать сам конвейер. Имена
@@ -250,6 +250,7 @@ def _mech_merge(a: dict, b: dict) -> dict:
         "decisions": (a.get("decisions") or []) + (b.get("decisions") or []),
         "tasks": (a.get("tasks") or []) + (b.get("tasks") or []),
         "statuses": (a.get("statuses") or []) + (b.get("statuses") or []),
+        "caveats": (a.get("caveats") or []) + (b.get("caveats") or []),
     }
 
 
@@ -613,17 +614,19 @@ def analyze_transcript(transcript_text: str, provider: str | None = None,
         if custom:
             prompt = _with_notes(custom + "\n\n" + ctx_full + "Транскрипция:\n" + text,
                                  user_notes)
-            raw = _stream_complete(backend, _with_extra(prompt, extra_instructions),
-                                   10000, on_progress, "Генерация протокола…",
-                                   cancel_check=cancel_check)
+            with usage.stage(usage.REDUCE):
+                raw = _stream_complete(backend, _with_extra(prompt, extra_instructions),
+                                       10000, on_progress, "Генерация протокола…",
+                                       cancel_check=cancel_check)
             result = _extract_json(raw)
         else:
             prompt = _with_extra(
                 _with_notes(_PROMPT_TEMPLATE.format(transcript=text, context=ctx_full),
                             user_notes),
                 extra_instructions)
-            result = _protocol_from(backend, prompt, on_progress,
-                                    "Генерация протокола…", cancel_check)
+            with usage.stage(usage.REDUCE):
+                result = _protocol_from(backend, prompt, on_progress,
+                                        "Генерация протокола…", cancel_check)
     else:
         chunks = _split_chunks(text)
         n = len(chunks)
@@ -632,9 +635,11 @@ def analyze_transcript(transcript_text: str, provider: str | None = None,
             _ck()  # cancel between chunks
             stage = f"Читаю встречу: часть {i} из {n}…"
             try:
-                m = _complete_validated(
-                    backend, _MAP_TEMPLATE.format(i=i, n=n, chunk=chunk, context=ctx_map),
-                    MapNotes, 3500, on_progress, stage, cancel_check)
+                with usage.stage(usage.MAP):
+                    m = _complete_validated(
+                        backend,
+                        _MAP_TEMPLATE.format(i=i, n=n, chunk=chunk, context=ctx_map),
+                        MapNotes, 3500, on_progress, stage, cancel_check)
             except _SchemaMiss as e:
                 # The model's notes didn't fit the schema even after a retry —
                 # keep them as one flat topic rather than losing the chunk.
@@ -671,12 +676,13 @@ def analyze_transcript(transcript_text: str, provider: str | None = None,
                 stage = (f"Уплотняю заметки: {j // 2 + 1} из "
                          f"{(len(maps) + 1) // 2}…")
                 try:
-                    mm = _complete_validated(
-                        backend,
-                        _MERGE_TEMPLATE.format(
-                            a=json.dumps(a, ensure_ascii=False),
-                            b=json.dumps(b, ensure_ascii=False)),
-                        MapNotes, 3500, on_progress, stage, cancel_check)
+                    with usage.stage(usage.MERGE):
+                        mm = _complete_validated(
+                            backend,
+                            _MERGE_TEMPLATE.format(
+                                a=json.dumps(a, ensure_ascii=False),
+                                b=json.dumps(b, ensure_ascii=False)),
+                            MapNotes, 3500, on_progress, stage, cancel_check)
                 except AnalysisCancelled:
                     raise
                 except Exception:  # noqa: BLE001 — degrade, the merge is an optimisation
@@ -693,9 +699,10 @@ def analyze_transcript(transcript_text: str, provider: str | None = None,
                 + "Ниже — структурированные заметки (JSON) по "
                 "последовательным частям встречи, в хронологическом порядке; "
                 "объедини их в итог по требованиям выше:\n" + notes, user_notes)
-            raw = _stream_complete(backend, _with_extra(prompt, extra_instructions),
-                                   10000, on_progress, "Свожу протокол…",
-                                   cancel_check=cancel_check)
+            with usage.stage(usage.REDUCE):
+                raw = _stream_complete(backend, _with_extra(prompt, extra_instructions),
+                                       10000, on_progress, "Свожу протокол…",
+                                       cancel_check=cancel_check)
             result = _extract_json(raw)
         else:
             prompt = _with_extra(
@@ -706,8 +713,9 @@ def analyze_transcript(transcript_text: str, provider: str | None = None,
                 warning = ("Протокол мог потерять детали: у движка "
                            f"«{backend.name}» осталось мало лимита на ответ. "
                            "Попробуйте «Пересобрать» другим движком.")
-            result = _protocol_from(backend, prompt, on_progress,
-                                    "Свожу протокол…", cancel_check)
+            with usage.stage(usage.REDUCE):
+                result = _protocol_from(backend, prompt, on_progress,
+                                        "Свожу протокол…", cancel_check)
 
     # Normalise — guarantee the shape the rest of the app expects.
     result.setdefault("summary", "")
@@ -726,6 +734,7 @@ def analyze_transcript(transcript_text: str, provider: str | None = None,
     for list_key in ("done_tasks", "tasks", "minor_tasks"):
         result[list_key] = _normalise_tasks(result.get(list_key, []))
     result["statuses"] = _normalise_statuses(result.get("statuses", []))
+    result["caveats"] = _normalise_caveats(result.get("caveats", []))
     _drop_noise_tasks(result)
     _dedup_decisions(result)
     result["detailed"] = merge_similar_topics(_normalise_detailed(result["detailed"]))
@@ -897,6 +906,42 @@ def _normalise_statuses(items) -> list[dict]:
     return out
 
 
+# Виды оговорок — словарь из промпта. Модель пишет с большой буквы или с
+# пояснением; сводим к словарной форме, хвост уносим в note.
+_CAVEAT_KINDS = ("отключено", "временно", "скрыто", "заглушка", "прототип", "риск")
+
+
+def _normalise_caveats(items) -> list[dict]:
+    """[{item, kind, note}] — оговорки о состоянии системы, сказанные по ходу
+    демо: что временно, отключено, скрыто, заглушка. Пустой kind → «временно»:
+    оговорка без вида всё равно оговорка, терять её из-за формата нельзя."""
+    if not items:
+        return []
+    if isinstance(items, dict):
+        items = [items]
+    out = []
+    seen: set[str] = set()
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        item = str(it.get("item") or "").strip()
+        if not item:
+            continue
+        key = _norm_for_match(item)
+        if key in seen:              # уплотнение заметок могло продублировать
+            continue
+        seen.add(key)
+        kind = str(it.get("kind") or "").strip().replace("ё", "е").lower()
+        note = str(it.get("note") or "").strip()
+        word = next((w for w in _CAVEAT_KINDS if kind.startswith(w)), "")
+        if word and kind != word:
+            tail = kind[len(word):].strip(" :—-,.()")
+            if tail and tail not in note.lower():
+                note = (tail[0].upper() + tail[1:] + (". " if note else "") + note).strip()
+        out.append({"item": item, "kind": word or "временно", "note": note})
+    return out
+
+
 def _normalise_detailed(detailed) -> list[dict]:
     """Coerce the 'detailed' field into a list of {topic, details} dicts.
 
@@ -958,10 +1003,30 @@ _VERIFY_TEMPLATE = (
 
 _VERIFIED_LISTS = ("tasks", "minor_tasks", "done_tasks", "decisions")
 _MIN_QUOTE_CHARS = 10
-# Пунктов в одном запросе проверки. Раньше все 30-40 шли одним запросом с
-# потолком 3000 токенов — ответ обрезался, и ВСЕ пункты выходили «без
-# подтверждения» (К2).
-_VERIFY_BATCH = 15
+# Пунктов в одном запросе проверки.
+#
+# Каждый батч несёт ВЕСЬ фрагмент расшифровки целиком (см. цикл ниже: фрагмент
+# один и тот же, меняется только список пунктов). Замер: 25 871 символ входа на
+# 7 000 символов расшифровки — 3,7× текста встречи; доля проверки во входе
+# 31 % на короткой встрече, 43 % на часовой, 57 % на длинной. Значит каждый
+# лишний батч — лишняя копия расшифровки, и размер батча это ПРЯМО деньги.
+#
+# ⚠️ Батч 15 стоял здесь не случайно: раньше все 30-40 пунктов шли одним
+# запросом с потолком 3000 токенов, ответ обрезался, и ВСЕ пункты выходили
+# «без подтверждения» (К2). Корень был в ПОТОЛКЕ ОТВЕТА, не во входе, поэтому
+# батч поднят вместе с потолком (`_verify_max_tokens`), а на случай, если
+# ответ всё-таки не поместился, батч разрезается пополам и повторяется
+# (`_VERIFY_MIN_BATCH`) — вместо прежнего «сорвалась проверка целиком».
+_VERIFY_BATCH = max(1, int(os.getenv("VTX_VERIFY_BATCH", "50")))
+# Меньше этого не дробим: дальше дело не в размере ответа.
+_VERIFY_MIN_BATCH = 8
+# Потолок ответа: ~150 токенов на пункт с запасом. Замер на боевых ответах —
+# около 56 токенов на пункт, так что запас трёхкратный.
+_VERIFY_MAX_TOKENS = max(1000, int(os.getenv("VTX_VERIFY_MAX_TOKENS", "8000")))
+
+
+def _verify_max_tokens(n_points: int) -> int:
+    return min(_VERIFY_MAX_TOKENS, 150 * n_points + 300)
 # Мягкая дословность: цитата, в которой модель «починила» ошибку распознавания
 # или пропустила метку говорящего между репликами, — всё ещё цитата.
 _APPROX_RATIO = 0.85
@@ -1362,6 +1427,15 @@ def _speech_lines(text: str) -> tuple[list[str], list[set[str]]]:
 # место в разговоре (Т16). Понижение обязательно: до этой добавки доходят
 # ровно те пункты, на которых поиск с `_SUPPORT_MIN` уже вернул пустоту, и с
 # тем же порогом добавка не нашла бы ничего.
+# Версия ПРАВИЛ проверки. Метрика «доля подтверждённых пунктов» сравнима во
+# времени только внутри одной версии: ослабить порог или смягчить сверку — и
+# доля прыгнет на десятки процентов без единой правки протоколов. Поэтому
+# версия пишется рядом со значением в метрики (И18 в docs/ТЗ-МЕТРИКИ.md).
+#
+# ⚠️ Поднимать при ЛЮБОМ изменении `_SUPPORT_MIN`, `_APPROX_RATIO`, `_STEM_LEN`,
+# `_find_support`, `_Fragment.match` и размера окна поиска опоры.
+VERIFY_VERSION = "2026-09-14"
+
 _SUPPORT_MIN = 0.6
 _TIME_HINT_MIN = 0.35
 
@@ -1629,8 +1703,15 @@ def verify_protocol(result: dict, transcript_text: str, user_notes: str = "",
             break
         frag = _Fragment(fragment)
         items = sorted(pending.items())
-        for bi in range(0, len(items), _VERIFY_BATCH):
-            batch = [(n, p) for n, p in items[bi:bi + _VERIFY_BATCH] if n in pending]
+        # Очередь батчей, а не простой срез: неудачный батч разрезается пополам
+        # и возвращается в очередь. Единственная причина, по которой крупный
+        # батч мог не получиться, — не поместившийся ответ (К2), и половина
+        # пунктов помещается заведомо. Раньше любая осечка ставила
+        # verification.error и обрывала проверку ВСЕГО протокола.
+        queue = [items[bi:bi + _VERIFY_BATCH]
+                 for bi in range(0, len(items), _VERIFY_BATCH)]
+        while queue:
+            batch = [(n, p) for n, p in queue.pop(0) if n in pending]
             if not batch:
                 continue
             if cancel_check and cancel_check():
@@ -1643,12 +1724,20 @@ def verify_protocol(result: dict, transcript_text: str, user_notes: str = "",
                      f"пункты {batch[0][0]}–{batch[-1][0]})…")
             calls += 1
             try:
-                out = _complete_validated(backend, prompt, EvidenceList,
-                                          min(4000, 150 * len(batch) + 300),
-                                          on_progress, stage, cancel_check)
+                with usage.stage(usage.VERIFY):
+                    out = _complete_validated(backend, prompt, EvidenceList,
+                                              _verify_max_tokens(len(batch)),
+                                              on_progress, stage, cancel_check)
             except AnalysisCancelled:
                 raise
             except Exception as e:  # noqa: BLE001 — verification must not kill the job
+                if len(batch) > _VERIFY_MIN_BATCH:
+                    half = len(batch) // 2
+                    queue.insert(0, batch[half:])
+                    queue.insert(0, batch[:half])
+                    _LOG.info("Проверка: батч из %d пунктов не прошёл (%s) — "
+                              "делю пополам", len(batch), e)
+                    continue
                 failed_calls += 1
                 ver["error"] = f"Проверка не завершена: {e}"
                 break
@@ -1694,7 +1783,8 @@ def verify_protocol(result: dict, transcript_text: str, user_notes: str = "",
     _apply_transcript_times(result, ver, text, weak=not ver.get("error"))
 
     ver["stats"] = {"checked": len(points), "confirmed": len(points) - len(pending),
-                    "calls": calls, "failed_calls": failed_calls}
+                    "calls": calls, "failed_calls": failed_calls,
+                    "version": VERIFY_VERSION}
     # Acceptance rule: no owner without verbatim grounds. Unverified point →
     # flagged; verified point whose quote doesn't support the owner → owner «—».
     #
@@ -1761,6 +1851,25 @@ def _window_for_topic(text: str, topic: dict, budget_chars: int) -> str:
     return text[start:start + budget_chars]
 
 
+# Сколько расшифровки давать на перегенерацию ОДНОЙ темы.
+#
+# Было `max(int(0.7 * _ctx_budget(backend)) * 3, 8000)` — у движка без
+# известного TPM это 210 000 символов, то есть любая реальная встреча влезала
+# целиком и окно `_window_for_topic` не срабатывало НИ РАЗУ. А перегенерация
+# вызывается не только руками: `refill_empty_topics` зовёт её до
+# `_MAX_TOPIC_REGENS` раз за один прогон, и на длинной встрече это шесть копий
+# всей расшифровки — больше, чем стоит сама встреча.
+#
+# Окно берётся вокруг найденного места темы, поэтому 20 000 символов (≈2 800
+# слов, полчаса разговора) описывают тему с запасом. Потолок движка остаётся
+# верхней границей: маленькое окно ему не повредит, большое — не влезет.
+_REGEN_WINDOW_CHARS = max(8000, int(os.getenv("VTX_REGEN_WINDOW_CHARS", "20000")))
+
+
+def _regen_window(backend) -> int:
+    return min(_REGEN_WINDOW_CHARS, max(int(0.7 * _ctx_budget(backend)) * 3, 8000))
+
+
 def regen_topic_details(transcript_text: str, topic: dict,
                         provider: str | None = None, keys: dict | None = None,
                         user_notes: str = "", backend=None) -> dict:
@@ -1771,7 +1880,7 @@ def regen_topic_details(transcript_text: str, topic: dict,
     длинной встречи цепочка могла быть переключена на облако (prefer_cloud), и
     создавать её заново значило бы откатиться на медленный локальный движок."""
     backend = backend or llm.get_provider_chain(provider, keys)
-    budget_chars = max(int(0.7 * _ctx_budget(backend)) * 3, 8000)
+    budget_chars = _regen_window(backend)
     text = _window_for_topic(transcript_text or "", topic, budget_chars)
     prompt = (
         "Ниже — расшифровка рабочей встречи (реплики с таймкодами [мм:сс]) и "
@@ -1787,8 +1896,9 @@ def regen_topic_details(transcript_text: str, topic: dict,
         f"Текущее описание: {topic.get('details', '')}\n\n"
         + _with_notes("Расшифровка:\n" + text, user_notes))
     try:
-        out = _complete_validated(backend, prompt, ProtoTopic, 3000,
-                                  None, "Перегенерирую раздел…")
+        with usage.stage(usage.REGEN):
+            out = _complete_validated(backend, prompt, ProtoTopic, 3000,
+                                      None, "Перегенерирую раздел…")
     except _SchemaMiss as e:
         out = {"topic": topic.get("topic", ""), "details": e.raw[:4000]}
     return {"topic": (out.get("topic") or topic.get("topic") or "").strip(),
@@ -1902,5 +2012,6 @@ def ask_meeting(transcript_text: str, question: str,
         "обсуждалось» и ничего не выдумывай.\n\n"
         + _with_notes("", user_notes)
         + f"Фрагменты расшифровки:\n{fragments}\n\nВопрос: {question}")
-    return _stream_complete(backend, prompt, 1500, None, "Ищу ответ…",
-                            force_json=False).strip()
+    with usage.stage(usage.ASK):
+        return _stream_complete(backend, prompt, 1500, None, "Ищу ответ…",
+                                force_json=False).strip()
