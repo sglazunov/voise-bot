@@ -25,6 +25,12 @@ class TestЛендинг:
                   'rel="canonical"', "application/ld+json", "Телемост"):
             assert s in r.text, s
 
+    def test_все_призывы_ведут_на_письмо_а_не_на_регистрацию(self, client):
+        html = client.get("/").text
+        assert 'href="/register"' not in html
+        assert html.count(f"mailto:{config.CONTACT_EMAIL}") >= 8
+        assert "любой трекинговой системой" in html or "любую трекинговую систему" in html
+
     def test_страница_landing_тоже_публична(self, client):
         assert client.get("/landing").status_code == 200
 

@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>MeetFlow — протоколы встреч в Яндекс Телемосте автоматически</title>
-<meta name="description" content="Бот MeetFlow сам приходит на встречу в Яндекс Телемосте, записывает её, расшифровывает и собирает протокол: решения с цитатами и таймкодами, задачи с исполнителями, ответы на вопросы. Word-протокол в Яндекс Диске и ссылка в задаче Weeek. От 200 ₽ за встречу.">
+<meta name="description" content="Бот MeetFlow сам приходит на встречу в Яндекс Телемосте, записывает её, расшифровывает и собирает протокол: решения с цитатами и таймкодами, задачи с исполнителями, ответы на вопросы. Word-протокол в Яндекс Диске, ссылки и задачи в Weeek или любом вашем трекере. От 200 ₽ за встречу.">
 <meta name="robots" content="index, follow">
 <link rel="canonical" href="{{ site_url }}/">
 <meta property="og:type" content="website">
@@ -44,6 +44,7 @@
       "mainEntity": [
         {"@type": "Question", "name": "Какие встречи умеет записывать бот?", "acceptedAnswer": {"@type": "Answer", "text": "Встречи в Яндекс Телемосте: бот заходит по ссылке как участник с выключенными микрофоном и камерой. Записи других сервисов можно загрузить файлом (mp3, mp4, wav, m4a, ogg) и получить расшифровку и протокол."}},
         {"@type": "Question", "name": "Нужен ли Weeek?", "acceptedAnswer": {"@type": "Answer", "text": "Нет. С Weeek бот сам берёт расписание встреч и кладёт ссылки на запись и протокол в задачу. Без него встречи запускаются вручную или загружаются файлом."}},
+        {"@type": "Question", "name": "Можно ли интегрировать с нашим трекером задач?", "acceptedAnswer": {"@type": "Answer", "text": "Да. Интегрируем с любой трекинговой системой с API: Битрикс24, Jira, YouTrack, Kaiten, Планфикс, amoCRM, собственная CRM. Напишите на {{ contact_email }}, обсудим, откуда брать встречи и куда класть протокол и задачи."}},
         {"@type": "Question", "name": "Что входит в протокол?", "acceptedAnswer": {"@type": "Answer", "text": "Участники и роли, краткое содержание, решения с основанием — цитатой из разговора и таймкодом, задачи с исполнителями, что спрашивали и что ответили, оговорки о том, что временно или отключено, задачи прошлой встречи серии и их судьба."}},
         {"@type": "Question", "name": "Как быстро готов протокол?", "acceptedAnswer": {"@type": "Answer", "text": "Расшифровка обычно занимает меньше времени, чем длилась встреча, сборка протокола — несколько минут. Ссылка появляется в задаче Weeek, документ — в Яндекс Диске."}},
         {"@type": "Question", "name": "Где хранятся записи?", "acceptedAnswer": {"@type": "Answer", "text": "В вашем Яндекс Диске или Google Drive. На сервере остаются текст и протокол, доступ к ним — только у вашей команды по логину. Ключи и токены зашифрованы."}},
@@ -209,12 +210,13 @@ ym({{ metrika_id }}, "init", {clickmap:true, trackLinks:true, accurateTrackBounc
     <nav class="nav-links" aria-label="Разделы">
       <a href="#how">Как работает</a>
       <a href="#protocol">Что в протоколе</a>
+      <a href="#integration">Интеграция</a>
       <a href="#prices">Цены</a>
       <a href="#faq">Вопросы</a>
     </nav>
     <div class="nav-cta">
       <a class="btn btn-ghost" href="/login">Войти</a>
-      <a class="btn btn-primary" href="/register">Попробовать</a>
+      <a class="btn btn-primary" href="mailto:{{ contact_email }}?subject=MeetFlow%3A%20попробовать">Попробовать</a>
     </div>
   </div>
 </header>
@@ -222,14 +224,14 @@ ym({{ metrika_id }}, "init", {clickmap:true, trackLinks:true, accurateTrackBounc
 <main>
   <section class="wrap hero">
     <div class="hero-text">
-      <span class="eyebrow">Яндекс Телемост · Weeek · Яндекс Диск</span>
+      <span class="eyebrow">Яндекс Телемост · Weeek и любой трекер задач · Яндекс Диск</span>
       <h1>Протокол встречи готов к тому моменту, когда все разошлись</h1>
       <p class="lede">Бот MeetFlow сам приходит на встречу в Телемосте по расписанию из Weeek, записывает её, расшифровывает и собирает протокол: решения с цитатами и таймкодами, задачи с исполнителями, ответы на заданные вопросы. Word-документ ложится в Яндекс Диск, ссылка — в задачу.</p>
       <div class="cta-row">
-        <a class="btn btn-primary" href="/register">Попробовать на своей встрече</a>
-        <a class="btn btn-ghost" href="mailto:{{ contact_email }}?subject=MeetFlow">Написать нам</a>
+        <a class="btn btn-primary" href="mailto:{{ contact_email }}?subject=MeetFlow%3A%20попробовать%20на%20своей%20встрече">Попробовать на своей встрече</a>
+        <a class="btn btn-ghost" href="mailto:{{ contact_email }}?subject=MeetFlow%3A%20интеграция">Обсудить интеграцию</a>
       </div>
-      <p class="cta-note">Расшифровка встречи — 200 ₽, с протоколом — 300 ₽, подписка — 6 000 ₽ в месяц до 50 встреч.</p>
+      <p class="cta-note">Расшифровка встречи — 200 ₽, с протоколом — 300 ₽, подписка — 6 000 ₽ в месяц до 50 встреч. По любым вопросам, включая интеграцию с вашим трекером, пишите на <a href="mailto:{{ contact_email }}">{{ contact_email }}</a>.</p>
     </div>
 
     <aside class="proto" aria-label="Пример протокола">
@@ -277,10 +279,10 @@ ym({{ metrika_id }}, "init", {clickmap:true, trackLinks:true, accurateTrackBounc
         <p class="lede">Ничего не нужно нажимать во время встречи. Бот работает по расписанию, а результат появляется там, где команда его ищет.</p>
       </div>
       <div class="steps">
-        <div class="step"><h3>Берёт встречу из Weeek</h3><p>Ссылка на Телемост и время — из задачи в вашем воркспейсе. Без Weeek встречу можно запустить вручную или загрузить запись файлом.</p></div>
+        <div class="step"><h3>Берёт встречу из трекера</h3><p>Ссылка на Телемост и время — из задачи в Weeek. Интегрируем с любой трекинговой системой: Битрикс24, Jira, YouTrack, Kaiten, Планфикс, своя CRM. Без трекера встречу можно запустить вручную или загрузить запись файлом.</p></div>
         <div class="step"><h3>Приходит и записывает</h3><p>Заходит как участник с выключенными микрофоном и камерой, пишет звук и экран, уходит, когда встреча закончилась. Остановить можно кнопкой или стоп-словом в чате.</p></div>
         <div class="step"><h3>Расшифровывает</h3><p>Речь становится текстом с таймкодами и именами говорящих: кто говорил, читается прямо с плиток Телемоста. Ваш глоссарий терминов учитывается.</p></div>
-        <div class="step"><h3>Собирает протокол</h3><p>Решения, задачи, ответы и оговорки — каждый пункт с цитатой из разговора. Word-документ в Яндекс Диске, ссылки в задаче Weeek, задачи можно завести в трекер одной кнопкой.</p></div>
+        <div class="step"><h3>Собирает протокол</h3><p>Решения, задачи, ответы и оговорки — каждый пункт с цитатой из разговора. Word-документ в Яндекс Диске, ссылки в карточке встречи вашего трекера, задачи из протокола заводятся в него одной кнопкой.</p></div>
       </div>
     </div>
   </section>
@@ -300,6 +302,22 @@ ym({{ metrika_id }}, "init", {clickmap:true, trackLinks:true, accurateTrackBounc
         <div class="feat"><h3>Память серии</h3><p>Для повторяющихся встреч протокол сверяется с прошлой: какие задачи закрыты, какие висят, о каких забыли.</p></div>
         <div class="feat"><h3>Контекст команды</h3><p>Проекты, роли и термины вашей команды подмешиваются в каждую сборку, поэтому бот не путает людей и продукты.</p></div>
       </div>
+    </div>
+  </section>
+
+  <section id="integration">
+    <div class="wrap">
+      <div class="sec-head">
+        <span class="eyebrow">Интеграция</span>
+        <h2>Встраиваем в любую трекинговую систему</h2>
+        <p class="lede">Сейчас бот из коробки работает с Weeek: берёт оттуда расписание, кладёт обратно ссылки и задачи. Тот же контур настроим под ваш трекер — Битрикс24, Jira, YouTrack, Kaiten, Планфикс, amoCRM или собственную систему с API. Календарь встреч, карточка для ссылок на запись и протокол, создание задач из протокола — по вашим правилам.</p>
+      </div>
+      <div class="grid3">
+        <div class="feat"><h3>Откуда брать встречи</h3><p>Задачи трекера, календарь или ваш список — бот приходит туда, где есть ссылка на Телемост и время.</p></div>
+        <div class="feat"><h3>Куда класть результат</h3><p>Ссылки на запись и протокол — в поля карточки, комментарий или отдельный документ; файлы — в Яндекс Диск или Google Drive.</p></div>
+        <div class="feat"><h3>Задачи из протокола</h3><p>Исполнитель и срок берутся из разговора, задача создаётся в вашем трекере с ссылкой на цитату. Двойники не плодятся.</p></div>
+      </div>
+      <p style="margin-top:1.5rem;"><a class="btn btn-primary" href="mailto:{{ contact_email }}?subject=MeetFlow%3A%20интеграция%20с%20трекером">Обсудить интеграцию с вашим трекером</a></p>
     </div>
   </section>
 
@@ -341,10 +359,10 @@ ym({{ metrika_id }}, "init", {clickmap:true, trackLinks:true, accurateTrackBounc
           <div class="amount">6 000 ₽<small>в месяц</small></div>
           <p class="per">До 50 встреч в месяц — 120 ₽ за встречу</p>
           <ul>
-            <li>Бот приходит сам по расписанию из Weeek</li>
+            <li>Бот приходит сам по расписанию из вашего трекера</li>
             <li>Протоколы в Яндекс Диске, ссылки в задачах</li>
             <li>Память серий встреч и контекст команды</li>
-            <li>Задачи из протокола в Weeek одной кнопкой</li>
+            <li>Задачи из протокола в трекер одной кнопкой</li>
           </ul>
           <a class="btn btn-primary" href="mailto:{{ contact_email }}?subject=MeetFlow%3A%20подписка">Подключить команду</a>
         </div>
@@ -376,6 +394,7 @@ ym({{ metrika_id }}, "init", {clickmap:true, trackLinks:true, accurateTrackBounc
       <div class="faq">
         <details><summary>Какие встречи умеет записывать бот?</summary><p>Встречи в Яндекс Телемосте: бот заходит по ссылке как участник с выключенными микрофоном и камерой. Записи других сервисов можно загрузить файлом (mp3, mp4, wav, m4a, ogg) и получить расшифровку и протокол.</p></details>
         <details><summary>Нужен ли Weeek?</summary><p>Нет. С Weeek бот сам берёт расписание встреч и кладёт ссылки на запись и протокол в задачу. Без него встречи запускаются вручную или загружаются файлом.</p></details>
+        <details><summary>Можно ли интегрировать с нашим трекером задач?</summary><p>Да. Интегрируем с любой трекинговой системой с API: Битрикс24, Jira, YouTrack, Kaiten, Планфикс, amoCRM, собственная CRM. Напишите на <a href="mailto:{{ contact_email }}?subject=MeetFlow%3A%20интеграция">{{ contact_email }}</a>, обсудим, откуда брать встречи и куда класть протокол и задачи.</p></details>
         <details><summary>Что входит в протокол?</summary><p>Участники и роли, краткое содержание, решения с основанием — цитатой из разговора и таймкодом, задачи с исполнителями, что спрашивали и что ответили, оговорки о том, что временно или отключено, задачи прошлой встречи серии и их судьба.</p></details>
         <details><summary>Как быстро готов протокол?</summary><p>Расшифровка обычно занимает меньше времени, чем длилась встреча, сборка протокола — несколько минут. Ссылка появляется в задаче Weeek, документ — в Яндекс Диске.</p></details>
         <details><summary>Где хранятся записи?</summary><p>В вашем Яндекс Диске или Google Drive. На сервере остаются текст и протокол, доступ к ним — только у вашей команды по логину. Ключи и токены зашифрованы.</p></details>
@@ -392,7 +411,7 @@ ym({{ metrika_id }}, "init", {clickmap:true, trackLinks:true, accurateTrackBounc
       </div>
       <div style="display:grid; gap:1rem;">
         <a class="mail" href="mailto:{{ contact_email }}?subject=MeetFlow%3A%20пробная%20встреча">{{ contact_email }}</a>
-        <a class="btn btn-primary" href="/register">Зарегистрироваться</a>
+        <a class="btn btn-primary" href="mailto:{{ contact_email }}?subject=MeetFlow%3A%20пробная%20встреча">Написать письмо</a>
       </div>
     </div>
   </section>
@@ -400,7 +419,7 @@ ym({{ metrika_id }}, "init", {clickmap:true, trackLinks:true, accurateTrackBounc
 
 <footer class="wrap">
   <span>MeetFlow · протоколы встреч в Яндекс Телемосте</span>
-  <span><a href="mailto:{{ contact_email }}">{{ contact_email }}</a> · <a href="/login">Вход</a> · <a href="/register">Регистрация</a></span>
+  <span><a href="mailto:{{ contact_email }}">{{ contact_email }}</a> · <a href="/login">Вход</a> · <a href="mailto:{{ contact_email }}?subject=MeetFlow">Написать</a></span>
 </footer>
 
 </body>
