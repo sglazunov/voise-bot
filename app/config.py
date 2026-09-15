@@ -115,8 +115,10 @@ GIGACHAT_AUTH_URL = os.getenv("VTX_GIGACHAT_AUTH_URL",
 # VTX_SITE_URL — если адрес отличается (другой домен, свой прокси).
 DOMAIN = os.getenv("DOMAIN", "").strip()
 SITE_URL = (os.getenv("VTX_SITE_URL", "").strip() or (f"https://{DOMAIN}" if DOMAIN else "")).rstrip("/")
-# Номер счётчика Яндекс Метрики; пусто — счётчик не вставляется вовсе.
-METRIKA_ID = "".join(ch for ch in os.getenv("VTX_METRIKA_ID", "") if ch.isdigit())
+# Номер счётчика Яндекс Метрики владельца (voice.kreativdelo.ru). Переопределить
+# — VTX_METRIKA_ID=<номер>; выключить — VTX_METRIKA_ID=0.
+_metrika_raw = "".join(ch for ch in os.getenv("VTX_METRIKA_ID", "112674625") if ch.isdigit())
+METRIKA_ID = "" if _metrika_raw.strip("0") == "" else _metrika_raw
 CONTACT_EMAIL = os.getenv("VTX_CONTACT_EMAIL", "sirega20@gmail.com").strip()
 
 # --- Free: Ollama (fully local, no key; runs on this machine) ---
