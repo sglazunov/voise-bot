@@ -110,6 +110,15 @@ GIGACHAT_BASE_URL = os.getenv("VTX_GIGACHAT_BASE_URL", "https://api.giga.chat/v1
 GIGACHAT_AUTH_URL = os.getenv("VTX_GIGACHAT_AUTH_URL",
                               "https://ngw.devices.sberbank.ru:9443/api/v2/oauth")
 
+# --- Публичный лендинг (корень сайта для незалогиненных) ---------------------
+# DOMAIN тот же, что у Caddy; из него строится канонический адрес для SEO.
+# VTX_SITE_URL — если адрес отличается (другой домен, свой прокси).
+DOMAIN = os.getenv("DOMAIN", "").strip()
+SITE_URL = (os.getenv("VTX_SITE_URL", "").strip() or (f"https://{DOMAIN}" if DOMAIN else "")).rstrip("/")
+# Номер счётчика Яндекс Метрики; пусто — счётчик не вставляется вовсе.
+METRIKA_ID = "".join(ch for ch in os.getenv("VTX_METRIKA_ID", "") if ch.isdigit())
+CONTACT_EMAIL = os.getenv("VTX_CONTACT_EMAIL", "sirega20@gmail.com").strip()
+
 # --- Free: Ollama (fully local, no key; runs on this machine) ---
 # Ollama в образ НЕ входит — это внешний сервер, который подключают отдельно.
 # Поэтому по умолчанию она ВЫКЛЮЧЕНА: включённой она всегда попадала в список

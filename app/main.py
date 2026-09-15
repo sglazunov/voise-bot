@@ -175,6 +175,9 @@ def _register_spa() -> None:
 # ===========================================================================
 # Paths reachable WITHOUT a session. Everything else requires login.
 _PUBLIC_PATHS = {"/login", "/register", "/recover", "/healthz",
+                 # Лендинг: корень для незалогиненных, robots и sitemap для
+                 # поисковиков. Залогиненному корень отдаёт SPA, как раньше.
+                 "/", "/landing", "/robots.txt", "/sitemap.xml",
                  "/api/auth/login", "/api/auth/register",
                  "/api/auth/recover/request", "/api/auth/recover/verify"}
 _SECURE_COOKIE = os.getenv("VTX_HTTPS", "0") == "1"
@@ -323,6 +326,70 @@ class Credentials(BaseModel):
     password: str
     code: str = ""
     phone: str = ""   # required at registration; used for password recovery
+
+
+# ===========================================================================
+# Публичный лендинг
+# ===========================================================================
+_YM_HOSTS = " https://mc.yandex.ru https://mc.yandex.com"
+
+
+def _landing_csp(html: str) -> str:
+    """CSP лендинга: свои инлайн-скрипты по хэшу (счётчик Метрики — тоже
+    инлайн, хэш считается по отрендеренному HTML), а хосты Метрики
+    разрешаются ТОЛЬКО здесь и только когда счётчик задан."""
+    csp = csp_for(inline_script_hashes(html))
+    if config.METRIKA_ID:
+        csp = (csp.replace("script-src 'self'", "script-src 'self'" + _YM_HOSTS, 1)
+                  .replace("connect-src 'self'", "connect-src 'self'" + _YM_HOSTS, 1)
+                  .replace("img-src 'self' data: blob:", "img-src 'self' data: blob:" + _YM_HOSTS, 1))
+    return csp
+
+
+def _site_url(request: Request) -> str:
+    return config.SITE_URL or str(request.base_url).rstrip("/")
+
+
+def _landing(request: Request) -> HTMLResponse:
+    html = templates.get_template("landing.html").render({
+        "request": request, "site_url": _site_url(request),
+        "metrika_id": config.METRIKA_ID, "contact_email": config.CONTACT_EMAIL})
+    resp = HTMLResponse(html)
+    resp.headers["Content-Security-Policy"] = _landing_csp(html)
+    return resp
+
+
+@app.get("/", include_in_schema=False)
+def root(request: Request):
+    """Незалогиненному — лендинг, залогиненному — SPA (как и раньше)."""
+    if getattr(request.state, "user", None):
+        index = SPA_DIR / "index.html"
+        if index.exists():
+            return FileResponse(index)
+        raise HTTPException(404, "Сборка интерфейса не найдена")
+    return _landing(request)
+
+
+@app.get("/landing", include_in_schema=False)
+def landing_page(request: Request):
+    return _landing(request)
+
+
+@app.get("/robots.txt", include_in_schema=False)
+def robots(request: Request):
+    # Индексируется только лендинг: интерфейс за логином поисковику не нужен.
+    body = ("User-agent: *\nAllow: /$\nAllow: /landing$\nDisallow: /\n"
+            f"Sitemap: {_site_url(request)}/sitemap.xml\n")
+    return PlainTextResponse(body)
+
+
+@app.get("/sitemap.xml", include_in_schema=False)
+def sitemap(request: Request):
+    body = ('<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+            f"  <url><loc>{_site_url(request)}/</loc><changefreq>monthly</changefreq></url>\n"
+            "</urlset>\n")
+    return Response(body, media_type="application/xml")
 
 
 @app.get("/login", response_class=HTMLResponse)
