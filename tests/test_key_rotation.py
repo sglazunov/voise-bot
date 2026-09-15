@@ -24,6 +24,9 @@ def _make_cls(behaviour: dict):
                 raise RuntimeError("HTTP 429: rate limit, try again in 0.2s")
             if step == "ERR":
                 raise RuntimeError("HTTP 500: boom")
+            if step == "OVR":
+                raise RuntimeError("HTTP 503 от https://generativelanguage.googleapis.com/…: "
+                                   '{"error": {"code": 503, "message": "The model is overloaded"}}')
             return step
     return Fake
 
@@ -107,3 +110,23 @@ class TestПричинаОтката:
         chain = llm._FallbackChain([Good(), Good()])
         chain.complete("тест")
         assert chain.skipped == []
+
+
+class TestПерегрузкаПоставщика:
+    """503 «model is overloaded» — «зайди позже», а не отказ движка (Gemini, 15.09)."""
+
+    def test_после_503_ключ_отдыхает_и_пробуется_снова(self, monkeypatch):
+        monkeypatch.setattr(llm, "_OVERLOAD_COOLDOWN_SEC", 0.01)
+        rot = _rot({"k1": ["OVR", "OVR", "ответ"]})
+        assert rot.complete("p") == "ответ"
+
+    def test_долгая_перегрузка_отдаёт_движок_цепочке_с_причиной(self, monkeypatch):
+        monkeypatch.setattr(llm, "_OVERLOAD_COOLDOWN_SEC", 0.01)
+        rot = _rot({"k1": ["OVR"] * 10})
+        with pytest.raises(RuntimeError, match="перегружен"):
+            rot.complete("p")
+
+    def test_обычная_ошибка_по_прежнему_не_ждётся(self):
+        rot = _rot({"k1": ["ERR", "ответ"]})
+        with pytest.raises(RuntimeError, match="500"):
+            rot.complete("p")

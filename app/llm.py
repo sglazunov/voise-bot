@@ -35,7 +35,8 @@ from . import config
 from .llm_base import (                 # noqa: F401 — часть публичного API
     CACHE_MARK, GenerationCancelled, LLMProvider, _KeyProviderMixin,
     cache_parts, cache_strip,
-    _http_post_json, _is_rate_limit, is_key_rejected, _retry_after, _safe_url,
+    _http_post_json, _is_rate_limit, is_key_rejected, is_overloaded, _retry_after,
+    _safe_url,
 )
 from .llm_custom import CustomProvider, text_of  # noqa: F401 — часть публичного API
 from . import logs, usage
@@ -597,6 +598,13 @@ KEY_TOTAL_WAIT_SEC = float(os.getenv("VTX_KEY_TOTAL_WAIT_SEC", "900"))
 # Суточная квота отвечает тем же 429 с «retry in 30s» — ждать её бесполезно.
 # После стольких ожиданий подряд в одном запросе движок считается выбывшим.
 KEY_MAX_WAITS = int(os.getenv("VTX_KEY_MAX_WAITS", "3"))
+# Перегрузка поставщика (503/529 «model is overloaded») — не лимит ключа и не
+# отказ: инференс занят, через полминуты обычно отвечает. Раньше такой ответ
+# был обычной ошибкой: три повтора внутри запроса (~50 с) — и встреча уходила
+# запасному движку с пометкой «ЧЕРНОВИК». Боевой случай 15.09: Gemini 503 на
+# сведении, протокол собрал Groq. Теперь перегруженный ключ отдыхает столько
+# и пробуется снова — в тех же границах KEY_MAX_WAITS/KEY_TOTAL_WAIT_SEC.
+_OVERLOAD_COOLDOWN_SEC = float(os.getenv("VTX_OVERLOAD_WAIT_SEC", "30"))
 
 
 def _cooldown_from(e: Exception, default: float = _KEY_COOLDOWN_SEC) -> float:
@@ -685,6 +693,7 @@ class _RotatingProvider:
         deadline = time.time() + KEY_TOTAL_WAIT_SEC
         kw = {"should_stop": should_stop} if self.accepts_should_stop else {}
         waits = 0
+        why = "429"
         while True:
             now = time.time()
             order = [(self._i + k) % n for k in range(n)]
@@ -701,6 +710,12 @@ class _RotatingProvider:
                             # Park this key and move on. Even with ONE key we
                             # park-and-wait: the window resets in seconds.
                             self._cooldown[i] = time.time() + _cooldown_from(e)
+                            why = "429"
+                            continue
+                        if is_overloaded(e):
+                            # Перегрузка — тоже «зайди позже», а не отказ.
+                            self._cooldown[i] = time.time() + _OVERLOAD_COOLDOWN_SEC
+                            why = "503 (перегрузка)"
                             continue
                         if is_key_rejected(e) and n > 1:
                             # Ключ отвергнут (401/403) — это про НЕГО, а не про
@@ -728,8 +743,10 @@ class _RotatingProvider:
             wait = max(min(self._cooldown.get(i, 0.0) for i in alive) - time.time(), 0.5)
             if waits >= KEY_MAX_WAITS:
                 raise RuntimeError(
-                    f"«{self.name}» отвечает 429 уже {waits} раза подряд после ожидания — "
-                    "похоже, исчерпана суточная квота, а не минутное окно.")
+                    f"«{self.name}» отвечает {why} уже {waits} раза подряд после ожидания — "
+                    + ("сервис поставщика перегружен дольше обычного."
+                       if why.startswith("503") else
+                       "похоже, исчерпана суточная квота, а не минутное окно."))
             if wait > KEY_WAIT_SEC or time.time() + wait > deadline:
                 raise RuntimeError(
                     f"Все {n} ключа(ей) «{self.name}» упёрлись в лимит, сброс "
