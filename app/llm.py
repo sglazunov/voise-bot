@@ -476,12 +476,20 @@ class GigaChatProvider(_KeyProviderMixin):
                              timeout=300, what="chat")
         # Расход — в тех же полях, что у OpenAI-совместимых (prompt_tokens /
         # completion_tokens): раньше GigaChat в учёт токенов не попадал вовсе.
-        _log_usage(f"{self.name}/{self.model}", _openai_usage(out))
+        u = _openai_usage(out)
+        _log_usage(f"{self.name}/{self.model}", u)
         # Разбор общий с «своим ключом»: content бывает null (рассуждающие
         # модели) или списком кусков, и голое .strip() падало на None.
-        text, _ = text_of(out)
+        text, finish = text_of(out)
         if not text:
             raise RuntimeError(f"{self.name}: модель вернула пустой ответ.")
+        if finish == "length":
+            # Ответ обрезан: либо наш max_tokens мал, либо у Сбера свой потолок
+            # на выход ниже запрошенного. Наверху это выглядит как «оборванный
+            # JSON» — без этой строки не понять, чей лимит сработал.
+            _LOG.warning("%s/%s: ответ обрезан по лимиту (finish_reason=length): "
+                         "запрошено %d, выдано %s ток.", self.name, self.model,
+                         max_tokens, (u or {}).get("candidatesTokenCount", "?"))
         return text
 
 

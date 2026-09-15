@@ -66,6 +66,83 @@ class TruncatedAnswer(json.JSONDecodeError):
     """
 
 
+class MalformedAnswer(json.JSONDecodeError):
+    """Ответ дописан до конца (скобки закрыты), но это не корректный JSON.
+
+    Отличается от оборванного тем, что лечится по-другому: оборванному нужен
+    ответ КОРОЧЕ, а кривому — ИСПРАВЛЕННЫЙ (незакавыченная кавычка внутри
+    строки, запятая перед закрывающей скобкой, перенос строки прямо в
+    значении). Раньше оба случая назывались «оборван по лимиту токенов», и на
+    бою (GigaChat, CRM 15.09) движок снимали с встречи по неверному диагнозу.
+    """
+
+
+_JSON_ESCAPES = set('"\\/bfnrtu')
+
+
+def _repair_json(s: str) -> str:
+    """Починить типовые огрехи модели в JSON без ИИ.
+
+    Один проход по символам с учётом «внутри строки / снаружи»:
+      * перенос строки или табуляция внутри строки → `\\n` / `\\t`;
+      * кавычка внутри строки, за которой НЕ следует `,` `:` `]` `}` или конец
+        текста, — это кавычка в тексте реплики, не конец строки → экранируется;
+      * `\\'` и прочие несуществующие экранирования → сам символ;
+      * запятая перед `]` или `}` убирается.
+    Эвристика; на корректном JSON ничего не меняет.
+    """
+    out: list[str] = []
+    in_str = False
+    i, n = 0, len(s)
+    while i < n:
+        ch = s[i]
+        if not in_str:
+            if ch == '"':
+                in_str = True
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "\\":
+            nxt = s[i + 1] if i + 1 < n else ""
+            if nxt in _JSON_ESCAPES:
+                out.append(ch + nxt)
+                i += 2
+            else:
+                out.append(nxt)      # `\'` → `'`
+                i += 2
+            continue
+        if ch == '"':
+            j = i + 1
+            while j < n and s[j] in " \t\r\n":
+                j += 1
+            if j >= n or s[j] in ",:]}":
+                in_str = False
+                out.append(ch)
+            else:
+                out.append('\\"')
+            i += 1
+            continue
+        if ch == "\n":
+            out.append("\\n")
+        elif ch == "\t":
+            out.append("\\t")
+        elif ch == "\r":
+            pass
+        elif ord(ch) < 32:
+            out.append(" ")
+        else:
+            out.append(ch)
+        i += 1
+    return re.sub(r",\s*([\]}])", r"\1", "".join(out))
+
+
+def _looks_closed(raw: str) -> bool:
+    """Скобки закрыты (ответ дописан), а не оборваны на середине."""
+    opens = raw.count("{") + raw.count("[")
+    closes = raw.count("}") + raw.count("]")
+    return closes >= opens and raw.rstrip().endswith(("}", "]"))
+
+
 def _extract_json(raw: str, expected_keys=None) -> dict:
     """Разобрать ответ модели в словарь, стерпев ограду кода и лишний текст.
 
@@ -111,6 +188,19 @@ def _extract_json(raw: str, expected_keys=None) -> dict:
             return json.loads(match.group(0))
         except json.JSONDecodeError:
             pass
+    if match and _looks_closed(raw):
+        # Дописан, но кривой: чиним типовые огрехи. Оборванному это не
+        # поможет, поэтому ветка только для закрытых скобок.
+        try:
+            obj = json.loads(_repair_json(match.group(0)))
+        except json.JSONDecodeError as e:
+            raise MalformedAnswer(
+                f"Ответ модели — JSON с синтаксической ошибкой ({e.msg}, "
+                f"позиция {e.pos})", raw, e.pos) from e
+        if isinstance(obj, dict) and (not expected or expected & set(obj)):
+            _LOG.info("JSON ответа починен без модели (%d символов)", len(raw))
+            return obj
+        raise MalformedAnswer("Ответ модели — JSON не той формы", raw, first)
     raise TruncatedAnswer(
         "Ответ модели оборван: JSON начат, но не закрыт (кончился лимит токенов)",
         raw, first)
@@ -543,9 +633,20 @@ def _protocol_from(backend, prompt: str, on_progress, stage: str,
                 failed = str(getattr(backend, "name", "") or "llm")
                 model = str(getattr(backend, "model", "") or "")
                 who = f"{failed} ({model})" if model else failed
-                reason = f"{failed}: дважды ответил не протоколом — «{head[:100]}…»"
+                # Причина — словами, по которым видно, ЧТО чинить: оборванный
+                # ответ — про лимит выхода у поставщика, кривой JSON — про
+                # модель, «не протокол» — про рассуждения вместо ответа.
+                if isinstance(bad, TruncatedAnswer):
+                    reason = (f"{failed}: дважды вернул оборванный JSON — ответ "
+                              f"не влез в лимит токенов (max_tokens=10000)")
+                elif isinstance(bad, MalformedAnswer):
+                    reason = (f"{failed}: дважды вернул JSON с синтаксической "
+                              f"ошибкой ({str(bad)[:80]})")
+                else:
+                    reason = f"{failed}: дважды ответил не протоколом — «{head[:100]}…»"
                 _LOG.warning("Сведение: %s вернул ответ без протокола (%s); "
-                             "начало ответа: %r", who, bad, (e.raw or "")[:600])
+                             "начало ответа: %r; конец ответа: %r",
+                             who, bad, (e.raw or "")[:600], (e.raw or "")[-300:])
                 demote = getattr(backend, "demote", None)
                 if demote and demote(reason):
                     if on_progress:

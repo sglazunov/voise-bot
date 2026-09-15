@@ -226,3 +226,16 @@ class TestTLS:
         with pytest.raises(RuntimeError, match="Не удалось подключиться"):
             llm.GigaChatProvider(api_key="a2V5").complete("x")
         assert len(fake.calls) == 1
+
+
+class TestОбрезкаПоЛимиту:
+    def test_finish_length_пишется_в_лог(self, fake, caplog):
+        fake.chat = [{"choices": [{"message": {"content": '{"summary": "s'},
+                                   "finish_reason": "length"}],
+                      "usage": {"prompt_tokens": 10, "completion_tokens": 4096}}]
+        import logging
+        with caplog.at_level(logging.WARNING, logger="vtx.llm"):
+            assert llm.GigaChatProvider(api_key="a2V5").complete("x", max_tokens=10000) \
+                == '{"summary": "s'
+        assert any("обрезан по лимиту" in r.message and "4096" in r.message
+                   for r in caplog.records)
