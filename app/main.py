@@ -837,6 +837,10 @@ def list_providers(user: str = Depends(current_user)):
     counts = user_creds.counts(user)  # how many personal keys per provider
     return {
         "available": config.available_providers(uk),
+        # Отключённые через VTX_PROVIDER_DISABLED. Раньше такой провайдер
+        # исчезал отовсюду МОЛЧА — ни карточки, ни движка, ни объяснения; на
+        # бою так «пропал Gemini», и искали его в коде, а не в .env.
+        "disabled": sorted(config.PROVIDER_DISABLED),
         "engines": _engine_list(uk),
         "ollama_status": llm.ollama_status(),
         "ollama_install_url": "https://ollama.com/download",
@@ -929,8 +933,12 @@ def connect_provider(body: ProviderKey, user: str = Depends(current_user)):
     trial = {provider: [{"key": key, "extra": extra}]}
     note = None
     try:
+        # ⚠️ Не 5 токенов: у рассуждающих моделей (gpt-oss на Groq, DeepSeek R1)
+        # лимит считает и рассуждения, и в пять токенов ответ не влезает вовсе
+        # — ключ отвергался с «модель вернула пустой ответ». 64 токена стоят
+        # доли цента и дают место подумать и ответить.
         llm.get_provider(provider, trial).complete("Ответь одним словом: ok",
-                                                   max_tokens=5, force_json=False)
+                                                   max_tokens=64, force_json=False)
     except Exception as e:
         es = str(e).lower()
         # A 429 / quota error means the key AUTHENTICATED but is rate-limited —

@@ -23,6 +23,7 @@ const EXTRA: Record<string, { label: string; ph: string } | undefined> = {
 
 export default function Providers() {
   const [providers, setProviders] = useState<Provider[]>([]);
+  const [disabled, setDisabled] = useState<string[]>([]);
   const [engines, setEngines] = useState<Engine[]>([]);
   const [ollama, setOllama] = useState<any>(null);
   const [ollamaUrl, setOllamaUrl] = useState("");
@@ -30,6 +31,7 @@ export default function Providers() {
 
   const load = () => api.get("/api/providers").then((d) => {
     setProviders(d.providers || []);
+    setDisabled(d.disabled || []);
     setEngines(d.engines || []);
     setOllama(d.ollama_status || null);
     setOllamaUrl(d.ollama_install_url || "");
@@ -57,6 +59,15 @@ export default function Providers() {
       </Card>
 
       <div className="grid lg:grid-cols-2 gap-3.5">
+        {/* Провайдер, отключённый переменной окружения, раньше пропадал молча —
+            ни карточки, ни движка. Говорим прямо, где он и как вернуть. */}
+        {disabled.length > 0 && (
+          <div className="glass2 rounded-2xl px-4 py-3 text-[12.5px] md:col-span-2" style={{ color: "var(--warn)" }}>
+            Отключены на сервере переменной <code>VTX_PROVIDER_DISABLED</code>: <b>{disabled.join(", ")}</b>.
+            Карточки и движка у них нет, ключи при этом сохранены. Чтобы вернуть — убрать из переменной в <code>.env</code> и
+            выполнить <code>docker compose up -d</code>.
+          </div>
+        )}
         {providers.map((p) =>
           p.id === "ollama"
             ? <OllamaCard key={p.id} p={p} ollama={ollama} url={ollamaUrl} models={modelsOf("ollama")} />

@@ -168,6 +168,14 @@ class GroqProvider(_KeyProviderMixin):
         }
         if force_json:
             payload["response_format"] = {"type": "json_object"}
+        # gpt-oss — рассуждающая модель: рассуждения идут в `message.reasoning`
+        # и СЧИТАЮТСЯ в max_tokens. На среднем усилии по умолчанию она съедала
+        # весь лимит проверочного пинга («Ответь одним словом: ok», 5 токенов)
+        # ещё в рассуждениях, `content` оставался пустым — и подключение ключа
+        # падало с «модель вернула пустой ответ». Для извлечения по схеме
+        # длинные рассуждения не нужны: низкое усилие дешевле и быстрее.
+        if self.model.startswith("openai/gpt-oss"):
+            payload["reasoning_effort"] = "low"
         headers = {"Authorization": f"Bearer {self.api_key}"}
         out = _http_post_json(url, payload, headers, timeout=180,
                               max_retries=self._retries)
