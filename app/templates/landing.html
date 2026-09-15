@@ -6,6 +6,11 @@
 <title>MeetFlow — протоколы встреч в Яндекс Телемосте автоматически</title>
 <meta name="description" content="Бот MeetFlow сам приходит на встречу в Яндекс Телемосте, записывает её, расшифровывает и собирает протокол: решения с цитатами и таймкодами, задачи с исполнителями, ответы на вопросы. Word-протокол в Яндекс Диске, ссылки и задачи в Weeek или любом вашем трекере. От 200 ₽ за встречу.">
 <meta name="robots" content="index, follow">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png">
+<link rel="alternate icon" href="/favicon.ico">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<meta name="theme-color" content="#0E9F8E">
 <link rel="canonical" href="{{ site_url }}/">
 <meta property="og:type" content="website">
 <meta property="og:locale" content="ru_RU">
@@ -13,7 +18,11 @@
 <meta property="og:title" content="MeetFlow — протоколы встреч в Яндекс Телемосте автоматически">
 <meta property="og:description" content="Бот записывает встречу в Телемосте, расшифровывает и собирает протокол с решениями, задачами и цитатами. 200 ₽ расшифровка, 300 ₽ с протоколом, 6 000 ₽ в месяц до 50 встреч.">
 <meta property="og:url" content="{{ site_url }}/">
-<meta name="twitter:card" content="summary">
+<meta property="og:image" content="{{ site_url }}/og-image.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="{{ site_url }}/og-image.png">
 <script type="application/ld+json">
 {
   "@context": "https://schema.org",
@@ -103,7 +112,7 @@
   header.top { position: sticky; top: 0; z-index: 10; background: rgba(244,247,249,.92); backdrop-filter: blur(8px); border-bottom: 1px solid var(--line); }
   .nav { display: flex; align-items: center; gap: 1.5rem; padding-block: .9rem; }
   .logo { font-family: var(--display); font-weight: 800; font-size: 1.25rem; letter-spacing: -.02em; color: var(--ink); text-decoration: none; display: inline-flex; align-items: center; gap: .5rem; }
-  .logo i { width: 12px; height: 12px; border-radius: 3px; background: var(--accent); display: inline-block; transform: rotate(45deg); }
+  .logo img { width: 26px; height: 26px; border-radius: 6px; }
   .nav-links { display: flex; gap: 1.25rem; margin-inline: auto; }
   .nav-links a { color: var(--ink-2); text-decoration: none; font-weight: 600; }
   .nav-links a:hover { color: var(--ink); }
@@ -123,7 +132,7 @@
   .proto-head b { font-family: var(--display); }
   .proto-head span { color: var(--muted); font-variant-numeric: tabular-nums; }
   .proto-body { padding: .6rem 1.1rem 1rem; display: grid; gap: .9rem; }
-  .proto h4 { margin: .5rem 0 .3rem; font-size: .78rem; letter-spacing: .1em; text-transform: uppercase; color: var(--accent-ink); }
+  .proto .proto-h { margin: .5rem 0 .3rem; font-size: .78rem; letter-spacing: .1em; text-transform: uppercase; color: var(--accent-ink); }
   .proto ul { list-style: none; margin: 0; padding: 0; display: grid; gap: .55rem; }
   .proto li { padding-left: 1rem; position: relative; }
   .proto li::before { content: ""; position: absolute; left: 0; top: .6em; width: 5px; height: 5px; border-radius: 50%; background: var(--ink-2); }
@@ -206,7 +215,7 @@ ym({{ metrika_id }}, "init", {clickmap:true, trackLinks:true, accurateTrackBounc
 
 <header class="top">
   <div class="wrap nav">
-    <a class="logo" href="/"><i></i>MeetFlow</a>
+    <a class="logo" href="/"><img src="/favicon.svg" alt="" width="26" height="26">MeetFlow</a>
     <nav class="nav-links" aria-label="Разделы">
       <a href="#how">Как работает</a>
       <a href="#protocol">Что в протоколе</a>
@@ -238,7 +247,7 @@ ym({{ metrika_id }}, "init", {clickmap:true, trackLinks:true, accurateTrackBounc
       <div class="proto-head"><b>Протокол · Проектная встреча CRM</b><span>68 мин · 5 участников</span></div>
       <div class="proto-body">
         <div>
-          <h4>Решения</h4>
+          <div class="proto-h">Решения</div>
           <ul>
             <li>Логирование в прототипе не делать: система на одного пользователя
               <span class="ev">основание · <span class="t">21:04</span> «логирование сейчас не нужно, это прототип на одного»</span></li>
@@ -247,7 +256,7 @@ ym({{ metrika_id }}, "init", {clickmap:true, trackLinks:true, accurateTrackBounc
           </ul>
         </div>
         <div>
-          <h4>Задачи</h4>
+          <div class="proto-h">Задачи</div>
           <ul>
             <li>Собрать хук по галочке «Пробный день»<span class="who">Константин</span>
               <span class="ev">срок · до пятницы · <span class="t">14:40</span></span></li>
@@ -256,13 +265,13 @@ ym({{ metrika_id }}, "init", {clickmap:true, trackLinks:true, accurateTrackBounc
           </ul>
         </div>
         <div>
-          <h4>Что спрашивали и что ответили</h4>
+          <div class="proto-h">Что спрашивали и что ответили</div>
           <ul>
             <li>Баг с ролями починили? — не сделано, остаётся в спринте <span class="ev"><span class="t">34:57</span></span></li>
           </ul>
         </div>
         <div>
-          <h4>Оговорки</h4>
+          <div class="proto-h">Оговорки</div>
           <ul>
             <li>Конфиги пока в JSON, на проде будет база<span class="flag">временно</span></li>
           </ul>
