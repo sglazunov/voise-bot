@@ -79,17 +79,12 @@ class TestМетрика:
         assert "connect-src 'self' https://mc.yandex.ru" in csp
         assert "img-src 'self' data: blob: https://mc.yandex.ru" in csp
 
-    def test_номер_по_умолчанию_и_выключение_нулём(self, monkeypatch):
-        import importlib
-        from app import config as cfg
-        monkeypatch.delenv("VTX_METRIKA_ID", raising=False)
-        importlib.reload(cfg)
-        assert cfg.METRIKA_ID == "112674625"
-        monkeypatch.setenv("VTX_METRIKA_ID", "0")
-        importlib.reload(cfg)
-        assert cfg.METRIKA_ID == ""
-        monkeypatch.delenv("VTX_METRIKA_ID", raising=False)
-        importlib.reload(cfg)
+    def test_номер_по_умолчанию_и_выключение_нулём(self):
+        # Без перезагрузки модуля: reload(config) сбивал настройки соседним тестам.
+        assert config._metrika_id("112674625") == "112674625"
+        assert config._metrika_id(" 12345678 ") == "12345678"
+        assert config._metrika_id("0") == "" and config._metrika_id("") == ""
+        assert config._metrika_id("off") == ""
 
     def test_хосты_метрики_не_протекают_на_страницу_входа(self, client, monkeypatch):
         monkeypatch.setattr(config, "METRIKA_ID", "12345678")
