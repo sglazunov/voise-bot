@@ -366,6 +366,28 @@ def generate_report(
             row[2].paragraphs[0].add_run(str(st.get("note") or ""))
         doc.add_paragraph().paragraph_format.space_after = Pt(6)
 
+    # ---- Оговорки: что временно, отключено, скрыто -------------------------
+    # Сказанное по ходу демо («инсерты отключил», «пока JSON», «скрытая вкладка»)
+    # — не решение и не задача, и раньше не попадало никуда. Именно это ищет
+    # тот, кто тестирует или подхватывает код.
+    caveats = [c for c in analysis.get("caveats", []) or []
+               if isinstance(c, dict) and c.get("item")]
+    if caveats:
+        doc.add_heading("Оговорки: что временно, отключено или скрыто", level=1)
+        table = doc.add_table(rows=1, cols=3)
+        table.style = "Table Grid"
+        for cell, title in zip(table.rows[0].cells, ("Что", "Вид", "Почему и что из этого следует")):
+            cell.paragraphs[0].add_run(title).bold = True
+        for c in caveats:
+            row = table.add_row().cells
+            row[0].paragraphs[0].add_run(str(c.get("item") or ""))
+            kr = row[1].paragraphs[0].add_run(str(c.get("kind") or "—"))
+            if str(c.get("kind") or "") in ("риск", "скрыто"):
+                kr.font.color.rgb = RGBColor(0xB0, 0x60, 0x00)
+                kr.bold = True
+            row[2].paragraphs[0].add_run(str(c.get("note") or ""))
+        doc.add_paragraph().paragraph_format.space_after = Pt(6)
+
     # ---- Задачи прошлой встречи серии --------------------------------------
     carried = analysis.get("_carried") or {}
     c_items = [x for x in (carried.get("items") or []) if isinstance(x, dict) and x.get("task")]

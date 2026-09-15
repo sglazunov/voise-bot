@@ -92,6 +92,35 @@ export function StatusList({ items }: { items?: any[] }) {
   );
 }
 
+/* Оговорки о состоянии системы, сказанные по ходу демо: что временно, отключено,
+   скрыто, заглушка. Не решения и не задачи — раньше не попадали никуда, а
+   тестировщик узнавал про скрытую вкладку только из сырой расшифровки. */
+export function CaveatList({ items }: { items?: any[] }) {
+  const rows = (items || []).filter((c) => c && c.item);
+  if (!rows.length) return null;
+  return (
+    <section className="mb-4" aria-label="Оговорки: что временно, отключено или скрыто">
+      <h3 className="font-bold text-[13.5px] mb-1.5" style={{ color: "var(--accent-text, var(--accent))" }}>
+        Оговорки: что временно, отключено или скрыто</h3>
+      <ul className="space-y-1.5">
+        {rows.map((c, i) => {
+          const hot = c.kind === "риск" || c.kind === "скрыто";
+          return (
+            <li key={i} className="text-[13px] leading-relaxed flex gap-2">
+              <ChevronRight size={14} className="flex-none mt-0.5" color="var(--muted)" aria-hidden="true" />
+              <span className="min-w-0">
+                {c.item}
+                <span className="chip ml-1.5" style={{ color: hot ? "var(--warn)" : "var(--txt)" }}>{c.kind || "—"}</span>
+                {c.note ? <span style={{ color: "var(--muted)" }}> — {c.note}</span> : null}
+              </span>
+            </li>
+          );
+        })}
+      </ul>
+    </section>
+  );
+}
+
 export const taskLine = (t: any) => `${t.task}${t.owner ? ` — ${t.owner}` : ""}`;
 // Разделитель «задача — ответственный»: тире с пробелами в КОНЦЕ строки после
 // короткого хвоста без точек. «Согласовать бюджет — до пятницы» ответственным
@@ -443,6 +472,7 @@ export function Protocol({ a, jobId }: { a: any; jobId?: string }) {
       <List title="Мелкие задачи" items={a.minor_tasks} verify={ver.minor_tasks} />
       <List title="Уже сделано" items={a.done_tasks} verify={ver.done_tasks} />
       <StatusList items={a.statuses} />
+      <CaveatList items={a.caveats} />
       {a._carried?.items?.length ? (
         <section className="mb-4" aria-label="Задачи прошлой встречи">
           <h3 className="font-bold text-[13.5px] mb-1.5" style={{ color: "var(--accent-text, var(--accent))" }}>

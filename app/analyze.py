@@ -250,6 +250,7 @@ def _mech_merge(a: dict, b: dict) -> dict:
         "decisions": (a.get("decisions") or []) + (b.get("decisions") or []),
         "tasks": (a.get("tasks") or []) + (b.get("tasks") or []),
         "statuses": (a.get("statuses") or []) + (b.get("statuses") or []),
+        "caveats": (a.get("caveats") or []) + (b.get("caveats") or []),
     }
 
 
@@ -733,6 +734,7 @@ def analyze_transcript(transcript_text: str, provider: str | None = None,
     for list_key in ("done_tasks", "tasks", "minor_tasks"):
         result[list_key] = _normalise_tasks(result.get(list_key, []))
     result["statuses"] = _normalise_statuses(result.get("statuses", []))
+    result["caveats"] = _normalise_caveats(result.get("caveats", []))
     _drop_noise_tasks(result)
     _dedup_decisions(result)
     result["detailed"] = merge_similar_topics(_normalise_detailed(result["detailed"]))
@@ -901,6 +903,42 @@ def _normalise_statuses(items) -> list[dict]:
             if tail and tail not in note.lower():
                 note = (tail[0].upper() + tail[1:] + (". " if note else "") + note).strip()
         out.append({"item": item, "status": word or status or "без ответа", "note": note})
+    return out
+
+
+# Виды оговорок — словарь из промпта. Модель пишет с большой буквы или с
+# пояснением; сводим к словарной форме, хвост уносим в note.
+_CAVEAT_KINDS = ("отключено", "временно", "скрыто", "заглушка", "прототип", "риск")
+
+
+def _normalise_caveats(items) -> list[dict]:
+    """[{item, kind, note}] — оговорки о состоянии системы, сказанные по ходу
+    демо: что временно, отключено, скрыто, заглушка. Пустой kind → «временно»:
+    оговорка без вида всё равно оговорка, терять её из-за формата нельзя."""
+    if not items:
+        return []
+    if isinstance(items, dict):
+        items = [items]
+    out = []
+    seen: set[str] = set()
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        item = str(it.get("item") or "").strip()
+        if not item:
+            continue
+        key = _norm_for_match(item)
+        if key in seen:              # уплотнение заметок могло продублировать
+            continue
+        seen.add(key)
+        kind = str(it.get("kind") or "").strip().replace("ё", "е").lower()
+        note = str(it.get("note") or "").strip()
+        word = next((w for w in _CAVEAT_KINDS if kind.startswith(w)), "")
+        if word and kind != word:
+            tail = kind[len(word):].strip(" :—-,.()")
+            if tail and tail not in note.lower():
+                note = (tail[0].upper() + tail[1:] + (". " if note else "") + note).strip()
+        out.append({"item": item, "kind": word or "временно", "note": note})
     return out
 
 
