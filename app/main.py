@@ -333,7 +333,8 @@ class Credentials(BaseModel):
 # ===========================================================================
 # Публичный лендинг
 # ===========================================================================
-_YM_HOSTS = " https://mc.yandex.ru https://mc.yandex.com"
+_YM_HOSTS = (" https://mc.yandex.ru https://mc.yandex.com"
+             " https://mc.webvisor.org https://mc.webvisor.com")
 
 
 def _landing_csp(html: str) -> str:

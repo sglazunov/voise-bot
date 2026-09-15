@@ -69,7 +69,8 @@ class TestМетрика:
     def test_счётчик_вставляется_и_разрешён_хэшем(self, client, monkeypatch):
         monkeypatch.setattr(config, "METRIKA_ID", "12345678")
         r = client.get("/")
-        assert 'ym(12345678, "init"' in r.text and "mc.yandex.ru/watch/12345678" in r.text
+        assert "ym(12345678, 'init'" in r.text and "mc.yandex.ru/watch/12345678" in r.text
+        assert "tag.js?id=12345678" in r.text and "webvisor:true" in r.text
         csp = r.headers["Content-Security-Policy"]
         script_src = _script_src(csp)
         assert "https://mc.yandex.ru" in script_src and "unsafe-inline" not in script_src
@@ -77,6 +78,18 @@ class TestМетрика:
             assert f"'sha256-{h}'" in script_src
         assert "connect-src 'self' https://mc.yandex.ru" in csp
         assert "img-src 'self' data: blob: https://mc.yandex.ru" in csp
+
+    def test_номер_по_умолчанию_и_выключение_нулём(self, monkeypatch):
+        import importlib
+        from app import config as cfg
+        monkeypatch.delenv("VTX_METRIKA_ID", raising=False)
+        importlib.reload(cfg)
+        assert cfg.METRIKA_ID == "112674625"
+        monkeypatch.setenv("VTX_METRIKA_ID", "0")
+        importlib.reload(cfg)
+        assert cfg.METRIKA_ID == ""
+        monkeypatch.delenv("VTX_METRIKA_ID", raising=False)
+        importlib.reload(cfg)
 
     def test_хосты_метрики_не_протекают_на_страницу_входа(self, client, monkeypatch):
         monkeypatch.setattr(config, "METRIKA_ID", "12345678")
