@@ -515,7 +515,7 @@ class JobStore:
                 txt_path.read_text(encoding="utf-8"), detailed[index],
                 provider=provider or job.provider, keys=_owner_keys(job.owner),
                 user_notes=job.user_notes)
-        self._add_usage(job, acc)
+        self._add_usage(job, acc, rerun=True)
         a["detailed"] = detailed
         a.pop("verification", None)   # indexes may shift meaning — cleared
         a["_edited"] = True
@@ -655,7 +655,7 @@ class JobStore:
         except Exception:  # noqa: BLE001
             log.warning("Память серии не обновлена (%s)", job.id, exc_info=True)
 
-    def _add_usage(self, job: Job, acc: dict) -> None:
+    def _add_usage(self, job: Job, acc: dict, rerun: bool = False) -> None:
         """Долить расход прогона к расходу задачи.
 
         Складываем, а не заменяем: пересборка — это ещё один полный проход по
@@ -671,6 +671,11 @@ class JobStore:
         calls_log = list(acc.get("log") or [])
         if calls_log:
             from . import events
+            # Пересборка — повторная себестоимость ТОЙ ЖЕ встречи (И27, И32):
+            # без пометки маржа выглядит лучше реальности ровно у тех клиентов,
+            # кто пересобирает чаще.
+            if rerun:
+                calls_log = [{**c, "rerun": True} for c in calls_log]
             events.record_many(calls_log, user=job.owner, job_id=job.id,
                                kind=events.LLM_CALL)
         total = dict(job.llm_usage or {})
@@ -737,7 +742,7 @@ class JobStore:
                     keys=_owner_keys(job.owner),
                     user_notes=job.user_notes, context=context)
                 result = self._maybe_verify(job, result, txt)
-            self._add_usage(job, acc)
+            self._add_usage(job, acc, rerun=True)
             result = self._enforce_participants(job, result)
             self._remember_series(job, result)
             job.analysis = result

@@ -84,6 +84,22 @@ def stage(code: str):
         _local.stage = prev
 
 
+# Чей ключ платит за вызов (docs/ТЗ-МЕТРИКИ.md И34). Вызов на ключе КЛИЕНТА
+# для владельца сервиса бесплатен — и это прямо влияет на тариф: команда со
+# своим ключом стоит нам только распознавание и запись.
+TEAM_KEY = "team"
+SERVICE_KEY = "service"
+
+
+def set_key_owner(owner: str | None) -> None:
+    """Кто платит за следующие вызовы в этом потоке: team | service.
+
+    Ставится цепочкой движков перед каждым вызовом — она единственная знает,
+    какой именно движок (и чей ключ) сейчас пробуют.
+    """
+    _local.key_owner = owner if owner in (TEAM_KEY, SERVICE_KEY) else None
+
+
 @contextmanager
 def collect():
     """Собрать расход всех вызовов модели внутри блока — в этом потоке."""
@@ -113,7 +129,10 @@ def record(model: str, in_tokens: int, cached: int, out_tokens: int) -> None:
     acc.setdefault("log", []).append(
         {"model": name, "stage": getattr(_local, "stage", None), "at": time.time(),
          "in": one["in"], "cached": one["cached"], "out": one["out"],
-         "usd": cost_usd({name: one})})
+         "usd": cost_usd({name: one}),
+         # Неизвестно — считаем, что платит сервис: занизить свою себестоимость
+         # хуже, чем завысить.
+         "key": getattr(_local, "key_owner", None) or SERVICE_KEY})
     del acc["log"][:-_MAX_LOG]
 
 

@@ -800,6 +800,25 @@ def team_stats(days: int = 30, user: str = Depends(current_user)):
     return stats.summary(user, days=max(1, min(int(days), 365)))
 
 
+@app.get("/api/stats/report")
+def team_report(days: int = 30, user: str = Depends(current_user)):
+    """Отчёт клиенту на одну страницу (docs/ТЗ-МЕТРИКИ.md И58): встречи, решения,
+    задачи, сэкономленное время с формулой, надёжность словами и «укол в
+    процесс». Без себестоимости и движков — их клиенту не показываем (И59)."""
+    from . import stats
+    return stats.client_report(user, days=max(1, min(int(days), 365)))
+
+
+@app.get("/api/stats/owner")
+def owner_report_api(days: int = 7, user: str = Depends(current_user)):
+    """Недельная таблица владельца сервиса по ВСЕМ командам (И56) и список
+    спящих платящих (И48). Только основателю сервера — здесь видны чужие команды."""
+    if not security.is_super_admin(user):
+        raise HTTPException(403, "Только основателю сервера.")
+    from . import stats
+    return stats.owner_report(days=max(1, min(int(days), 365)))
+
+
 # ---- LLM providers (protocol engine) --------------------------------------
 class ProviderKey(BaseModel):
     provider: str

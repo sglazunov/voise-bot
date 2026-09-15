@@ -289,6 +289,14 @@ ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS detail TEXT;
 -- На сколько секунд бот опоздал в звонок. «Явка» — это не только «пришёл или
 -- нет»: бот, вошедший к середине, теряет начало, где обычно и ставят задачи.
 ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS join_delay_sec DOUBLE PRECISION;
+-- Были периоды без звука (пустые минуты платятся трижды — И32).
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS silent BOOLEAN;
+-- Отчёт клиенту (И58): вопросы без ответа и задачи прошлой встречи без упоминания.
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS unanswered INTEGER;
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS carried_stale INTEGER;
+-- Связь строки встречи со строкой задачи: без неё себестоимость записи и
+-- себестоимость модели одной встречи не складываются (И27).
+ALTER TABLE meeting_stats ADD COLUMN IF NOT EXISTS job_id TEXT;
 CREATE TABLE IF NOT EXISTS ai_context (
     username     TEXT PRIMARY KEY,
     global_text  TEXT DEFAULT ''
@@ -803,7 +811,7 @@ _STAT_COLS = ["id", "team", "at", "title", "duration_sec", "speakers",
               "dropped_topics", "dropped_items", "summary_is_toc", "edited",
               "tasks_with_owner", "tokens_by_model",
               "kind", "stop_reason", "upload_error", "detail",
-              "join_delay_sec"]
+              "join_delay_sec", "silent", "unanswered", "carried_stale", "job_id"]
 # Колонки, которые в файловом режиме и в Postgres лежат как JSON.
 _STAT_JSON_COLS = {"tokens_by_model"}
 

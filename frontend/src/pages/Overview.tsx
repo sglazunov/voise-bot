@@ -3,7 +3,7 @@ import { Link } from "react-router-dom";
 import {
   CalendarClock, Clock3, ListChecks, Timer, Users2, Gavel, FileText,
   Radio, ShieldCheck, ArrowRight, Info, CheckCircle2, AlertTriangle, Coins,
-  BadgeCheck, Video, CloudOff, BookOpen, Zap,
+  BadgeCheck, Video, CloudOff, BookOpen, Zap, Wallet, ClipboardCopy,
 } from "lucide-react";
 import { Page } from "../components/Layout";
 import { Card, Ellipsis, StatusBadge } from "../components/ui";
@@ -100,9 +100,18 @@ export default function Overview() {
   const [deps, setDeps] = useState<any>(null);
   const [rec, setRec] = useState<any>(null);
   const [cloud, setCloud] = useState<any>(null);
+  // Отчёт клиенту (И58) и таблица владельца по командам (И56, только основателю:
+  // 403 у всех остальных — просто не показываем блок).
+  const [report, setReport] = useState<any>(null);
+  const [owner, setOwner] = useState<any>(null);
+  const [copied, setCopied] = useState(false);
 
   const load = () => api.get("/api/automation/scheduler/status").then(setS).catch(() => {});
-  const loadStats = (d: number) => api.get(`/api/stats?days=${d}`).then(setSt).catch(() => {});
+  const loadStats = (d: number) => {
+    api.get(`/api/stats?days=${d}`).then(setSt).catch(() => {});
+    api.get(`/api/stats/report?days=${d}`).then(setReport).catch(() => {});
+    api.get(`/api/stats/owner?days=${d}`).then(setOwner).catch(() => setOwner(null));
+  };
   const loadReady = () => {
     api.get("/api/setup/deps").then(setDeps).catch(() => {});
     api.get("/api/automation/recorder/status").then(setRec).catch(() => {});
@@ -211,6 +220,44 @@ export default function Overview() {
               </div>
             ))}
           </div>
+        </div>
+      )}
+
+      {/* Юнит-экономика (ТЗ-МЕТРИКИ §7). ⚠️ Никаких средних — медиана и 90-й
+          перцентиль: четырёхчасовые записи уже случались, среднее не описывает
+          никого. Компонент считается только при заданной цене; иначе — прочерк
+          и подсказка, какую переменную задать. */}
+      {st && (st.econ_priced_meetings ? (
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 mt-3.5">
+          <Mini icon={Wallet} n={`$${st.econ_cost_median_usd}`}
+            label={`Встреча: медиана (90-й: $${st.econ_cost_p90_usd})`} />
+          <Mini icon={Wallet} n={`$${st.econ_cost_per_hour_usd}`}
+            label="Себестоимость часа встречи" />
+          <Mini icon={Wallet}
+            n={st.econ_cost_to_price != null ? `${Math.round(st.econ_cost_to_price * 100)}%`
+              : "—"}
+            label={st.econ_cost_to_price == null
+              ? "Себестоимость к цене: задайте подписку"
+              : st.econ_cost_to_price > 1 ? "Себестоимость к цене — УБЫТОК"
+              : st.econ_cost_to_price > 0.5 ? "Себестоимость к цене — говорить о тарифе"
+              : st.econ_cost_to_price > 0.3 ? "Себестоимость к цене — наблюдать"
+              : "Себестоимость к цене"} />
+          <Mini icon={Clock3} n={st.econ_breakeven_hours != null ? `${st.econ_breakeven_hours} ч` : "—"}
+            label="Часов встреч в месяц до убытка" />
+        </div>
+      ) : !!st.meetings && (
+        <div className="text-[12px] mt-3.5" style={{ color: "var(--muted)" }}>
+          Себестоимость встреч не считается: не заданы {st.econ_cost_missing?.length
+            ? st.econ_cost_missing.join(", ") : "цены моделей (VTX_MODEL_PRICES)"}.
+        </div>
+      ))}
+      {!!st?.econ_priced_meetings && (
+        <div className="text-[12px] mt-2 flex flex-wrap gap-x-3 gap-y-1" style={{ color: "var(--muted)" }}>
+          <span>Из чего: модель ${st.econ_cost_llm_usd} · распознавание ${st.econ_cost_recog_usd} · запись ${st.econ_cost_record_usd}</span>
+          {st.econ_rerun_cost_share != null && <span>· на пересборки {Math.round(st.econ_rerun_cost_share * 100)}%</span>}
+          {st.econ_long_minutes_share != null && <span>· минут во встречах дольше 2 ч: {Math.round(st.econ_long_minutes_share * 100)}%</span>}
+          {!!st.econ_silent_meetings && <span>· записей с тишиной: {st.econ_silent_meetings}</span>}
+          {!!st.econ_cost_client_key_usd && <span>· на ключах клиента: ${st.econ_cost_client_key_usd}</span>}
         </div>
       )}
 
@@ -365,6 +412,58 @@ export default function Overview() {
           </div>
         </Card>
       </div>
+
+      {/* Отчёт клиенту на одну страницу (И58): без себестоимости и движков,
+          с формулой у «сэкономлено» и с «уколом в процесс». Копируется как текст. */}
+      {report && !!report.meetings && (
+        <Card className="mt-3.5">
+          <div className="flex items-center justify-between mb-2 gap-2">
+            <div className="font-bold text-[14px]">Отчёт за {report.days} дн. — для команды</div>
+            <button className="btn btn-ghost" onClick={() => {
+              navigator.clipboard?.writeText(report.text).then(() => {
+                setCopied(true); setTimeout(() => setCopied(false), 1500);
+              }).catch(() => {});
+            }}><ClipboardCopy size={14} /> {copied ? "Скопировано" : "Скопировать"}</button>
+          </div>
+          <pre className="text-[12.5px] leading-relaxed whitespace-pre-wrap font-sans">{report.text}</pre>
+        </Card>
+      )}
+
+      {/* Таблица владельца по командам (И56) + спящие платящие (И48). Приходит
+          только основателю сервера. */}
+      {owner?.teams?.length > 1 || owner?.sleeping?.length ? (
+        <Card className="mt-3.5">
+          <div className="font-bold text-[14px] mb-2">Команды за {owner.days} дн. — владельцу</div>
+          {!!owner.sleeping?.length && (
+            <div className="text-[12.5px] mb-2" style={{ color: "var(--warn)" }}>
+              Спящие платящие — поговорить на этой неделе: {owner.sleeping.map((x: any) =>
+                `${x.team} (${x.protocols_built} протоколов за ${x.days} дн., ни одного не открыли)`).join("; ")}
+            </div>
+          )}
+          <div style={{ overflowX: "auto" }}>
+            <table className="text-[12.5px] w-full">
+              <thead><tr style={{ color: "var(--muted)" }}>
+                <th className="text-left py-1 pr-3">Команда</th><th className="text-right pr-3">Встреч</th>
+                <th className="text-right pr-3">Прочитано</th><th className="text-right pr-3">Пригодилось</th>
+                <th className="text-right pr-3">Себестоимость</th><th className="text-right pr-3">К цене</th>
+                <th className="text-right pr-3">Черновики</th><th className="text-right">Потеряно</th>
+              </tr></thead>
+              <tbody>{owner.teams.map((t: any) => (
+                <tr key={t.team}>
+                  <td className="py-1 pr-3">{t.team}{t.paying ? "" : " (не платит)"}</td>
+                  <td className="text-right pr-3">{t.meetings}</td>
+                  <td className="text-right pr-3">{t.protocols_read}/{t.protocols_built}</td>
+                  <td className="text-right pr-3">{t.protocols_acted}</td>
+                  <td className="text-right pr-3">{t.cost_total_usd != null ? `$${t.cost_total_usd}` : "—"}</td>
+                  <td className="text-right pr-3">{t.cost_to_price != null ? `${Math.round(t.cost_to_price * 100)}%` : "—"}</td>
+                  <td className="text-right pr-3">{t.drafts}</td>
+                  <td className="text-right">{t.lost}</td>
+                </tr>
+              ))}</tbody>
+            </table>
+          </div>
+        </Card>
+      ) : null}
 
       <Card className="mt-3.5">
         <div className="flex items-center gap-2 mb-2"><ShieldCheck size={17} color="var(--accent)" />

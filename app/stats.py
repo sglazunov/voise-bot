@@ -26,6 +26,38 @@ MANUAL_MINUTES_COEFF = float(__import__("os").getenv("VTX_MINUTES_COEFF", "0.5")
 _MAX_ROWS = 5000     # file backend: keep the log bounded
 
 
+def _env_float(name: str) -> float | None:
+    """Стоимостная настройка: не задана — значит, компонент НЕ считается и в
+    интерфейсе остаётся прочерк. Выдуманное значение хуже пустого места."""
+    raw = (__import__("os").getenv(name) or "").strip()
+    try:
+        return float(raw) if raw else None
+    except ValueError:
+        _LOG.warning("%s=%r не число — компонент себестоимости не считается", name, raw)
+        return None
+
+
+# Юнит-экономика (docs/ТЗ-МЕТРИКИ.md §7). Все четыре — настройки владельца
+# сервиса, в коде умолчаний нет: стоимость машино-часа зависит от хостинга,
+# курс — от дня, ставка поддержки — от человека.
+COST_CPU_HOUR_USD = _env_float("VTX_COST_CPU_HOUR_USD")    # машино-час сервера
+COST_SLOT_HOUR_USD = _env_float("VTX_COST_SLOT_HOUR_USD")  # час слота записи (браузер+ffmpeg)
+USD_RUB = _env_float("VTX_USD_RUB")                        # курс для подписки в рублях
+SUPPORT_HOUR_RUB = _env_float("VTX_SUPPORT_HOUR_RUB")      # ставка часа владельца
+# Встреча длиннее двух часов — «тяжёлый хвост» (И32): именно они съедают маржу.
+LONG_MEETING_SEC = 2 * 3600
+
+
+def _pct(xs: list[float], q: float) -> float | None:
+    """Перцентиль по ближайшему рангу. Средних здесь нет намеренно (И29):
+    четырёхчасовые записи уже случались дважды, среднее не описывает никого."""
+    if not xs:
+        return None
+    xs = sorted(xs)
+    k = max(0, min(len(xs) - 1, int(round(q * (len(xs) - 1)))))
+    return xs[k]
+
+
 # Почему остановилась запись — по-русски, одним словарём на весь проект.
 # Коды приходят из рекордера (`recorder.record_meeting` → `reason`), а раньше
 # никуда не доезжали: и карточка встречи, и метрика молчали о том, чем запись
@@ -197,6 +229,8 @@ def record_meeting(st: Any, outcome: str) -> None:
                              or None),
             "detail": (str(getattr(st, "detail", "") or "")[:300] or None),
             "join_delay_sec": getattr(st, "join_delay_sec", None),
+            "silent": bool(getattr(st, "audio_warning", False)),
+            "job_id": getattr(st, "job_id", None) or None,
         }
         if db.enabled():
             db.stats_add(row)
@@ -257,6 +291,14 @@ def _quality_row(job: Any, a: dict) -> dict:
         # качеством: протокол встречи, оборванной по пределу длительности, и
         # протокол нормально завершённой — разные истории.
         "stop_reason": getattr(job, "stop_reason", "") or None,
+        # «Укол в процесс» для отчёта клиенту (И58): вопросы, повисшие без
+        # ответа, и задачи прошлой встречи серии, о которых не вспомнили.
+        "unanswered": sum(1 for x in (a.get("statuses") or [])
+                          if isinstance(x, dict) and x.get("status") == "без ответа")
+                      if a.get("statuses") else None,
+        "carried_stale": sum(1 for x in ((a.get("_carried") or {}).get("items") or [])
+                             if isinstance(x, dict) and x.get("status") == "без упоминания")
+                         if a.get("_carried") else None,
     }
 
 
@@ -319,6 +361,8 @@ def summary(user: str, days: int = 30) -> dict:
     empty_topics = sum(int(r.get("empty_topics") or 0) for r in rows)
     topics_total = sum(int(r.get("topics") or 0) for r in rows)
     cancelled = sum(1 for r in rows if r.get("status") == "cancelled")
+    unanswered = sum(int(r.get("unanswered") or 0) for r in rows)
+    carried_stale = sum(int(r.get("carried_stale") or 0) for r in rows)
     tr_secs = [float(r.get("transcribe_sec") or 0) for r in rows
                if r.get("transcribe_sec")]
     # Версии правил проверки за период. Если их несколько, доля подтверждённых
@@ -402,6 +446,14 @@ def summary(user: str, days: int = 30) -> dict:
             st_row["usd"] += float(x["usd"])
             st_row["priced"] += 1
 
+    # --- юнит-экономика (§7) --------------------------------------------------
+    from .automation import settings as auto_settings
+    try:
+        team_cfg = auto_settings.load(team)
+    except Exception:   # noqa: BLE001 — экономика не должна ронять сводку
+        team_cfg = {}
+    econ = economics(rows, mrows, all_ev, team_cfg)
+
     # --- исходы встреч (§14.2) ----------------------------------------------
     # Единица — ВСТРЕЧА, а не задача распознавания: клиенту всё равно, на каком
     # шаге сломалось, и провал планировщика («бот не пришёл») виден только
@@ -430,6 +482,8 @@ def summary(user: str, days: int = 30) -> dict:
     return {
         "days": int(days),
         "meetings": len(ok),
+        # --- экономика (§7) ---
+        **{f"econ_{k}": v for k, v in econ.items()},
         # --- ценность (§5) ---
         # Знаменатель — протоколы, собранные БЕЗ фатальной ошибки: файл,
         # которого нет, никто не мог прочитать.
@@ -532,9 +586,167 @@ def summary(user: str, days: int = 30) -> dict:
         "empty_topics": empty_topics,
         "topics_total": topics_total,
         "cancelled": cancelled,
+        # Укол в процесс (И58): повисшие вопросы и несдвинувшиеся задачи серии.
+        "unanswered": unanswered,
+        "carried_stale": carried_stale,
         # Коэффициент распознавания: секунд обработки на секунду записи.
         "transcribe_ratio": (round(sum(tr_secs) / secs, 2)
                              if tr_secs and secs else None),
+    }
+
+
+def _cores_share() -> float:
+    """Доля ядер сервера, которую занимает распознавание (VTX_CPU_THREADS)."""
+    import os
+    from . import config
+    total = os.cpu_count() or config.CPU_THREADS or 1
+    return max(0.0, min(1.0, config.CPU_THREADS / total))
+
+
+def economics(rows: list[dict], mrows: list[dict], all_ev: list[dict],
+              cfg: dict | None = None) -> dict:
+    """Себестоимость встреч и команды (docs/ТЗ-МЕТРИКИ.md §7, И27—И35).
+
+    Единица — ВСТРЕЧА, прошедшая распознавание (строка kind=job). К ней
+    относятся: вызовы модели с её job_id (включая пересборки — иначе маржа
+    выглядит лучше реальности ровно у тех, кто пересобирает чаще), распознавание
+    (машино-час × доля ядер × секунды) и запись (час слота × длительность —
+    браузер и ffmpeg держат ресурсы всю встречу, включая тишину).
+
+    ⚠️ Каждый компонент считается ТОЛЬКО при заданной цене; встреча получает
+    итог, только если известны все её компоненты. Частичная себестоимость
+    выглядит как полная и врёт в сторону «дёшево» — самую опасную для тарифа.
+    ⚠️ Никаких средних: медиана и 90-й перцентиль (И29).
+    """
+    cfg = cfg or {}
+    cores = _cores_share()
+
+    # Вызовы модели по встречам — из событий, где записаны цена на момент
+    # вызова, чей ключ и была ли это пересборка.
+    llm_by_job: dict[str, dict] = {}
+    for e in all_ev:
+        if e.get("kind") != events.LLM_CALL or not e.get("job_id"):
+            continue
+        x = _as_dict(e.get("extra"))
+        d = llm_by_job.setdefault(e["job_id"], {"service": 0.0, "team": 0.0,
+                                                 "rerun": 0.0, "unpriced": 0,
+                                                 "calls": 0})
+        d["calls"] += 1
+        if x.get("usd") is None:
+            d["unpriced"] += 1
+            continue
+        usd = float(x["usd"])
+        if x.get("key") == usage.TEAM_KEY:
+            d["team"] += usd          # платит клиент своим ключом (И34)
+        else:
+            d["service"] += usd
+            if x.get("rerun"):
+                d["rerun"] += usd
+
+    rec_by_job = {r["job_id"]: r for r in mrows if r.get("job_id")}
+    unlinked_rec_sec = sum(float(r.get("duration_sec") or 0) for r in mrows
+                           if r.get("status") == "recorded" and not r.get("job_id"))
+
+    per_meeting: list[float] = []
+    per_minute: list[float] = []
+    tot = {"llm": 0.0, "recog": 0.0, "record": 0.0, "team_key": 0.0, "rerun": 0.0}
+    priced = 0
+    minutes_total = 0.0
+    for r in rows:
+        secs = float(r.get("duration_sec") or 0)
+        minutes_total += secs / 60
+        jid = r.get("id")
+        llm = llm_by_job.get(jid)
+        # Старые строки без событий: расход задачи считаем ключом сервиса.
+        if llm is None:
+            llm_usd = r.get("usd")
+            llm_known = llm_usd is not None
+            llm_usd = float(llm_usd or 0)
+            team_usd = rerun_usd = 0.0
+        else:
+            llm_known = llm["unpriced"] == 0
+            llm_usd, team_usd, rerun_usd = llm["service"], llm["team"], llm["rerun"]
+        recog = None
+        if COST_CPU_HOUR_USD is not None and r.get("transcribe_sec") is not None:
+            recog = float(r["transcribe_sec"]) / 3600 * COST_CPU_HOUR_USD * cores
+        record = None
+        if COST_SLOT_HOUR_USD is not None:
+            mr = rec_by_job.get(jid)
+            rec_sec = float((mr or {}).get("duration_sec") or 0) if mr else secs
+            record = rec_sec / 3600 * COST_SLOT_HOUR_USD
+        tot["team_key"] += team_usd
+        tot["rerun"] += rerun_usd
+        if not (llm_known and recog is not None and record is not None):
+            continue
+        cost = llm_usd + recog + record
+        tot["llm"] += llm_usd
+        tot["recog"] += recog
+        tot["record"] += record
+        priced += 1
+        per_meeting.append(cost)
+        if secs > 0:
+            per_minute.append(cost / (secs / 60))
+    if COST_SLOT_HOUR_USD is not None and unlinked_rec_sec:
+        # Записи без распознавания тоже стоили слота — в итог, но не в «на встречу».
+        tot["record"] += unlinked_rec_sec / 3600 * COST_SLOT_HOUR_USD
+    total = tot["llm"] + tot["recog"] + tot["record"]
+    priced_minutes = sum(float(r.get("duration_sec") or 0) / 60 for r in rows) if priced == len(rows) else None
+
+    # И32: три объяснения к «съедает маржу».
+    durs = [float(r.get("duration_sec") or 0) for r in rows if r.get("duration_sec")]
+    long_minutes = sum(d for d in durs if d > LONG_MEETING_SEC) / 60
+    recorded = [r for r in mrows if r.get("status") == "recorded"]
+    silent = sum(1 for r in recorded if r.get("silent"))
+
+    # И28/И31/И35: команда, подписка, безубыточность.
+    sub_rub = cfg.get("subscription_rub")
+    support_h = float(cfg.get("support_hours_month") or 0)
+    team_cost_usd = (support_h * SUPPORT_HOUR_RUB / USD_RUB
+                     if support_h and SUPPORT_HOUR_RUB and USD_RUB else
+                     (0.0 if not support_h else None))
+    sub_usd = (float(sub_rub) / USD_RUB if sub_rub and USD_RUB else None)
+    cost_per_hour = (60 * _median(per_minute)) if per_minute else None
+    cost_to_price = breakeven_hours = None
+    if sub_usd and team_cost_usd is not None and priced == len(rows) and rows:
+        cost_to_price = round((total + team_cost_usd) / sub_usd, 3)
+    if sub_usd and team_cost_usd is not None and cost_per_hour:
+        breakeven_hours = round(max(0.0, sub_usd - team_cost_usd) / cost_per_hour, 1)
+
+    missing = [n for n, v in (("VTX_COST_CPU_HOUR_USD", COST_CPU_HOUR_USD),
+                              ("VTX_COST_SLOT_HOUR_USD", COST_SLOT_HOUR_USD),
+                              ("VTX_USD_RUB", USD_RUB)) if v is None]
+    return {
+        "cost_total_usd": round(total, 4) if priced else None,
+        "cost_llm_usd": round(tot["llm"], 4) if priced else None,
+        "cost_recog_usd": round(tot["recog"], 4) if priced else None,
+        "cost_record_usd": round(tot["record"], 4) if priced else None,
+        # Вызовы на ключе клиента: для владельца ноль, но знать их надо (И34).
+        "cost_client_key_usd": round(tot["team_key"], 4),
+        # Доля себестоимости, ушедшей на пересборки и повторы (И32).
+        "rerun_cost_share": (round(tot["rerun"] / tot["llm"], 3)
+                             if tot["llm"] else None),
+        "priced_meetings": priced,
+        "cost_median_usd": (round(_median(per_meeting), 4) if per_meeting else None),
+        "cost_p90_usd": (round(_pct(per_meeting, 0.9), 4) if per_meeting else None),
+        # И30: почти вся себестоимость линейна по минутам, а не по встречам.
+        # Отсюда следствие: тариф «за встречу» — мина; продавать часы.
+        "cost_per_minute_usd": (round(_median(per_minute), 5) if per_minute else None),
+        "cost_per_hour_usd": (round(cost_per_hour, 4) if cost_per_hour else None),
+        "long_minutes_share": (round(long_minutes / (sum(durs) / 60), 3)
+                               if durs and sum(durs) else None),
+        "duration_p95_min": (round(_pct(durs, 0.95) / 60) if durs else None),
+        "silent_share": (round(silent / len(recorded), 3) if recorded else None),
+        "silent_meetings": silent,
+        "subscription_rub": sub_rub,
+        "support_hours_month": support_h or None,
+        "team_cost_usd": (round(team_cost_usd, 2) if team_cost_usd else team_cost_usd),
+        # И31: больше 0,3 — наблюдение, 0,5 — разговор о тарифе, 1,0 — убыток.
+        "cost_to_price": cost_to_price,
+        # И35: сколько часов встреч команда может провести за месяц, пока
+        # тариф не ушёл в минус. Знать ДО продажи и зашивать в тариф.
+        "breakeven_hours": breakeven_hours,
+        "cost_missing": missing,
+        "priced_minutes": (round(priced_minutes) if priced_minutes is not None else None),
     }
 
 
@@ -561,3 +773,142 @@ def _norm_title(t: str) -> str:
         if t.lower().endswith(ext):
             t = t[: -len(ext)]
     return t.strip(" .") or "—"
+
+
+# --------------------------------------------------------------------------- #
+# Отчёты (docs/ТЗ-МЕТРИКИ.md §11)
+# --------------------------------------------------------------------------- #
+def _n(v, digits: int = 0):
+    """Число для текста отчёта; None — прочерк, а не ноль."""
+    if v is None:
+        return "—"
+    return f"{v:.{digits}f}".replace(".", ",") if digits else str(int(round(v)))
+
+
+def _pct_text(ratio, base: int | None = None) -> str:
+    """Доля словами. ⚠️ При знаменателе меньше 20 процент не показываем (§9):
+    вместо «отток 9 %» — «один из одиннадцати»."""
+    if ratio is None:
+        return "мало данных" if (base or 0) < _MIN_DENOM else "—"
+    return f"{round(ratio * 100)} %"
+
+
+def client_report(user: str, days: int = 30) -> dict:
+    """Отчёт клиенту, одна страница (И58).
+
+    Что здесь ЕСТЬ: обработано встреч и часов, решений и задач, задач ушло в
+    трекер, сэкономленное время С ФОРМУЛОЙ, надёжность человеческим языком и
+    «укол в процесс» — самая полезная и самая неудобная часть.
+
+    Чего здесь НЕТ и не будет (И59): себестоимости, движков и токенов (кроме
+    факта «черновик»), сравнения с другими клиентами и любой персональной
+    активности сотрудников — только числа по команде.
+    """
+    st = summary(user, days=days)
+    lines: list[str] = []
+    lines.append(f"Отчёт за {days} дн.")
+    lines.append(f"Обработано встреч: {st['meetings']}, часов записи: {_n(st['hours'], 1)}.")
+    lines.append(f"Зафиксировано решений: {st['decisions']}, задач: {st['tasks']}"
+                 + (f", из них с ответственным: {st['tasks_with_owner']}"
+                    if st["tasks_with_owner"] else "") + ".")
+    if st.get("protocols_acted"):
+        lines.append(f"Протоколов, по которым что-то сделали (правка, выгрузка, вопрос, "
+                     f"задача в трекер): {st['protocols_acted']} из {st['protocols_built']}.")
+    # Сэкономленное время — с явной формулой, никогда как измерение (И58, §10).
+    lines.append(f"Сэкономлено на ведении протоколов: около {_n(st['hours_saved'], 1)} ч "
+                 f"(оценка: {_n(st['hours'], 1)} ч встреч × {st['saved_coeff']} — столько "
+                 "обычно уходит на ручной протокол; это не замер).")
+    # Надёжность — человеческим языком: «пришли на 41 из 41».
+    if st.get("planned"):
+        came = st["recorded"]
+        due = st["attendance_base"]
+        rel = f"Бот пришёл на {came} {_plural(came, 'встречу', 'встречи', 'встреч')} из {due}"
+        if st.get("late_joins"):
+            rel += f", на {st['late_joins']} — с опозданием"
+        if st.get("missed"):
+            rel += f", {st['missed']} пропущено"
+        if st.get("join_failed"):
+            rel += f", на {st['join_failed']} не пустили"
+        lines.append(rel + ".")
+    if st.get("drafts"):
+        lines.append(f"Протоколов-черновиков (собраны запасным движком): {st['drafts']}.")
+    if st.get("protocol_failed"):
+        lines.append(f"Не собралось протоколов: {st['protocol_failed']}.")
+    # Укол в процесс.
+    prick = []
+    if st["tasks"] and st.get("tasks_with_owner") is not None:
+        no_owner = st["tasks"] - st["tasks_with_owner"]
+        if no_owner > 0:
+            prick.append(f"задач без ответственного — {no_owner}")
+    if st.get("unanswered"):
+        prick.append(f"вопросов повисло без ответа — {st['unanswered']}")
+    if st.get("carried_stale"):
+        prick.append(f"задач прошлых встреч, о которых не вспомнили, — {st['carried_stale']}")
+    if prick:
+        lines.append("На что стоит посмотреть: " + "; ".join(prick) + ".")
+    return {"days": days, "text": "\n".join(lines), "lines": lines,
+            "meetings": st["meetings"], "hours": st["hours"],
+            "decisions": st["decisions"], "tasks": st["tasks"],
+            "tasks_with_owner": st["tasks_with_owner"],
+            "unanswered": st.get("unanswered"), "carried_stale": st.get("carried_stale"),
+            "protocols_acted": st.get("protocols_acted"),
+            "recorded": st.get("recorded"), "attendance_base": st.get("attendance_base"),
+            "drafts": st.get("drafts"), "hours_saved": st["hours_saved"]}
+
+
+def _plural(n: int, one: str, few: str, many: str) -> str:
+    n = abs(int(n))
+    if 11 <= n % 100 <= 19:
+        return many
+    return one if n % 10 == 1 else few if 2 <= n % 10 <= 4 else many
+
+
+# Спящая платящая команда (И48): бот работает, протоколы собираются, а люди их
+# не открывают уже столько дней. Это не число для дашборда, а список на неделю.
+SLEEP_DAYS = int(__import__("os").getenv("VTX_SLEEP_DAYS", "14"))
+
+
+def owner_report(days: int = 7) -> dict:
+    """Еженедельная таблица владельца сервиса по всем командам (И56).
+
+    Строка на команду: чтение, действия, себестоимость, инциденты, черновики,
+    пересборки успешных протоколов; отдельно — спящие платящие (И48).
+    ⚠️ Только для основателя сервера: здесь видны все команды разом.
+    """
+    from .automation import settings as auto_settings
+    teams = []
+    sleeping = []
+    for team in security.list_teams():
+        st = summary(team, days=days)
+        try:
+            cfg = auto_settings.load(team)
+        except Exception:   # noqa: BLE001
+            cfg = {}
+        paying = bool(cfg.get("subscription_rub"))
+        row = {
+            "team": team,
+            "paying": paying,
+            "meetings": st["meetings"],
+            "protocols_built": st["protocols_built"],
+            "protocols_read": st["protocols_read"],
+            "read_ratio": st["read_ratio"],
+            "protocols_acted": st["protocols_acted"],
+            "cost_total_usd": st["econ_cost_total_usd"],
+            "cost_to_price": st["econ_cost_to_price"],
+            "drafts": st["drafts"],
+            "incidents": (st["missed"] + st["rec_failed"] + st["upload_failed"]
+                          + st["protocol_failed"]),
+            "lost": st["missed"] + st["rec_failed"],
+            "edited": st["edited"],
+        }
+        teams.append(row)
+        # Спящие: платят, протоколы есть, но за окно никто не открыл ни одного.
+        if paying:
+            recent = summary(team, days=SLEEP_DAYS)
+            if recent["protocols_built"] and not recent["protocols_read"]:
+                sleeping.append({"team": team,
+                                 "protocols_built": recent["protocols_built"],
+                                 "days": SLEEP_DAYS})
+    teams.sort(key=lambda r: (-int(r["paying"]), -(r["cost_total_usd"] or 0)))
+    return {"days": days, "teams": teams, "sleeping": sleeping,
+            "lost_total": sum(r["lost"] for r in teams)}

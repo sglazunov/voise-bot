@@ -459,8 +459,17 @@ def get_provider(name: str | None, keys: dict | None = None) -> LLMProvider:
     resolved = config.resolve_provider(base, keys)
     cls = _PROVIDERS[resolved]
     if resolved == "ollama":
-        return cls(model=model)
+        inst = cls(model=model)
+        inst.key_owner = usage.SERVICE_KEY     # локальный движок — наш сервер
+        return inst
     creds = config.provider_creds(resolved, keys) or [("", "")]
+    # Чей ключ. Команда со своим ключом стоит владельцу сервиса ноль за модель
+    # (И34) — это влияет на тариф, и в расходе такие вызовы помечаются отдельно.
+    # У «своего ключа» в пуле могут лежать и ключ команды, и ключ из .env: пул
+    # помечается ключом команды, если в нём есть хоть один её ключ, — занизить
+    # долю сервиса безопаснее, чем завысить долю клиента.
+    own = [e for e in ((keys or {}).get(resolved) or []) if e.get("key")]
+    key_owner = usage.TEAM_KEY if own else usage.SERVICE_KEY
     if resolved == "custom" and model:
         # Под «своим ключом» лежат подключения к РАЗНЫМ сервисам, и ключ одного
         # к моделям другого отношения не имеет: запрос модели Yandex Cloud с
@@ -470,8 +479,11 @@ def get_provider(name: str | None, keys: dict | None = None) -> LLMProvider:
         creds = _creds_with_model(creds, model) or creds
     if len(creds) == 1:
         k, ex = creds[0]
-        return cls(model=model, api_key=k, extra=ex)
-    return _RotatingProvider(cls, model, creds)
+        inst = cls(model=model, api_key=k, extra=ex)
+    else:
+        inst = _RotatingProvider(cls, model, creds)
+    inst.key_owner = key_owner
+    return inst
 
 
 def _creds_with_model(creds: list[tuple[str, str]], model: str) -> list[tuple[str, str]]:
@@ -737,6 +749,8 @@ class _FallbackChain:
             # движок сейчас пробуют, — чтобы не править каждого провайдера и
             # не забыть нового.
             p = prompt if getattr(b, "cache_aware", False) else cache_strip(prompt)
+            # Чей ключ сейчас платит — знает только цепочка (И34).
+            usage.set_key_owner(getattr(b, "key_owner", None))
             # The caller sized max_tokens for the PRIMARY provider; re-clamp for
             # the one actually being tried, or Groq rejects the request with 413.
             mt = max_tokens
@@ -787,6 +801,7 @@ class _FallbackChain:
         # полное отсутствие протокола после часа распознавания.
         for i, b, mt in tight:
             pt = prompt if getattr(b, "cache_aware", False) else cache_strip(prompt)
+            usage.set_key_owner(getattr(b, "key_owner", None))
             try:
                 out = (b.complete(pt, mt, force_json, should_stop=should_stop)
                        if getattr(b, "accepts_should_stop", False)

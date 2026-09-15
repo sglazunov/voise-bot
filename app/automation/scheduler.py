@@ -69,6 +69,9 @@ class MeetingState:
     # «Явка бота» (docs/ТЗ-МЕТРИКИ.md И36) — это не только «пришёл или нет»:
     # опоздавший на десять минут бот теряет начало, где обычно и ставят задачи.
     join_delay_sec: float | None = None
+    # Были ли периоды без звука. «Пустые минуты» платятся трижды — запись,
+    # распознавание, хранение (И32); раньше признак жил только в логе карточки.
+    audio_warning: bool = False
     do_protocol: bool = False         # whether this meeting also builds a protocol
     record_flag: bool | None = None   # Weeek checkbox «Запись встречи»: True/False/unset
     stop_flag: bool = False           # manual "stop this recording"
@@ -772,6 +775,7 @@ class Scheduler:
             st.stop_reason = res.get("reason") or None
             st.rec_bytes = int(res.get("size") or 0)
             st.recorded_sec = max(0.0, time.time() - rec_started)
+            st.audio_warning = bool(res.get("audio_warning"))
             joined_at = res.get("joined_at")
             if joined_at and st.start is not None:
                 st.join_delay_sec = float(joined_at) - st.start.timestamp()
@@ -871,6 +875,11 @@ class Scheduler:
                     owner=user)
                 st.job_id = job.id
                 snapshots.save(st)  # remember the job across restarts
+                # Строка исхода уже записана до создания задачи — дописываем в
+                # неё job_id: себестоимость ЗАПИСИ (слот, минуты) живёт в строке
+                # встречи, себестоимость модели — в строке задачи, и сложить их
+                # по одной встрече без этой связи нельзя (И27).
+                self._record_outcome(st, "recorded")
                 # Once the protocol (.docx) is built, upload it to the same cloud
                 # and link it in Weeek — in a background waiter so the recording
                 # lock isn't held during transcription.

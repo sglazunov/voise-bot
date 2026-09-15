@@ -52,6 +52,8 @@ EXPECTED = {
     "GET /api/setup/auto",
     "GET /api/setup/deps",
     "GET /api/stats",
+    "GET /api/stats/owner",
+    "GET /api/stats/report",
     "GET /api/system/recommend",
     "PATCH /api/jobs/{job_id}/analysis",
     "POST /api/auth/login",
