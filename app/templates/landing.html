@@ -1,0 +1,407 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MeetFlow — протоколы встреч в Яндекс Телемосте автоматически</title>
+<meta name="description" content="Бот MeetFlow сам приходит на встречу в Яндекс Телемосте, записывает её, расшифровывает и собирает протокол: решения с цитатами и таймкодами, задачи с исполнителями, ответы на вопросы. Word-протокол в Яндекс Диске и ссылка в задаче Weeek. От 200 ₽ за встречу.">
+<meta name="robots" content="index, follow">
+<link rel="canonical" href="{{ site_url }}/">
+<meta property="og:type" content="website">
+<meta property="og:locale" content="ru_RU">
+<meta property="og:site_name" content="MeetFlow">
+<meta property="og:title" content="MeetFlow — протоколы встреч в Яндекс Телемосте автоматически">
+<meta property="og:description" content="Бот записывает встречу в Телемосте, расшифровывает и собирает протокол с решениями, задачами и цитатами. 200 ₽ расшифровка, 300 ₽ с протоколом, 6 000 ₽ в месяц до 50 встреч.">
+<meta property="og:url" content="{{ site_url }}/">
+<meta name="twitter:card" content="summary">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "SoftwareApplication",
+      "name": "MeetFlow",
+      "applicationCategory": "BusinessApplication",
+      "operatingSystem": "Web",
+      "url": "{{ site_url }}/",
+      "description": "Автоматическая запись, расшифровка и протокол встреч в Яндекс Телемосте с публикацией результата в Яндекс Диск и Weeek.",
+      "inLanguage": "ru",
+      "offers": [
+        {"@type": "Offer", "name": "Расшифровка встречи", "price": "200", "priceCurrency": "RUB", "description": "Распознавание одной записи встречи в текст с таймкодами и участниками"},
+        {"@type": "Offer", "name": "Расшифровка и протокол встречи", "price": "300", "priceCurrency": "RUB", "description": "Распознавание одного видео и сборка протокола: решения, задачи, ответы на вопросы, Word-документ"},
+        {"@type": "Offer", "name": "Подписка на месяц", "price": "6000", "priceCurrency": "RUB", "description": "До 50 встреч в месяц с автоматическим приходом бота по расписанию из Weeek"}
+      ]
+    },
+    {
+      "@type": "Organization",
+      "name": "MeetFlow",
+      "url": "{{ site_url }}/",
+      "email": "{{ contact_email }}",
+      "contactPoint": {"@type": "ContactPoint", "email": "{{ contact_email }}", "contactType": "sales", "availableLanguage": "ru"}
+    },
+    {
+      "@type": "FAQPage",
+      "mainEntity": [
+        {"@type": "Question", "name": "Какие встречи умеет записывать бот?", "acceptedAnswer": {"@type": "Answer", "text": "Встречи в Яндекс Телемосте: бот заходит по ссылке как участник с выключенными микрофоном и камерой. Записи других сервисов можно загрузить файлом (mp3, mp4, wav, m4a, ogg) и получить расшифровку и протокол."}},
+        {"@type": "Question", "name": "Нужен ли Weeek?", "acceptedAnswer": {"@type": "Answer", "text": "Нет. С Weeek бот сам берёт расписание встреч и кладёт ссылки на запись и протокол в задачу. Без него встречи запускаются вручную или загружаются файлом."}},
+        {"@type": "Question", "name": "Что входит в протокол?", "acceptedAnswer": {"@type": "Answer", "text": "Участники и роли, краткое содержание, решения с основанием — цитатой из разговора и таймкодом, задачи с исполнителями, что спрашивали и что ответили, оговорки о том, что временно или отключено, задачи прошлой встречи серии и их судьба."}},
+        {"@type": "Question", "name": "Как быстро готов протокол?", "acceptedAnswer": {"@type": "Answer", "text": "Расшифровка обычно занимает меньше времени, чем длилась встреча, сборка протокола — несколько минут. Ссылка появляется в задаче Weeek, документ — в Яндекс Диске."}},
+        {"@type": "Question", "name": "Где хранятся записи?", "acceptedAnswer": {"@type": "Answer", "text": "В вашем Яндекс Диске или Google Drive. На сервере остаются текст и протокол, доступ к ним — только у вашей команды по логину. Ключи и токены зашифрованы."}},
+        {"@type": "Question", "name": "Как оплатить?", "acceptedAnswer": {"@type": "Answer", "text": "Напишите на {{ contact_email }}: подберём тариф, выставим счёт и подключим команду."}}
+      ]
+    }
+  ]
+}
+</script>
+<style>
+  :root {
+    --ground: #F4F7F9;
+    --surface: #FFFFFF;
+    --ink: #0F1B2D;
+    --ink-2: #33475B;
+    --muted: #5F7185;
+    --line: #DCE3EA;
+    --accent: #0E9F8E;
+    --accent-ink: #0B7C6F;
+    --accent-soft: #DDF4F0;
+    --amber: #B96E00;
+    --amber-soft: #FFF1D6;
+    --paper-shadow: 0 24px 60px -30px rgba(15, 27, 45, .35);
+    --sans: "Segoe UI Variable Text", "Segoe UI", -apple-system, BlinkMacSystemFont, Roboto, "Helvetica Neue", Arial, sans-serif;
+    --display: "Segoe UI Variable Display", "Segoe UI", -apple-system, BlinkMacSystemFont, Roboto, "Helvetica Neue", Arial, sans-serif;
+    --mono: ui-monospace, "Cascadia Mono", "JetBrains Mono", Consolas, "Liberation Mono", monospace;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+  body {
+    margin: 0; background: var(--ground); color: var(--ink);
+    font: 16px/1.55 var(--sans); -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent-ink); }
+  a:focus-visible, button:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+  .wrap { width: min(1120px, 100% - 40px); margin-inline: auto; }
+  @media (max-width: 480px) { .wrap { width: calc(100% - 32px); } }
+  h1, h2, h3 { font-family: var(--display); letter-spacing: -.02em; text-wrap: balance; margin: 0; }
+  h1 { font-size: clamp(2rem, 4.6vw, 3.3rem); line-height: 1.08; font-weight: 800; }
+  h2 { font-size: clamp(1.55rem, 3vw, 2.2rem); line-height: 1.15; font-weight: 800; }
+  h3 { font-size: 1.15rem; font-weight: 700; }
+  p { margin: 0; }
+  .lede { font-size: 1.15rem; color: var(--ink-2); max-width: 34em; }
+  .eyebrow { font-size: .78rem; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; color: var(--accent-ink); }
+  .btn {
+    display: inline-flex; align-items: center; gap: .5rem; padding: .8rem 1.25rem; border-radius: 10px;
+    font-weight: 700; text-decoration: none; border: 1.5px solid transparent; white-space: nowrap;
+  }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-primary:hover { background: var(--accent-ink); }
+  .btn-ghost { background: transparent; color: var(--ink); border-color: var(--line); }
+  .btn-ghost:hover { border-color: var(--ink-2); }
+
+  /* шапка */
+  header.top { position: sticky; top: 0; z-index: 10; background: rgba(244,247,249,.92); backdrop-filter: blur(8px); border-bottom: 1px solid var(--line); }
+  .nav { display: flex; align-items: center; gap: 1.5rem; padding-block: .9rem; }
+  .logo { font-family: var(--display); font-weight: 800; font-size: 1.25rem; letter-spacing: -.02em; color: var(--ink); text-decoration: none; display: inline-flex; align-items: center; gap: .5rem; }
+  .logo i { width: 12px; height: 12px; border-radius: 3px; background: var(--accent); display: inline-block; transform: rotate(45deg); }
+  .nav-links { display: flex; gap: 1.25rem; margin-inline: auto; }
+  .nav-links a { color: var(--ink-2); text-decoration: none; font-weight: 600; }
+  .nav-links a:hover { color: var(--ink); }
+  .nav-cta { display: flex; gap: .6rem; }
+  @media (max-width: 760px) { .nav-links { display: none; } .nav-cta .btn-ghost { display: none; } }
+
+  /* герой */
+  .hero { display: grid; grid-template-columns: 1.05fr .95fr; gap: 3rem; align-items: center; padding-block: 4.5rem 3.5rem; }
+  .hero-text { display: grid; gap: 1.4rem; }
+  .cta-row { display: flex; flex-wrap: wrap; gap: .75rem; align-items: center; }
+  .cta-note { color: var(--muted); font-size: .92rem; }
+  @media (max-width: 900px) { .hero { grid-template-columns: 1fr; padding-block: 3rem 2.5rem; } }
+
+  /* карточка протокола — фактура продукта */
+  .proto { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--paper-shadow); overflow: hidden; font-size: .92rem; }
+  .proto-head { display: flex; justify-content: space-between; gap: 1rem; padding: .85rem 1.1rem; border-bottom: 1px solid var(--line); background: #F8FAFB; }
+  .proto-head b { font-family: var(--display); }
+  .proto-head span { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .proto-body { padding: .6rem 1.1rem 1rem; display: grid; gap: .9rem; }
+  .proto h4 { margin: .5rem 0 .3rem; font-size: .78rem; letter-spacing: .1em; text-transform: uppercase; color: var(--accent-ink); }
+  .proto ul { list-style: none; margin: 0; padding: 0; display: grid; gap: .55rem; }
+  .proto li { padding-left: 1rem; position: relative; }
+  .proto li::before { content: ""; position: absolute; left: 0; top: .6em; width: 5px; height: 5px; border-radius: 50%; background: var(--ink-2); }
+  .ev { display: block; margin-top: .15rem; color: var(--muted); font-size: .85rem; }
+  .ev .t { font-family: var(--mono); font-variant-numeric: tabular-nums; color: var(--accent-ink); font-weight: 600; }
+  .who { display: inline-block; margin-left: .35rem; padding: .05rem .5rem; border-radius: 999px; background: var(--accent-soft); color: var(--accent-ink); font-weight: 600; font-size: .8rem; }
+  .flag { display: inline-block; margin-left: .35rem; padding: .05rem .5rem; border-radius: 999px; background: var(--amber-soft); color: var(--amber); font-weight: 600; font-size: .8rem; }
+
+  /* секции */
+  section { padding-block: 3.5rem; }
+  section + section { border-top: 1px solid var(--line); }
+  .sec-head { display: grid; gap: .6rem; max-width: 40em; margin-bottom: 2rem; }
+  .steps { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1.25rem; counter-reset: step; }
+  .step { display: grid; gap: .5rem; padding-top: 1rem; border-top: 3px solid var(--accent); }
+  .step::before { counter-increment: step; content: counter(step, decimal-leading-zero); font-family: var(--mono); color: var(--accent-ink); font-weight: 700; font-size: .85rem; }
+  .step p { color: var(--ink-2); }
+  @media (max-width: 900px) { .steps { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 520px) { .steps { grid-template-columns: 1fr; } }
+
+  .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.25rem; }
+  @media (max-width: 900px) { .grid3 { grid-template-columns: 1fr; } }
+  .feat { display: grid; gap: .4rem; }
+  .feat p { color: var(--ink-2); }
+
+  /* цены */
+  .prices { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.25rem; align-items: stretch; }
+  @media (max-width: 900px) { .prices { grid-template-columns: 1fr; } }
+  .price { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 1.5rem; display: grid; gap: .9rem; align-content: start; }
+  .price.best { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .price .badge { justify-self: start; font-size: .75rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--accent-ink); background: var(--accent-soft); padding: .2rem .6rem; border-radius: 999px; }
+  .amount { font-family: var(--display); font-size: 2.4rem; font-weight: 800; letter-spacing: -.03em; line-height: 1; font-variant-numeric: tabular-nums; }
+  .amount small { font-size: 1rem; font-weight: 600; color: var(--muted); letter-spacing: 0; margin-left: .3rem; }
+  .price ul { margin: 0; padding-left: 1.1rem; color: var(--ink-2); display: grid; gap: .35rem; }
+  .price .per { color: var(--muted); font-size: .9rem; }
+  .price .btn { justify-self: start; margin-top: auto; }
+
+  /* безопасность */
+  .safe { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1.25rem 2.5rem; }
+  @media (max-width: 760px) { .safe { grid-template-columns: 1fr; } }
+  .safe div { display: grid; gap: .3rem; }
+  .safe p { color: var(--ink-2); }
+
+  /* вопросы */
+  .faq { display: grid; gap: .25rem; max-width: 46em; }
+  details { border-top: 1px solid var(--line); padding-block: .9rem; }
+  details:last-child { border-bottom: 1px solid var(--line); }
+  summary { cursor: pointer; font-weight: 700; list-style: none; display: flex; justify-content: space-between; gap: 1rem; }
+  summary::-webkit-details-marker { display: none; }
+  summary::after { content: "+"; color: var(--accent-ink); font-weight: 800; }
+  details[open] summary::after { content: "–"; }
+  details p { margin-top: .6rem; color: var(--ink-2); max-width: 40em; }
+
+  /* контакт */
+  .contact { background: var(--ink); color: #E8EEF4; border-radius: 18px; padding: 2.5rem; display: grid; grid-template-columns: 1.2fr .8fr; gap: 2rem; align-items: center; }
+  .contact h2 { color: #fff; }
+  .contact p { color: #B9C6D3; }
+  .contact a.mail { font-family: var(--display); font-size: clamp(1.2rem, 2.6vw, 1.7rem); font-weight: 800; color: #fff; text-decoration: none; word-break: break-all; }
+  .contact a.mail:hover { color: var(--accent-soft); }
+  .contact .btn-primary { justify-self: start; }
+  @media (max-width: 760px) { .contact { grid-template-columns: 1fr; padding: 1.75rem; } }
+
+  footer { padding-block: 2rem 3rem; color: var(--muted); font-size: .9rem; display: flex; flex-wrap: wrap; gap: 1rem 2rem; justify-content: space-between; }
+  footer a { color: var(--muted); }
+</style>
+{% if metrika_id %}
+<!-- Yandex.Metrika counter -->
+<script type="text/javascript">
+(function(m,e,t,r,i,k,a){m[i]=m[i]||function(){(m[i].a=m[i].a||[]).push(arguments)};
+m[i].l=1*new Date();
+for (var j = 0; j < document.scripts.length; j++) {if (document.scripts[j].src === r) { return; }}
+k=e.createElement(t),a=e.getElementsByTagName(t)[0],k.async=1,k.src=r,a.parentNode.insertBefore(k,a)})
+(window, document, "script", "https://mc.yandex.ru/metrika/tag.js", "ym");
+ym({{ metrika_id }}, "init", {clickmap:true, trackLinks:true, accurateTrackBounce:true});
+</script>
+<noscript><div><img src="https://mc.yandex.ru/watch/{{ metrika_id }}" style="position:absolute; left:-9999px;" alt=""></div></noscript>
+<!-- /Yandex.Metrika counter -->
+{% endif %}
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap nav">
+    <a class="logo" href="/"><i></i>MeetFlow</a>
+    <nav class="nav-links" aria-label="Разделы">
+      <a href="#how">Как работает</a>
+      <a href="#protocol">Что в протоколе</a>
+      <a href="#prices">Цены</a>
+      <a href="#faq">Вопросы</a>
+    </nav>
+    <div class="nav-cta">
+      <a class="btn btn-ghost" href="/login">Войти</a>
+      <a class="btn btn-primary" href="/register">Попробовать</a>
+    </div>
+  </div>
+</header>
+
+<main>
+  <section class="wrap hero">
+    <div class="hero-text">
+      <span class="eyebrow">Яндекс Телемост · Weeek · Яндекс Диск</span>
+      <h1>Протокол встречи готов к тому моменту, когда все разошлись</h1>
+      <p class="lede">Бот MeetFlow сам приходит на встречу в Телемосте по расписанию из Weeek, записывает её, расшифровывает и собирает протокол: решения с цитатами и таймкодами, задачи с исполнителями, ответы на заданные вопросы. Word-документ ложится в Яндекс Диск, ссылка — в задачу.</p>
+      <div class="cta-row">
+        <a class="btn btn-primary" href="/register">Попробовать на своей встрече</a>
+        <a class="btn btn-ghost" href="mailto:{{ contact_email }}?subject=MeetFlow">Написать нам</a>
+      </div>
+      <p class="cta-note">Расшифровка встречи — 200 ₽, с протоколом — 300 ₽, подписка — 6 000 ₽ в месяц до 50 встреч.</p>
+    </div>
+
+    <aside class="proto" aria-label="Пример протокола">
+      <div class="proto-head"><b>Протокол · Проектная встреча CRM</b><span>68 мин · 5 участников</span></div>
+      <div class="proto-body">
+        <div>
+          <h4>Решения</h4>
+          <ul>
+            <li>Логирование в прототипе не делать: система на одного пользователя
+              <span class="ev">основание · <span class="t">21:04</span> «логирование сейчас не нужно, это прототип на одного»</span></li>
+            <li>Справочник мастерских обновлять вручную раз в год, интеграцию не строить
+              <span class="ev">основание · <span class="t">37:12</span> «раз в год руками, это дешевле любой интеграции»</span></li>
+          </ul>
+        </div>
+        <div>
+          <h4>Задачи</h4>
+          <ul>
+            <li>Собрать хук по галочке «Пробный день»<span class="who">Константин</span>
+              <span class="ev">срок · до пятницы · <span class="t">14:40</span></span></li>
+            <li>Проверить ролевой доступ на тестовом стенде<span class="who">Игорь</span></li>
+            <li>Найти документ по модулю интеграции<span class="flag">без исполнителя</span></li>
+          </ul>
+        </div>
+        <div>
+          <h4>Что спрашивали и что ответили</h4>
+          <ul>
+            <li>Баг с ролями починили? — не сделано, остаётся в спринте <span class="ev"><span class="t">34:57</span></span></li>
+          </ul>
+        </div>
+        <div>
+          <h4>Оговорки</h4>
+          <ul>
+            <li>Конфиги пока в JSON, на проде будет база<span class="flag">временно</span></li>
+          </ul>
+        </div>
+      </div>
+    </aside>
+  </section>
+
+  <section id="how">
+    <div class="wrap">
+      <div class="sec-head">
+        <span class="eyebrow">Как работает</span>
+        <h2>Четыре шага без участия человека</h2>
+        <p class="lede">Ничего не нужно нажимать во время встречи. Бот работает по расписанию, а результат появляется там, где команда его ищет.</p>
+      </div>
+      <div class="steps">
+        <div class="step"><h3>Берёт встречу из Weeek</h3><p>Ссылка на Телемост и время — из задачи в вашем воркспейсе. Без Weeek встречу можно запустить вручную или загрузить запись файлом.</p></div>
+        <div class="step"><h3>Приходит и записывает</h3><p>Заходит как участник с выключенными микрофоном и камерой, пишет звук и экран, уходит, когда встреча закончилась. Остановить можно кнопкой или стоп-словом в чате.</p></div>
+        <div class="step"><h3>Расшифровывает</h3><p>Речь становится текстом с таймкодами и именами говорящих: кто говорил, читается прямо с плиток Телемоста. Ваш глоссарий терминов учитывается.</p></div>
+        <div class="step"><h3>Собирает протокол</h3><p>Решения, задачи, ответы и оговорки — каждый пункт с цитатой из разговора. Word-документ в Яндекс Диске, ссылки в задаче Weeek, задачи можно завести в трекер одной кнопкой.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="protocol">
+    <div class="wrap">
+      <div class="sec-head">
+        <span class="eyebrow">Что в протоколе</span>
+        <h2>Не пересказ повестки, а то, что решили и кто что делает</h2>
+        <p class="lede">Каждый пункт опирается на реплику из расшифровки. Пункт без опоры помечается как требующий проверки, а не выдаётся за факт.</p>
+      </div>
+      <div class="grid3">
+        <div class="feat"><h3>Решения с основанием</h3><p>К каждому решению — цитата и время в записи. Открыли документ, нажали на таймкод, услышали, как это прозвучало.</p></div>
+        <div class="feat"><h3>Задачи с исполнителем</h3><p>Исполнитель берётся из обращения в реплике («Паша, собери…»), а не угадывается. Задачи без ответственного вынесены отдельно: назначьте, пока не забылось.</p></div>
+        <div class="feat"><h3>Что спрашивали и что ответили</h3><p>«Документ нашли?», «баг починили?» — ответ записан статусом: сделано, в работе, не сделано, без ответа.</p></div>
+        <div class="feat"><h3>Оговорки</h3><p>«Пока в JSON», «временно отключил», «это заглушка» — факты о состоянии системы, которые обычно теряются в пересказе демо.</p></div>
+        <div class="feat"><h3>Память серии</h3><p>Для повторяющихся встреч протокол сверяется с прошлой: какие задачи закрыты, какие висят, о каких забыли.</p></div>
+        <div class="feat"><h3>Контекст команды</h3><p>Проекты, роли и термины вашей команды подмешиваются в каждую сборку, поэтому бот не путает людей и продукты.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="prices">
+    <div class="wrap">
+      <div class="sec-head">
+        <span class="eyebrow">Цены</span>
+        <h2>Платите за встречи, а не за рабочие места</h2>
+        <p class="lede">Все тарифы без ограничений по числу участников команды. Оплата по счёту.</p>
+      </div>
+      <div class="prices">
+        <div class="price">
+          <span class="badge">Разово</span>
+          <h3>Расшифровка встречи</h3>
+          <div class="amount">200 ₽<small>за встречу</small></div>
+          <p class="per">Распознавание одной записи в текст</p>
+          <ul>
+            <li>Текст с таймкодами и говорящими</li>
+            <li>Загрузка записи файлом или бот на встрече</li>
+            <li>Скачивание в TXT и Word</li>
+          </ul>
+          <a class="btn btn-ghost" href="mailto:{{ contact_email }}?subject=MeetFlow%3A%20расшифровка%20встречи">Заказать расшифровку</a>
+        </div>
+        <div class="price">
+          <span class="badge">Разово</span>
+          <h3>Расшифровка и протокол</h3>
+          <div class="amount">300 ₽<small>за встречу</small></div>
+          <p class="per">Распознавание одного видео и сборка протокола</p>
+          <ul>
+            <li>Всё из расшифровки</li>
+            <li>Решения, задачи, ответы и оговорки с цитатами</li>
+            <li>Word-протокол, вопрос по встрече, пересборка</li>
+          </ul>
+          <a class="btn btn-ghost" href="mailto:{{ contact_email }}?subject=MeetFlow%3A%20протокол%20встречи">Заказать протокол</a>
+        </div>
+        <div class="price best">
+          <span class="badge">Для команды</span>
+          <h3>Подписка на месяц</h3>
+          <div class="amount">6 000 ₽<small>в месяц</small></div>
+          <p class="per">До 50 встреч в месяц — 120 ₽ за встречу</p>
+          <ul>
+            <li>Бот приходит сам по расписанию из Weeek</li>
+            <li>Протоколы в Яндекс Диске, ссылки в задачах</li>
+            <li>Память серий встреч и контекст команды</li>
+            <li>Задачи из протокола в Weeek одной кнопкой</li>
+          </ul>
+          <a class="btn btn-primary" href="mailto:{{ contact_email }}?subject=MeetFlow%3A%20подписка">Подключить команду</a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="safety">
+    <div class="wrap">
+      <div class="sec-head">
+        <span class="eyebrow">Безопасность</span>
+        <h2>Записи у вас, доступ только у вашей команды</h2>
+      </div>
+      <div class="safe">
+        <div><h3>Ваше хранилище</h3><p>Записи встреч уезжают в ваш Яндекс Диск или Google Drive. На сервере остаются текст и протокол.</p></div>
+        <div><h3>Вход по логину</h3><p>Весь сервис закрыт паролем, данные команд изолированы друг от друга. Приглашение в команду — по коду.</p></div>
+        <div><h3>Секреты зашифрованы</h3><p>Токены Weeek, ключи облаков и моделей хранятся в зашифрованном виде и наружу не отдаются даже владельцу.</p></div>
+        <div><h3>Свой ключ модели</h3><p>Протокол собирают облачные модели: Gemini, GigaChat, DeepSeek через Yandex Cloud или ваш собственный ключ. Секреты с экрана маскируются до отправки.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="faq">
+    <div class="wrap">
+      <div class="sec-head">
+        <span class="eyebrow">Вопросы</span>
+        <h2>Что спрашивают перед подключением</h2>
+      </div>
+      <div class="faq">
+        <details><summary>Какие встречи умеет записывать бот?</summary><p>Встречи в Яндекс Телемосте: бот заходит по ссылке как участник с выключенными микрофоном и камерой. Записи других сервисов можно загрузить файлом (mp3, mp4, wav, m4a, ogg) и получить расшифровку и протокол.</p></details>
+        <details><summary>Нужен ли Weeek?</summary><p>Нет. С Weeek бот сам берёт расписание встреч и кладёт ссылки на запись и протокол в задачу. Без него встречи запускаются вручную или загружаются файлом.</p></details>
+        <details><summary>Что входит в протокол?</summary><p>Участники и роли, краткое содержание, решения с основанием — цитатой из разговора и таймкодом, задачи с исполнителями, что спрашивали и что ответили, оговорки о том, что временно или отключено, задачи прошлой встречи серии и их судьба.</p></details>
+        <details><summary>Как быстро готов протокол?</summary><p>Расшифровка обычно занимает меньше времени, чем длилась встреча, сборка протокола — несколько минут. Ссылка появляется в задаче Weeek, документ — в Яндекс Диске.</p></details>
+        <details><summary>Где хранятся записи?</summary><p>В вашем Яндекс Диске или Google Drive. На сервере остаются текст и протокол, доступ к ним — только у вашей команды по логину. Ключи и токены зашифрованы.</p></details>
+        <details><summary>Как оплатить?</summary><p>Напишите на <a href="mailto:{{ contact_email }}">{{ contact_email }}</a>: подберём тариф, выставим счёт и подключим команду.</p></details>
+      </div>
+    </div>
+  </section>
+
+  <section id="contact">
+    <div class="wrap contact">
+      <div>
+        <h2>Пришлите запись одной встречи — вернём протокол</h2>
+        <p>Так проще всего понять, подходит ли формат вашей команде. Ответим в рабочий день.</p>
+      </div>
+      <div style="display:grid; gap:1rem;">
+        <a class="mail" href="mailto:{{ contact_email }}?subject=MeetFlow%3A%20пробная%20встреча">{{ contact_email }}</a>
+        <a class="btn btn-primary" href="/register">Зарегистрироваться</a>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="wrap">
+  <span>MeetFlow · протоколы встреч в Яндекс Телемосте</span>
+  <span><a href="mailto:{{ contact_email }}">{{ contact_email }}</a> · <a href="/login">Вход</a> · <a href="/register">Регистрация</a></span>
+</footer>
+
+</body>
+</html>

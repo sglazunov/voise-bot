@@ -23,7 +23,8 @@ class TestGate:
         assert client.get("/api/jobs").status_code == 401
 
     def test_html_redirects_to_login(self, client):
-        r = client.get("/", follow_redirects=False)
+        # Корень с 15.09 публичный (лендинг); закрыты остальные страницы SPA.
+        r = client.get("/settings", follow_redirects=False)
         assert r.status_code == 303
         assert r.headers["location"] == "/login"
 
