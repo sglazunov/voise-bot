@@ -483,13 +483,30 @@ class GigaChatProvider(_KeyProviderMixin):
         text, finish = text_of(out)
         if not text:
             raise RuntimeError(f"{self.name}: модель вернула пустой ответ.")
+        got = (u or {}).get("candidatesTokenCount", "?")
         if finish == "length":
             # Ответ обрезан: либо наш max_tokens мал, либо у Сбера свой потолок
             # на выход ниже запрошенного. Наверху это выглядит как «оборванный
             # JSON» — без этой строки не понять, чей лимит сработал.
             _LOG.warning("%s/%s: ответ обрезан по лимиту (finish_reason=length): "
                          "запрошено %d, выдано %s ток.", self.name, self.model,
-                         max_tokens, (u or {}).get("candidatesTokenCount", "?"))
+                         max_tokens, got)
+        elif finish in ("blacklist", "error"):
+            # У Сбера свой цензурный фильтр: при «неподходящей теме» генерация
+            # ОБРЫВАЕТСЯ посреди ответа (finish_reason=blacklist). Первая боевая
+            # встреча на Ultra (CRM 15.09) дважды оборвалась на разной длине —
+            # 5653 и 5135 токенов при запрошенных 10 000 — ровно так. Повторять
+            # тот же запрос бесполезно, «покороче» не поможет: отдаём внятную
+            # ошибку, и цепочка сводит на следующем движке. Обрезок наверх не
+            # отдаём — он выглядел бы как «оборван по лимиту».
+            raise RuntimeError(
+                f"{self.name}/{self.model}: ответ остановлен на стороне Сбера "
+                f"(finish_reason={finish}, выдано {got} ток.)"
+                + (" — сработал фильтр тематики GigaChat; этим движком встреча "
+                   "не сводится" if finish == "blacklist" else ""))
+        elif finish and finish != "stop":
+            _LOG.info("%s/%s: finish_reason=%s, выдано %s ток.",
+                      self.name, self.model, finish, got)
         return text
 
 

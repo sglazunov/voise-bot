@@ -239,3 +239,18 @@ class TestОбрезкаПоЛимиту:
                 == '{"summary": "s'
         assert any("обрезан по лимиту" in r.message and "4096" in r.message
                    for r in caplog.records)
+
+    def test_blacklist_внятная_ошибка_а_не_обрезок(self, fake):
+        fake.chat = [{"choices": [{"message": {"content": '{"summary": "s'},
+                                   "finish_reason": "blacklist"}],
+                      "usage": {"prompt_tokens": 10, "completion_tokens": 5653}}]
+        with pytest.raises(RuntimeError) as ei:
+            llm.GigaChatProvider(api_key="a2V5").complete("x", max_tokens=10000)
+        msg = str(ei.value)
+        assert "blacklist" in msg and "фильтр" in msg and "5653" in msg
+        assert not llm._is_rate_limit(ei.value) and not llm.is_key_rejected(ei.value)
+
+    def test_stop_проходит_молча(self, fake):
+        fake.chat = [{"choices": [{"message": {"content": '{"summary": "s"}'},
+                                   "finish_reason": "stop"}]}]
+        assert llm.GigaChatProvider(api_key="a2V5").complete("x") == '{"summary": "s"}'
