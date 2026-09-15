@@ -81,3 +81,24 @@ class TestМетрика:
     def test_хосты_метрики_не_протекают_на_страницу_входа(self, client, monkeypatch):
         monkeypatch.setattr(config, "METRIKA_ID", "12345678")
         assert "mc.yandex.ru" not in client.get("/login").headers["Content-Security-Policy"]
+
+
+class TestИконка:
+    @pytest.mark.parametrize("path,ctype", [
+        ("/favicon.svg", "image/svg+xml"), ("/favicon.ico", "image/x-icon"),
+        ("/favicon-32.png", "image/png"), ("/apple-touch-icon.png", "image/png"),
+        ("/icon-512.png", "image/png"), ("/og-image.png", "image/png")])
+    def test_иконки_отдаются_без_входа(self, client, path, ctype):
+        r = client.get(path)
+        assert r.status_code == 200 and r.headers["content-type"].startswith(ctype)
+        assert "max-age" in r.headers.get("cache-control", "")
+
+    def test_ссылки_на_иконку_на_всех_страницах(self, client):
+        for path in ("/", "/login"):
+            html = client.get(path).text
+            assert 'href="/favicon.svg"' in html and 'href="/apple-touch-icon.png"' in html
+        assert 'property="og:image"' in client.get("/").text
+
+    def test_в_карточке_протокола_нет_заголовков_h4(self, client):
+        html = client.get("/").text
+        assert "<h4" not in html and html.count("<h1") == 1

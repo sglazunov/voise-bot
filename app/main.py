@@ -178,6 +178,8 @@ _PUBLIC_PATHS = {"/login", "/register", "/recover", "/healthz",
                  # Лендинг: корень для незалогиненных, robots и sitemap для
                  # поисковиков. Залогиненному корень отдаёт SPA, как раньше.
                  "/", "/landing", "/robots.txt", "/sitemap.xml",
+                 "/favicon.svg", "/favicon.ico", "/favicon-32.png",
+                 "/apple-touch-icon.png", "/icon-512.png", "/og-image.png",
                  "/api/auth/login", "/api/auth/register",
                  "/api/auth/recover/request", "/api/auth/recover/verify"}
 _SECURE_COOKIE = os.getenv("VTX_HTTPS", "0") == "1"
@@ -373,6 +375,30 @@ def root(request: Request):
 @app.get("/landing", include_in_schema=False)
 def landing_page(request: Request):
     return _landing(request)
+
+
+# Иконка сайта и картинка для соцсетей: лежат в app/static, отдаются
+# ПУБЛИЧНО (вкладка незалогиненного посетителя тоже должна нести иконку) и
+# именными маршрутами — общий catch-all SPA требует входа.
+STATIC_DIR = Path(__file__).parent / "static"
+_ICONS = {"favicon.svg": "image/svg+xml", "favicon.ico": "image/x-icon",
+          "favicon-32.png": "image/png", "apple-touch-icon.png": "image/png",
+          "icon-512.png": "image/png", "og-image.png": "image/png"}
+
+
+def _icon_route(name: str, media: str):
+    def serve():
+        f = STATIC_DIR / name
+        if not f.exists():
+            raise HTTPException(404, "Not found")
+        return FileResponse(f, media_type=media,
+                            headers={"Cache-Control": "public, max-age=86400"})
+    app.add_api_route(f"/{name}", serve, methods=["GET"], include_in_schema=False,
+                      name=f"icon-{name}")
+
+
+for _n, _m in _ICONS.items():
+    _icon_route(_n, _m)
 
 
 @app.get("/robots.txt", include_in_schema=False)
