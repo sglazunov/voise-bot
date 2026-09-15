@@ -349,42 +349,48 @@ class YandexProvider:
 
 
 # ---------------------------------------------------------------------------
-class GigaChatProvider:
+class GigaChatProvider(_KeyProviderMixin):
     """GigaChat (Sber). OAuth: an Authorization key is exchanged for a short-
     lived access token, then chat completions are called.
 
-    Sber serves its endpoints behind the Russian Trusted Root CA, which Python
-    doesn't ship. To keep setup zero-config we skip TLS verification for Sber's
-    own hosts only. To verify properly instead, install the Russian CA bundle
-    and remove the unverified context below.
+    Адреса (сентябрь 2026): запросы к модели идут на `https://api.giga.chat/v1`
+    — так по умолчанию ходит и официальная библиотека Сбера; старый
+    `gigachat.devices.sberbank.ru/api/v1` остаётся доступен через
+    `VTX_GIGACHAT_BASE_URL`. Токен выдаёт по-прежнему `ngw.devices.sberbank.ru`
+    (`VTX_GIGACHAT_AUTH_URL`): у нового хоста своего /oauth нет.
+
+    ⚠️ Freemium-тариф — ОДИН поток: второй одновременный запрос получает 429.
+    В процессе вызовы сериализуются `_LOCK` (вопрос по встрече или пересборка
+    больше не бьются с идущей сборкой), а 429 от самого поставщика ждётся
+    по Retry-After, как у остальных.
     """
 
     name = "gigachat"
-    _token: str = ""
-    _exp: float = 0.0
+    _LOCK = threading.Lock()
+    # Токены кэшируются на класс по (ключ, scope): каждая задача создаёт
+    # свой экземпляр провайдера, и раньше каждая брала новый токен.
+    _TOKENS: dict[tuple[str, str], tuple[str, float]] = {}
     # Сбер выпускает сертификаты своим корневым центром («Russian Trusted Root
     # CA»), которого нет в системном хранилище — поэтому проверка и была
     # выключена целиком. Это плохо: ключ авторизации уходил по соединению, чью
     # подлинность никто не подтверждал. Правильный путь — положить их корневой
     # сертификат в образ и указать его здесь (VTX_GIGACHAT_CA либо стандартный
-    # путь /usr/local/share/ca-certificates/russian_trusted_root_ca.crt).
-    # Пока файла нет, проверка отключается КАК И РАНЬШЕ, но об этом пишется
-    # предупреждение — молча ходить без проверки нельзя.
+    # путь /usr/local/share/ca-certificates/russian_trusted_root_ca.crt): с ним
+    # проверка СТРОГАЯ, без отката.
+    # Без файла соединение сначала ПРОВЕРЯЕТСЯ системным хранилищем (новый
+    # хост может отвечать публичным сертификатом) и только при отказе проверки
+    # повторяется без неё — с предупреждением в лог, как и раньше, но не молча.
     _ctx = ssl.create_default_context()
     _ca_path = os.getenv(
         "VTX_GIGACHAT_CA",
         "/usr/local/share/ca-certificates/russian_trusted_root_ca.crt")
-    if os.path.exists(_ca_path):
+    _strict = os.path.exists(_ca_path)
+    if _strict:
         _ctx.load_verify_locations(cafile=_ca_path)
-    else:
-        import warnings as _warnings
-        _warnings.warn(
-            "GigaChat: сертификат Минцифры не найден (%s) — TLS-проверка "
-            "отключена, ключ уходит по непроверенному соединению. Положите "
-            "файл в образ или задайте VTX_GIGACHAT_CA." % _ca_path,
-            RuntimeWarning, stacklevel=2)
-        _ctx.check_hostname = False
-        _ctx.verify_mode = ssl.CERT_NONE
+    _ctx_lax = ssl.create_default_context()
+    _ctx_lax.check_hostname = False
+    _ctx_lax.verify_mode = ssl.CERT_NONE
+    _lax_hosts: set[str] = set()
 
     def __init__(self, model: str | None = None, api_key: str | None = None,
                  extra: str | None = None) -> None:
@@ -392,47 +398,85 @@ class GigaChatProvider:
         self.api_key = api_key or config.GIGACHAT_AUTH_KEY
         self.scope = extra or config.GIGACHAT_SCOPE
 
-    def _get_token(self) -> str:
-        if self._token and time.time() < self._exp - 30:
-            return self._token
-        url = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
-        body = f"scope={self.scope}".encode("utf-8")
-        req = urllib.request.Request(url, data=body, method="POST")
-        req.add_header("Content-Type", "application/x-www-form-urlencoded")
-        req.add_header("Accept", "application/json")
-        req.add_header("RqUID", str(uuid.uuid4()))
-        req.add_header("Authorization", f"Basic {self.api_key}")
+    # -- транспорт ---------------------------------------------------------
+    @classmethod
+    def _open(cls, req: urllib.request.Request, timeout: int):
+        """urlopen с проверкой сертификата; откат на непроверенное соединение —
+        только без сертификата Минцифры и только при отказе ИМЕННО проверки."""
         try:
-            with urllib.request.urlopen(req, timeout=30, context=self._ctx) as resp:
-                d = json.loads(resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as e:
-            body = e.read().decode("utf-8", "replace")[:300]
-            raise RuntimeError(f"GigaChat OAuth HTTP {e.code}: {body}") from e
-        self._token = d["access_token"]
+            return urllib.request.urlopen(req, timeout=timeout, context=cls._ctx)
+        except urllib.error.URLError as e:
+            if cls._strict or not isinstance(
+                    getattr(e, "reason", None), ssl.SSLCertVerificationError):
+                raise
+        host = urllib.parse.urlsplit(req.full_url).hostname or "?"
+        if host not in cls._lax_hosts:
+            cls._lax_hosts.add(host)
+            _LOG.warning(
+                "GigaChat: сертификат %s не прошёл проверку (нет корневого "
+                "сертификата Минцифры, %s) — соединение без проверки, ключ "
+                "уходит по непроверенному каналу. Положите файл в образ или "
+                "задайте VTX_GIGACHAT_CA.", host, cls._ca_path)
+        return urllib.request.urlopen(req, timeout=timeout, context=cls._ctx_lax)
+
+    def _post(self, url: str, data: bytes, headers: dict, timeout: int,
+              what: str) -> dict:
+        attempt = 0
+        while True:
+            req = urllib.request.Request(url, data=data, method="POST")
+            req.add_header("Accept", "application/json")
+            for k, v in headers.items():
+                req.add_header(k, v)
+            try:
+                with self._open(req, timeout) as resp:
+                    return json.loads(resp.read().decode("utf-8"))
+            except urllib.error.HTTPError as e:
+                body = e.read().decode("utf-8", "replace")[:300]
+                if e.code in (429, 503) and attempt < self._retries:
+                    time.sleep(min(_retry_after(e, body, default=8 * (attempt + 1)), 30) + 0.5)
+                    attempt += 1
+                    continue
+                raise RuntimeError(f"GigaChat {what} HTTP {e.code}: {body}") from e
+            except urllib.error.URLError as e:
+                raise RuntimeError(
+                    f"Не удалось подключиться к GigaChat ({what}): {e.reason}") from e
+
+    def _get_token(self) -> str:
+        cache_key = (self.api_key, self.scope)
+        tok = self._TOKENS.get(cache_key)
+        if tok and time.time() < tok[1] - 30:
+            return tok[0]
+        d = self._post(
+            config.GIGACHAT_AUTH_URL, f"scope={self.scope}".encode("utf-8"),
+            {"Content-Type": "application/x-www-form-urlencoded",
+             "RqUID": str(uuid.uuid4()),
+             "Authorization": f"Basic {self.api_key}"},
+            timeout=30, what="OAuth")
+        token = d.get("access_token") or ""
+        if not token:
+            raise RuntimeError(f"GigaChat OAuth: в ответе нет access_token: {str(d)[:200]}")
         # expires_at is epoch milliseconds; fall back to ~25 min.
-        self._exp = (d.get("expires_at", 0) / 1000) or (time.time() + 1500)
-        return self._token
+        exp = (d.get("expires_at", 0) / 1000) or (time.time() + 1500)
+        self._TOKENS[cache_key] = (token, exp)
+        return token
 
     def complete(self, prompt: str, max_tokens: int = 2000, force_json: bool = True) -> str:
-        token = self._get_token()
-        url = "https://gigachat.devices.sberbank.ru/api/v1/chat/completions"
-        payload = {
-            "model": self.model,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.1,
-            "max_tokens": max_tokens,
-        }
-        data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(url, data=data, method="POST")
-        req.add_header("Content-Type", "application/json")
-        req.add_header("Accept", "application/json")
-        req.add_header("Authorization", f"Bearer {token}")
-        try:
-            with urllib.request.urlopen(req, timeout=180, context=self._ctx) as resp:
-                out = json.loads(resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as e:
-            body = e.read().decode("utf-8", "replace")[:300]
-            raise RuntimeError(f"GigaChat HTTP {e.code}: {body}") from e
+        with self._LOCK:
+            token = self._get_token()
+            url = config.GIGACHAT_BASE_URL.rstrip("/") + "/chat/completions"
+            payload = {
+                "model": self.model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.1,
+                "max_tokens": max_tokens,
+            }
+            out = self._post(url, json.dumps(payload).encode("utf-8"),
+                             {"Content-Type": "application/json",
+                              "Authorization": f"Bearer {token}"},
+                             timeout=300, what="chat")
+        # Расход — в тех же полях, что у OpenAI-совместимых (prompt_tokens /
+        # completion_tokens): раньше GigaChat в учёт токенов не попадал вовсе.
+        _log_usage(f"{self.name}/{self.model}", _openai_usage(out))
         # Разбор общий с «своим ключом»: content бывает null (рассуждающие
         # модели) или списком кусков, и голое .strip() падало на None.
         text, _ = text_of(out)

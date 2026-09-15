@@ -100,7 +100,15 @@ YANDEX_MODEL = os.getenv("VTX_YANDEX_MODEL", "yandexgpt/latest")
 # --- GigaChat / Sber (Authorization key = base64 client_id:secret) ---
 GIGACHAT_AUTH_KEY = os.getenv("GIGACHAT_AUTH_KEY", "")
 GIGACHAT_SCOPE = os.getenv("GIGACHAT_SCOPE", "GIGACHAT_API_PERS")
-GIGACHAT_MODEL = os.getenv("VTX_GIGACHAT_MODEL", "GigaChat")
+# Ultra — самая сильная модель Сбера (сентябрь 2026); на Freemium-тарифе у
+# неё свой бесплатный запас токенов, и именно ради неё ключ и подключают.
+GIGACHAT_MODEL = os.getenv("VTX_GIGACHAT_MODEL", "GigaChat-3-Ultra")
+# Новый хост api.giga.chat — умолчание официальной библиотеки Сбера; старый
+# gigachat.devices.sberbank.ru/api/v1 подставляется сюда же при нужде. Токен
+# по-прежнему выдаёт ngw.devices.sberbank.ru — у нового хоста /oauth нет.
+GIGACHAT_BASE_URL = os.getenv("VTX_GIGACHAT_BASE_URL", "https://api.giga.chat/v1")
+GIGACHAT_AUTH_URL = os.getenv("VTX_GIGACHAT_AUTH_URL",
+                              "https://ngw.devices.sberbank.ru:9443/api/v2/oauth")
 
 # --- Free: Ollama (fully local, no key; runs on this machine) ---
 # Ollama в образ НЕ входит — это внешний сервер, который подключают отдельно.
@@ -222,10 +230,14 @@ PROVIDER_MODELS = {
         {"value": "openai/gpt-oss-120b", "label": "GPT-OSS 120B · мощная (по умолчанию)"},
         {"value": "openai/gpt-oss-20b", "label": "GPT-OSS 20B · быстрая/дешёвая"},
     ],
+    # Ultra 3.5 появилась на Freemium-тарифе в сентябре 2026 — со своим
+    # бесплатным запасом токенов. Остальные имена — «плавающие» ярусы Сбера:
+    # они указывают на актуальное поколение каждого яруса.
     "gigachat": [
+        {"value": "GigaChat-3-Ultra", "label": "GigaChat 3 Ultra · максимум (по умолчанию)"},
+        {"value": "GigaChat-Max", "label": "GigaChat Max · сильная"},
+        {"value": "GigaChat-Pro", "label": "GigaChat Pro · средняя"},
         {"value": "GigaChat", "label": "GigaChat Lite · базовая (быстро)"},
-        {"value": "GigaChat-Pro", "label": "GigaChat Pro · сильнее"},
-        {"value": "GigaChat-Max", "label": "GigaChat Max · максимум"},
     ],
     "yandex": [
         {"value": "yandexgpt/latest", "label": "YandexGPT · полная"},
