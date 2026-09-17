@@ -58,6 +58,9 @@ class MeetingState:
     cloud_url: str | None = None
     out_path: str | None = None       # local recording file — lets a restart pick it up
     upload_error: str | None = None   # why the video didn't reach the cloud (retrying)
+    # Служебный путь файла в облаке (disk:/…): нужен поздней дозагрузке, чтобы
+    # ОПУБЛИКОВАТЬ уже лежащий файл, а не заливать гигабайт заново.
+    cloud_path: str | None = None
     # Чем кончилась запись: silence | max_duration | chat_stop | call_ended |
     # left_call | nobody_joined | thinned_out | stopped | error. Рекордер
     # возвращает это в результате, а планировщик раньше выбрасывал — и
@@ -809,6 +812,7 @@ class Scheduler:
             # video lands in the cloud (see _late_upload).
             self._set(st, "uploading", "Выгружаю запись в облако…")
             up = delivery.upload_with_retry(out, cfg, log)
+            st.cloud_path = up.get("path") or st.cloud_path
             if up.get("ok"):
                 st.cloud_url = up.get("url")  # public share link (or None)
                 st.upload_error = None
@@ -941,9 +945,11 @@ class Scheduler:
             time.sleep(300)
             if not Path(out).exists():
                 return  # purged (retention) — nothing left to deliver
-            up = delivery.upload_with_retry(out, cfg, lambda *_: None, attempts=1)
+            up = delivery.publish_or_upload(out, cfg, st.cloud_path, lambda *_: None)
+            st.cloud_path = up.get("path") or st.cloud_path
             if not up.get("ok"):
                 st.upload_error = up.get("error") or "облако недоступно"
+                snapshots.save(st)
                 continue
             st.cloud_url = up.get("url")
             st.upload_error = None
@@ -961,8 +967,15 @@ class Scheduler:
             # upload_error. Иначе «осталось на сервере» в метрике оставалось бы
             # навсегда, хотя облако приняло видео получасом позже.
             self._record_outcome(st, "recorded")
+            job = store.get(st.job_id) if st.job_id else None
+            # Протокол той же встречи мог упасть на ТОЙ ЖЕ публикации — теперь,
+            # когда облако отвечает, прикрепляем и его.
+            if job is not None and job.status == "done" and getattr(job, "delivery_error", None):
+                try:
+                    store.redeliver(job.id)
+                except Exception:  # noqa: BLE001
+                    _LOG.warning("Повторная доставка протокола %s не удалась", job.id, exc_info=True)
             if delivery.delivered_elsewhere(up, out):
-                job = store.get(st.job_id) if st.job_id else None
                 if job is not None and job.status != "done":
                     # Recognition still reads the file — it deletes it on finish.
                     # Задачи со статусом error/cancelled тоже держим: именно из
@@ -1218,6 +1231,7 @@ class Scheduler:
                     live_notes=str(snap.get("live_notes") or ""),
                     do_protocol=bool(snap.get("do_protocol")),
                     upload_error=snap.get("upload_error"),
+                    cloud_path=snap.get("cloud_path"),
                     stop_reason=snap.get("stop_reason"),
                     rec_bytes=int(snap.get("rec_bytes") or 0))
                 with self._lock:
@@ -1301,6 +1315,7 @@ class Scheduler:
         st.cloud_url = snap.get("cloud_url")
         st.do_protocol = bool(snap.get("do_protocol"))
         st.upload_error = snap.get("upload_error")
+        st.cloud_path = snap.get("cloud_path")
         st.stop_reason = snap.get("stop_reason")
         st.rec_bytes = int(snap.get("rec_bytes") or 0)
         state = snap.get("state")

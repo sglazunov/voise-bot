@@ -51,6 +51,7 @@ def of_state(st) -> dict:
             # что она не уехала в облако. Поздняя дозагрузка при этом уже
             # работала — по полю, которого в снапшоте не было.
             "upload_error": st.upload_error,
+            "cloud_path": getattr(st, "cloud_path", None),
             "stop_reason": st.stop_reason,
             "rec_bytes": int(getattr(st, "rec_bytes", 0) or 0),
             "join_delay_sec": getattr(st, "join_delay_sec", None),
