@@ -94,22 +94,57 @@ def write_weeek_field(token, task_id, field: str, value: str,
 
 
 # -- recording delivery: the local file is only a staging copy ----------
+def _needs_link(up: dict) -> bool:
+    """Загружено в удалённое облако, но ссылки нет — людям файл недоступен."""
+    return bool(up.get("ok")) and up.get("backend") != "local" and not up.get("url")
+
+
 def upload_with_retry(out: str, cfg: dict, log, attempts: int = 3) -> dict:
     """Upload the recording, retrying a few times with a pause — one network
-    hiccup must not leave a meeting's video stranded on the server."""
+    hiccup must not leave a meeting's video stranded on the server.
+
+    ⚠️ «Загружено, но без публичной ссылки» — это НЕ успех (17.09: файл лёг на
+    Диск, публикация упала, а карточка писала «локально» и никто не повторял).
+    Такой исход возвращается как ok=False с причиной и путём на Диске; на
+    следующей попытке публикуется уже лежащий файл, а не заливается заново."""
     last: dict = {}
     for i in range(attempts):
         if i:
             log(f"Облако: повтор выгрузки {i + 1}/{attempts}…")
             time.sleep(20 * i)
         try:
-            last = clouds.upload(out, Path(out).name, cfg)
+            if last.get("uploaded") and last.get("path"):
+                res = clouds.publish(last["path"], cfg)
+                last = (dict(last, ok=True, url=res["url"], error=None) if res.get("ok")
+                        else dict(last, error="файл загружен в облако, но публичная ссылка "
+                                  f"не получена: {res.get('error') or last.get('error')}"))
+            else:
+                last = clouds.upload(out, Path(out).name, cfg)
         except Exception as e:  # noqa: BLE001 — an uploader bug isn't fatal
             last = {"ok": False, "error": str(e)}
+        if _needs_link(last):
+            last = dict(last, ok=False, uploaded=True,
+                        error=last.get("public_note")
+                        or "файл загружен в облако, но публичная ссылка не получена")
         if last.get("ok"):
             return last
         log(f"Облако (попытка {i + 1}/{attempts}): {last.get('error')}")
     return last or {"ok": False, "error": "облако недоступно"}
+
+
+def publish_or_upload(out: str, cfg: dict, cloud_path: str | None, log) -> dict:
+    """Поздняя дозагрузка: если файл уже на Диске — только опубликовать
+    (секунды), иначе — обычная выгрузка одной попыткой."""
+    if cloud_path:
+        try:
+            res = clouds.publish(cloud_path, cfg)
+        except Exception as e:  # noqa: BLE001
+            res = {"ok": False, "error": str(e)}
+        if res.get("ok"):
+            return {"ok": True, "backend": res.get("backend"), "url": res.get("url"),
+                    "path": cloud_path}
+        log(f"Облако: повторная публикация не удалась — {res.get('error')}")
+    return upload_with_retry(out, cfg, log, attempts=1)
 
 
 def delivered_elsewhere(up: dict, out: str) -> bool:
@@ -118,7 +153,9 @@ def delivered_elsewhere(up: dict, out: str) -> bool:
     if not up.get("ok"):
         return False
     if up.get("backend") != "local":
-        return True
+        # Без публичной ссылки удалённая копия людям недоступна — локальную
+        # держим до тех пор, пока поздняя дозагрузка не добудет ссылку.
+        return bool(up.get("url"))
     try:
         return Path(up.get("path") or "").resolve() != Path(out).resolve()
     except OSError:

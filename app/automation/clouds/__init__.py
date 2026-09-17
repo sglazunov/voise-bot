@@ -43,6 +43,20 @@ def readiness(settings: dict) -> dict:
     return out
 
 
+def publish(remote_path: str, settings: dict, backend: str | None = None) -> dict:
+    """Получить публичную ссылку на УЖЕ загруженный файл (повторная публикация).
+    Умеет только Яндекс.Диск: у Google ссылка приходит вместе с загрузкой, у
+    локального диска ссылки нет вовсе."""
+    key = backend or settings.get("cloud") or "local"
+    entry = BACKENDS.get(key)
+    mod = entry[0] if entry else None
+    fn = getattr(mod, "publish", None)
+    if not fn or not remote_path:
+        return {"ok": False, "backend": key,
+                "error": "у этого облака нет повторной публикации"}
+    return fn(remote_path, _backend_cfg(settings, key))
+
+
 def upload(file_path: str, name: str, settings: dict,
            backend: str | None = None, folder: str | None = None) -> dict:
     """Upload `file_path` as `name` to the chosen (or selected) cloud.

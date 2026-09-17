@@ -7,6 +7,7 @@ PUT the file → publish to get a shareable link.
 """
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 from ._http import CloudError, request, request_json
@@ -53,6 +54,62 @@ def _ensure_folder(folder: str, headers: dict) -> None:
                     "cloud_api:disk.write.")
 
 
+# Публикация — отдельный шаг ПОСЛЕ заливки, и падает он отдельно: 17.09 запись
+# и протокол «Ревью веб-дизайнеры» легли на Диск, а PUT /publish не прошёл.
+# Раньше это возвращалось как ok=True без url и без пояснения: карточка писала
+# «запись локально», Weeek не получал ссылки, локальную копию удаляли, а
+# поздняя дозагрузка не запускалась — ok же. Теперь: три попытки с паузой, а
+# при неудаче — внятная причина с HTTP-кодом.
+_PUBLISH_ATTEMPTS = 3
+_PUBLISH_PAUSE = (3, 8)
+
+
+def _publish(remote: str, cfg: dict, headers: dict) -> tuple[str | None, str | None]:
+    """Опубликовать файл и вернуть (публичная ссылка, пояснение при неудаче)."""
+    last = "неизвестная ошибка"
+    for i in range(_PUBLISH_ATTEMPTS):
+        if i:
+            time.sleep(_PUBLISH_PAUSE[min(i - 1, len(_PUBLISH_PAUSE) - 1)])
+        try:
+            pub_status, body = request("PUT", f"{API}/resources/publish",
+                                       headers=headers, params={"path": remote})
+            if pub_status not in (200, 201):
+                last = f"публикация отклонена (HTTP {pub_status}): {body[:120].decode('utf-8', 'replace')}"
+                if pub_status in (401, 403, 404):
+                    break
+                continue
+            meta_status, meta = request_json(
+                "GET", f"{API}/resources", headers=_read_auth(cfg),
+                params={"path": remote, "fields": "public_url"})
+            if meta_status == 200:
+                url = (meta or {}).get("public_url")
+                if url:
+                    return url, None
+                last = "Диск не вернул public_url после публикации"
+                continue
+            if meta_status in (401, 403):
+                return None, ("Файл загружен, но публичную ссылку не получить: нужен доступ "
+                              "на ЧТЕНИЕ (cloud_api:disk.read). Впишите отдельный «токен "
+                              "чтения» Я.Диска в настройках, либо добавьте «Чтение всего "
+                              "Диска» в приложении Яндекса и получите токен заново.")
+            last = f"чтение ссылки не удалось (HTTP {meta_status})"
+        except CloudError as e:
+            last = str(e)
+    return None, f"Файл загружен на Диск, но публичная ссылка не получена: {last}"
+
+
+def publish(remote: str, cfg: dict) -> dict:
+    """Повторная публикация уже лежащего на Диске файла (поздняя дозагрузка
+    и «Прикрепить заново»): заливать сотни мегабайт заново не нужно."""
+    try:
+        url, note = _publish(remote, cfg, _auth(cfg))
+    except CloudError as e:
+        return {"ok": False, "backend": "yandex_disk", "path": remote, "error": str(e)}
+    if url:
+        return {"ok": True, "backend": "yandex_disk", "url": url, "path": remote}
+    return {"ok": False, "backend": "yandex_disk", "path": remote, "error": note}
+
+
 def upload(file_path: str, name: str, cfg: dict) -> dict:
     src = Path(file_path)
     if not src.exists():
@@ -84,28 +141,12 @@ def upload(file_path: str, name: str, cfg: dict) -> dict:
             raise CloudError(f"Загрузка не удалась (HTTP {put_status}).")
 
         # The file is uploaded. Publish it and fetch the PUBLIC share link
-        # (https://disk.yandex.ru/d/…). Reading the link back needs the read
-        # scope; with a write-only token this 403s — surface a clear note.
-        url, note = None, None
-        try:
-            pub_status, _ = request("PUT", f"{API}/resources/publish",
-                                    headers=headers, params={"path": remote})
-            if pub_status in (200, 201):
-                meta_status, meta = request_json(
-                    "GET", f"{API}/resources", headers=_read_auth(cfg),
-                    params={"path": remote, "fields": "public_url"})
-                if meta_status == 200:
-                    url = (meta or {}).get("public_url")
-                elif meta_status in (401, 403):
-                    note = ("Файл загружен, но публичную ссылку не получить: нужен доступ "
-                            "на ЧТЕНИЕ (cloud_api:disk.read). Впишите отдельный «токен "
-                            "чтения» Я.Диска в настройках, либо добавьте «Чтение всего "
-                            "Диска» в приложении Яндекса и получите токен заново.")
-        except CloudError as e:
-            note = f"Публичная ссылка не получена: {e}"
+        # (https://disk.yandex.ru/d/…). Без ссылки файл людям недоступен —
+        # причина уходит в public_note, а delivery решает, что делать дальше.
+        url, note = _publish(remote, cfg, headers)
         # `url` is the real share link (or None). Never return the internal
         # disk:/ path as a link — it isn't openable.
-        return {"ok": True, "backend": "yandex_disk",
+        return {"ok": True, "backend": "yandex_disk", "published": bool(url),
                 "url": url, "path": remote, "public_note": note}
     except CloudError as e:
         return {"ok": False, "backend": "yandex_disk", "error": str(e)}

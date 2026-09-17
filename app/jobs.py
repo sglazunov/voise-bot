@@ -825,12 +825,21 @@ class JobStore:
                 base = Path(job.filename or "protocol").stem
                 up = clouds.upload(str(docx_path), f"{base} - протокол.docx", cfg,
                                    folder=(cfg.get("protocol_folder") or "").strip() or None)
+                if up.get("ok") and not up.get("url") and up.get("path"):
+                    # Лёг в облако, но публикация не прошла (17.09): пробуем
+                    # опубликовать ещё раз, не заливая файл заново.
+                    res = clouds.publish(up["path"], cfg)
+                    if res.get("ok"):
+                        up = dict(up, url=res.get("url"))
                 if up.get("ok") and up.get("url"):
                     url = up["url"]
                     self._set(job, protocol_cloud_url=url)
                 else:
-                    self._set(job, delivery_error=(up.get("error")
-                              or "Не удалось выгрузить протокол в облако. Проверьте облако в «Автоматизации»."))
+                    self._set(job, delivery_error=(
+                        up.get("error") or up.get("public_note")
+                        or ("Протокол загружен в облако, но публичную ссылку получить "
+                            "не удалось — нажмите «Прикрепить заново»." if up.get("ok")
+                            else "Не удалось выгрузить протокол в облако. Проверьте облако в «Автоматизации».")))
                     return
             if job.deliver_weeek_task:
                 token = cfg.get("weeek_token")
