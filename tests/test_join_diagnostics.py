@@ -67,7 +67,7 @@ class _Btn(_El):
         if "closest" in js:
             return self.in_widget
         self.click()
-    def fill(self, v): self.value = v
+    def fill(self, v, **kw): self.value = v
     def bounding_box(self): return self._box
 
 
@@ -78,7 +78,11 @@ class _Frame:
 
     def query_selector(self, sel): return self._els.get(sel)
     def query_selector_all(self, sel):
-        return [e for k, e in self._els.items() if self._tag in sel or k == sel]
+        # Точное совпадение по ключу; «все элементы» — только на голый тег
+        # (так _corner_button перебирает кнопки).
+        exact = [e for k, e in self._els.items() if k == sel]
+        bare = sel.split(",")[0].strip() == self._tag
+        return exact or (list(self._els.values()) if bare else [])
     def content(self): return self._content
     def frame_element(self):
         box = self._box
@@ -145,7 +149,7 @@ def test_разворот_окна_встречи_по_подписи_кнопк
     bot = _bot(page)
     # клик переводит оболочку в полноэкранный режим
     orig_click = toggle.click
-    def click():
+    def click(**kw):
         orig_click(); page.fullscreen = True
     toggle.click = click
     assert bot.expand_meeting() is True
@@ -163,7 +167,7 @@ def test_разворот_окна_по_кнопке_в_углу_без_подп
     page = _FramedPage({}, child)
     bot = _bot(page)
     orig = corner.click
-    def click():
+    def click(**kw):
         orig(); page.fullscreen = True
     corner.click = click
     assert bot.expand_meeting() is True
@@ -249,7 +253,7 @@ def test_без_всплывающих_окон_ничего_не_нажимае
 
 def test_окно_не_закрылось_кликом_пробуются_запасные_способы():
     """21.09: клик по «Звучит отлично» проходил, а окно оставалось — карточка
-    трижды писала «закрыл». Теперь исчезновение проверяется, пробуются Escape,
+    трижды писала «закрыл». Теперь исчезновение проверяется, пробуются
     принудительный и JS-клик, и в лог идёт честное «не закрылось»."""
     stuck = _Btn("Звучит отлично")           # не исчезает никогда
     page = _FramedPage({'button:has-text("Звучит отлично")': stuck}, _Frame("child", {}))
@@ -257,7 +261,8 @@ def test_окно_не_закрылось_кликом_пробуются_зап
     bot = _bot(page)
     assert bot._dismiss_popups() is False
     assert stuck.clicks >= 3, "обычный, принудительный и JS-клик"
-    assert "Escape" in page.keyboard.pressed
+    # ⚠️ Escape в страницу НЕ шлётся: в оболочке он закрывает окно встречи.
+    assert "Escape" not in page.keyboard.pressed
     assert any("не закрылось" in ln for ln in bot.log)
     assert not any(ln.startswith("Закрыл") for ln in bot.log)
 
@@ -293,6 +298,9 @@ def test_профиль_слота_помечается_закрытым_кор�
 # (10 с заглушка, 8 с имя, 5 с микрофон/камера, 3+4+6 с пауз) — полминуты
 # до входа, начало разговора мимо записи.
 # ---------------------------------------------------------------------------
+_SHELL_SEL = '#yamb-root, .yamb-root, [class*="yamb-windowed"], [class*="yamb-"]'
+
+
 class _LivePage(_FramedPage):
     """Страница, у которой кнопки появляются ПО ХОДУ: `script` — список
     «на каком опросе какой селектор появляется в дочернем фрейме»."""
@@ -342,7 +350,7 @@ def test_вход_идёт_по_мере_появления_кнопок_без_
     mic = _Btn(aria="Выключить микрофон")
     page = _LivePage({2: {'button:has-text("Продолжить в браузере")': cont},
                       5: {'button:has-text("Подключиться")': join,
-                          'button[aria-label*="икрофон"]': mic}},
+                          'button[aria-label*="ыключить микрофон"]': mic}},
                      strong_after=8)
     bot = _joiner(page)
     assert bot.join("https://telemost.yandex.ru/j/1") is True
@@ -360,8 +368,8 @@ def test_продолжить_на_заглушке_не_считается_вх
     _fake_clock(monkeypatch, page)
     bot = _joiner(page, {"auth_mode": "profile", "join_timeout_sec": 20})
     assert bot.join("https://telemost.yandex.ru/j/1") is False
-    assert cont.clicks >= 1
-    assert not any("Нажал кнопку входа" in ln for ln in bot.log)
+    assert 1 <= cont.clicks <= 6, "потолок кликов по заглушке — не весь бюджет"
+    assert not any(ln.startswith("Бот в звонке ✓") for ln in bot.log)
 
 
 def test_уже_в_звонке_выход_из_цикла_сразу():
@@ -390,7 +398,8 @@ def test_гость_вводит_имя_под_аккаунтом_нет():
 
 def test_без_окна_встречи_одна_перезагрузка(monkeypatch):
     page = _LivePage({})
-    page.frames = [page]                          # фреймов нет — оболочка пустая
+    page.frames = [page]                          # окна встречи нет — одна оболочка
+    page._els[_SHELL_SEL] = _El("shell")
     _fake_clock(monkeypatch, page)
     bot = _joiner(page, {"auth_mode": "profile", "join_timeout_sec": 40})
     assert bot.join("https://telemost.yandex.ru/j/1") is False
@@ -452,7 +461,7 @@ def test_главная_оболочки_плитка_подключиться_�
     tile = _Btn("Подключиться к звонку")
     form = _LinkForm()
     page = _LivePage({}, strong_after=8)
-    page._els["text=Подключиться к звонку"] = tile
+    page._els['text="Подключиться к звонку"'] = tile
     url = "https://telemost.yandex.ru/j/777"
     def tile_click(**kw):
         tile.clicks += 1
@@ -474,7 +483,7 @@ def test_при_оболочке_кнопка_входа_только_во_фр�
     не вход; настоящая кнопка живёт во вложенном фрейме."""
     shell_btn = _Btn("Подключиться"); frame_btn = _Btn("Подключиться")
     page = _LivePage({})
-    page._els["#yamb-root, .yamb-root, [class*=\"yamb-windowed\"], [class*=\"yamb-\"]"] = _El("shell")
+    page._els[_SHELL_SEL] = _El("shell")
     page._els['button:has-text("Подключиться")'] = shell_btn
     bot = _joiner(page)
     assert bot._shell_present() is True
@@ -482,7 +491,7 @@ def test_при_оболочке_кнопка_входа_только_во_фр�
     page.child._els['button:has-text("Подключиться")'] = frame_btn
     assert bot._join_button() is frame_btn
     # без оболочки (старая вёрстка гостя) — главный документ годится
-    del page._els["#yamb-root, .yamb-root, [class*=\"yamb-windowed\"], [class*=\"yamb-\"]"]
+    del page._els[_SHELL_SEL]
     del page.child._els['button:has-text("Подключиться")']
     assert bot._join_button() is shell_btn
 
