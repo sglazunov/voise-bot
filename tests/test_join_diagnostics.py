@@ -302,6 +302,7 @@ class _LivePage(_FramedPage):
         # любая кнопка сходила бы за «Завершить звонок» в is_in_call.
         self.child = _Frame("child", {}, tag="\0")
         super().__init__({}, self.child)
+        self._tag = "\0"                 # то же для главного документа
         self.script, self.strong_after, self.polls = script, strong_after, 0
         self.gotos: list[str] = []
 
@@ -397,22 +398,93 @@ def test_без_окна_встречи_одна_перезагрузка(monkey
     assert any("перезагружаю" in ln for ln in bot.log)
 
 
-def test_попытка_открыть_приложение_жмёт_escape_на_x(monkeypatch):
-    """Диалог «Open xdg-open?» — отдельное окно Chromium, CDP до него не
-    достаёт. Escape уходит через XTest на дисплей слота."""
+def test_системный_диалог_закрывается_escape_только_если_ввод_заблокирован(monkeypatch):
+    """Диалог «Open xdg-open?» рисуется внутри окна Chromium: CDP его не видит,
+    закрывает только Escape через XTest. Но Escape без диалога уходит в
+    страницу и закрывает окно встречи (21.09: бот оказался на главной) —
+    поэтому нажимается только когда проба показала, что ввод не доходит."""
     import app.automation.recorder.browser as b
     pressed = []
     monkeypatch.setattr(b, "_xtest_key", lambda d, k: pressed.append((d, k)) or True)
     page = _LivePage({})
     bot = _joiner(page)
     bot._display = ":99"
-    bot._x_press_escape(delays=(0, 0))
-    import time as _t
-    for _ in range(50):
-        if len(pressed) == 2:
-            break
-        _t.sleep(0.02)
-    assert pressed == [(":99", 0xFF1B), (":99", 0xFF1B)]
+    # 1) страница не просила приложение — проба не делается, Escape нет
+    bot._input_blocked = lambda: True
+    assert bot._dismiss_system_dialog() is False and pressed == []
+    # 2) просила, но ввод доходит — Escape нет
+    bot._dialog_pending, bot._dialog_since = True, 0.0
+    bot._input_blocked = lambda: False
+    assert bot._dismiss_system_dialog() is False and pressed == []
+    assert any("не появился" in ln for ln in bot.log)
+    # 3) просила и ввод заблокирован — Escape через X, пока не отпустит
+    state = {"blocked": True}
+    def probe():
+        return state["blocked"]
+    def key(d, k):
+        pressed.append((d, k)); state["blocked"] = False; return True
+    monkeypatch.setattr(b, "_xtest_key", key)
+    bot._input_blocked = probe
+    bot._dialog_pending, bot._dialog_since = True, 0.0
+    assert bot._dismiss_system_dialog() is True
+    assert pressed == [(":99", 0xFF1B)]
+    assert any(ln.startswith("Закрыл системный диалог") for ln in bot.log)
+
+
+def test_нажатая_кнопка_без_органов_звонка_не_считается_входом(monkeypatch):
+    """21.09: «кнопкой входа» оказался «+» на главной оболочки — бот 45 с
+    писал список чатов. Теперь вход = органы звонка, и только они."""
+    fake = _Btn("Подключиться")
+    page = _LivePage({1: {'button:has-text("Подключиться")': fake}})
+    _fake_clock(monkeypatch, page)
+    bot = _joiner(page, {"auth_mode": "profile", "join_timeout_sec": 30})
+    assert bot.join("https://telemost.yandex.ru/j/1") is False
+    assert fake.clicks >= 1
+    assert any("органов звонка нет" in ln for ln in bot.log)
+    assert any("войти не удалось" in ln for ln in bot.log)
+    assert not any(ln.startswith("Бот в звонке ✓") for ln in bot.log)
+
+
+def test_главная_оболочки_плитка_подключиться_к_звонку_потом_окно_ссылки():
+    """Кадры записи 21.09: главная «Яндекс Телемост — чаты и видеозвонки».
+    Путь человека: плитка «Подключиться к звонку» → окно «Номер звонка или
+    ссылка» → ссылка → «Подключиться»."""
+    tile = _Btn("Подключиться к звонку")
+    form = _LinkForm()
+    page = _LivePage({}, strong_after=8)
+    page._els["text=Подключиться к звонку"] = tile
+    url = "https://telemost.yandex.ru/j/777"
+    def tile_click(**kw):
+        tile.clicks += 1
+        page._els["text=Номер звонка или ссылка"] = form
+    tile.click = tile_click
+    def btn_click(**kw):
+        form.btn.clicks += 1
+        if form.inp.value == url:
+            form.gone = True
+    form.btn.click = btn_click
+    bot = _joiner(page)
+    assert bot.join(url) is True
+    assert tile.clicks == 1 and form.inp.value == url and form.btn.clicks == 1
+    assert any("иду через «Подключиться к звонку»" in ln for ln in bot.log)
+
+
+def test_при_оболочке_кнопка_входа_только_во_фрейме():
+    """«Подключиться» в главном документе оболочки (плитка, диалоги) —
+    не вход; настоящая кнопка живёт во вложенном фрейме."""
+    shell_btn = _Btn("Подключиться"); frame_btn = _Btn("Подключиться")
+    page = _LivePage({})
+    page._els["#yamb-root, .yamb-root, [class*=\"yamb-windowed\"], [class*=\"yamb-\"]"] = _El("shell")
+    page._els['button:has-text("Подключиться")'] = shell_btn
+    bot = _joiner(page)
+    assert bot._shell_present() is True
+    assert bot._join_button() is None
+    page.child._els['button:has-text("Подключиться")'] = frame_btn
+    assert bot._join_button() is frame_btn
+    # без оболочки (старая вёрстка гостя) — главный документ годится
+    del page._els["#yamb-root, .yamb-root, [class*=\"yamb-windowed\"], [class*=\"yamb-\"]"]
+    del page.child._els['button:has-text("Подключиться")']
+    assert bot._join_button() is shell_btn
 
 
 class _LinkForm:
