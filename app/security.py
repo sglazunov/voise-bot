@@ -236,6 +236,14 @@ def _phone_owner(users: dict, phone: str, exclude: str | None = None) -> str | N
     return None
 
 
+def user_by_phone(phone: str) -> str | None:
+    """Логин аккаунта с таким телефоном (в любом написании — нормализуется)
+    или None. Нужен Telegram-боту: контакт, которым человек поделился кнопкой,
+    сверяется с телефоном из регистрации. Телефоны уникальны, поэтому ответ
+    однозначен."""
+    return _phone_owner(_load_users(), normalize_phone(phone))
+
+
 def phone_in_use(phone: str, exclude: str | None = None) -> bool:
     """Whether `phone` is already registered to some (other) account."""
     return _phone_owner(_load_users(), normalize_phone(phone),

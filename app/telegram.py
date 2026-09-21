@@ -23,6 +23,18 @@ deep link `?start=recover` (кнопка на странице восстано�
 сессии → сообщение с паролем удаляется из чата (`deleteMessage`). Личность
 подтверждает сам привязанный чат — как телефон при SMS-коде.
 
+Чат НЕ привязан (человек забыл пароль и на сайт войти не может, значит и код
+привязки из профиля взять негде): бот предлагает поделиться номером телефона
+кнопкой Telegram (`request_contact`). Номер сверяется с указанным при
+регистрации (`security.user_by_phone`) — тот же второй фактор, что и при
+SMS-коде. Контакт принимается ТОЛЬКО собственный (`contact.user_id` равен
+отправителю): чужую карточку из адресной книги Telegram отдаёт так же легко, а
+она доказывала бы лишь знакомство с владельцем номера. Совпал — чат
+привязывается, как по коду, и, если человек пришёл за паролем, сразу идёт
+смена. Намерение чата («/recover» или просто «/start») помнится в
+`_PHONE_WAIT` десять минут. Не совпал — «аккаунта с таким номером нет», без
+подсказок: перебор номеров через бота не должен выдавать, кто зарегистрирован.
+
 `send()` НИКОГДА не бросает: возвращает (ok, detail) и пишет в лог. Как и в
 `sms`, вызывающий не должен показывать клиенту, дошло ли сообщение
 (анти-энумерация логинов при восстановлении).
@@ -52,6 +64,7 @@ _MAX_KEPT = 50
 
 LINK_CODE_TTL = int(os.getenv("VTX_TELEGRAM_LINK_TTL_SEC", "600"))
 RECOVER_TTL = 600                  # сколько ждём новый пароль после /recover
+PHONE_TTL = 600                    # сколько помним, ЗАЧЕМ просили номер телефона
 _RECOVER_WORDS = {"/recover", "/password", "сменить пароль", "смена пароля",
                   "восстановить пароль", "забыл пароль", "забыла пароль"}
 _CANCEL_WORDS = {"/cancel", "отмена", "отменить"}
@@ -62,6 +75,12 @@ _LINK_CODES: dict[str, dict] = {}
 _ME: dict | None = None            # кэш getMe (имя бота для ссылки t.me)
 # chat_id → срок: бот ждёт от этого чата НОВЫЙ ПАРОЛЬ одним сообщением
 _RECOVER_WAIT: dict[str, float] = {}
+# chat_id → {"intent": "recover" | "link", "exp": срок}: у непривязанного чата
+# попросили номер телефона; после контакта решаем, продолжать ли сменой пароля
+_PHONE_WAIT: dict[str, dict] = {}
+_CONTACT_KEYBOARD = {"keyboard": [[{"text": "Отправить мой номер", "request_contact": True}]],
+                     "one_time_keyboard": True, "resize_keyboard": True}
+_REMOVE_KEYBOARD = {"remove_keyboard": True}
 _POLL_THREAD: threading.Thread | None = None
 _STOP = threading.Event()
 _OFFSET = 0
@@ -123,13 +142,18 @@ def bot_username() -> str:
         return str(_ME.get("username") or "")
 
 
-def send(chat_id: str | int, text: str) -> tuple[bool, str]:
-    """Отправить `text` в чат. Никогда не бросает."""
+def send(chat_id: str | int, text: str,
+         reply_markup: dict | None = None) -> tuple[bool, str]:
+    """Отправить `text` в чат. Никогда не бросает. `reply_markup` — клавиатура
+    Telegram (кнопка «поделиться номером», «убрать клавиатуру»), уходит в
+    `sendMessage` как есть; без него сообщение обычное."""
     if not configured():
         return False, "VTX_TELEGRAM_BOT_TOKEN не задан"
+    params = {"chat_id": str(chat_id), "text": text, "disable_web_page_preview": True}
+    if reply_markup:
+        params["reply_markup"] = reply_markup
     try:
-        _api("sendMessage", {"chat_id": str(chat_id), "text": text,
-                             "disable_web_page_preview": True})
+        _api("sendMessage", params)
         ok, detail = True, "sent"
     except RuntimeError as e:
         ok, detail = False, str(e)
@@ -196,14 +220,77 @@ def _delete_message(chat_id, message_id) -> None:
         log.warning("сообщение с паролем в чате %s не удалено: %s", chat_id, e)
 
 
+def _purge_phone_wait(now: float) -> None:
+    for cid in [c for c, v in _PHONE_WAIT.items() if v["exp"] <= now]:
+        _PHONE_WAIT.pop(cid, None)
+
+
+def _ask_phone(chat_id, intent: str) -> None:
+    """Непривязанный чат: предложить поделиться номером кнопкой. Намерение
+    (`recover` — пришёл за паролем, `link` — просто привязать) запоминается,
+    чтобы после контакта знать, начинать ли смену пароля."""
+    now = time.time()
+    with _LOCK:
+        _purge_phone_wait(now)
+        _PHONE_WAIT[str(chat_id)] = {"intent": intent, "exp": now + PHONE_TTL}
+    if intent == "recover":
+        head = ("Этот Telegram не привязан ни к одному аккаунту, поэтому сменить "
+                "пароль здесь пока нельзя. Нажмите кнопку «Отправить мой номер»")
+    else:
+        # Две дороги: код из профиля (нужен вход на сайт) или номер кнопкой
+        # (когда на сайт войти уже нечем).
+        head = ("Это бот восстановления пароля MeetFlowAI. Этот Telegram пока не "
+                "привязан. Чтобы привязать, откройте профиль на сайте, нажмите "
+                "«Привязать Telegram» и перейдите по ссылке — или нажмите кнопку "
+                "«Отправить мой номер»")
+    send(chat_id, f"{head} — номер должен совпадать с указанным при регистрации на "
+                  f"сайте. Чужой контакт из адресной книги не подойдёт: нужен номер "
+                  f"этого самого Telegram. Жду {PHONE_TTL // 60} мин."
+                  + ("" if intent == "recover" else " Забыли пароль — напишите /recover."),
+         reply_markup=_CONTACT_KEYBOARD)
+
+
+def _handle_contact(chat_id, msg: dict) -> None:
+    """Пришёл контакт (ответ на кнопку «Отправить мой номер»)."""
+    from . import security
+    contact = msg.get("contact") or {}
+    sender_id = (msg.get("from") or {}).get("id")
+    # Свой контакт Telegram помечает user_id отправителя; у карточки из адресной
+    # книги там чужой id или ничего. Без совпадения номер ничего не доказывает.
+    if sender_id is None or contact.get("user_id") != sender_id:
+        send(chat_id, "Нужен ваш собственный номер — тот, на который зарегистрирован "
+                      "этот Telegram. Чужой контакт из адресной книги не подойдёт. "
+                      "Нажмите «Отправить мой номер».",
+             reply_markup=_CONTACT_KEYBOARD)
+        return
+    now = time.time()
+    with _LOCK:
+        _purge_phone_wait(now)
+        rec = _PHONE_WAIT.pop(str(chat_id), None)
+    intent = rec["intent"] if rec else "link"
+    user = security.user_by_phone(str(contact.get("phone_number") or ""))
+    if not user:
+        # Без уточнений: бот — не справочник зарегистрированных номеров.
+        send(chat_id, "Аккаунта с таким номером нет. Проверьте, какой номер указан "
+                      "в профиле на сайте, или попросите администратора команды.",
+             reply_markup=_REMOVE_KEYBOARD)
+        return
+    security.set_telegram(user, str(chat_id), _sender_name(msg))
+    log.info("Telegram привязан к аккаунту %s по номеру телефона (chat %s)", user, chat_id)
+    tail = ("" if intent == "recover"
+            else " Сюда будут приходить коды восстановления пароля. Забыли "
+                 "пароль — напишите /recover.")
+    send(chat_id, f"Номер совпал: Telegram привязан к аккаунту «{user}».{tail}",
+         reply_markup=_REMOVE_KEYBOARD)
+    if intent == "recover":
+        _begin_recover(chat_id)
+
+
 def _begin_recover(chat_id) -> None:
     from . import security
     user = security.user_by_telegram(str(chat_id))
     if not user:
-        send(chat_id, "Этот Telegram не привязан ни к одному аккаунту, поэтому "
-                      "сменить пароль здесь нельзя. Восстановите пароль по SMS на "
-                      "сайте (страница «Забыли пароль?») или попросите "
-                      "администратора команды.")
+        _ask_phone(chat_id, "recover")
         return
     with _LOCK:
         _RECOVER_WAIT[str(chat_id)] = time.time() + RECOVER_TTL
@@ -244,14 +331,21 @@ def _sender_name(msg: dict) -> str:
 
 
 def handle_update(upd: dict) -> None:
-    """Разобрать одно обновление. Интересует только «/start <код>» (deep link
-    `?start=` приходит именно так) или просто код текстом."""
+    """Разобрать одно обновление: контакт (ответ на кнопку «Отправить мой
+    номер»), «/start <код>» (deep link `?start=` приходит именно так) или
+    просто код текстом, команды смены пароля."""
     msg = upd.get("message") or {}
     text = (msg.get("text") or "").strip()
     chat = msg.get("chat") or {}
     chat_id = chat.get("id")
-    if not text or chat_id is None:
+    if chat_id is None:
         return
+    if msg.get("contact"):
+        _handle_contact(chat_id, msg)
+        return
+    if not text:
+        return
+    from . import security   # поздний импорт: security не должен тянуть telegram
     lowered = text.lower()
     parts = text.split(maxsplit=1)
     # Смена пароля: команда, слова или deep link ?start=recover.
@@ -278,17 +372,17 @@ def handle_update(upd: dict) -> None:
     else:
         code = text
     if not code:
-        send(chat_id, "Это бот восстановления пароля MeetFlowAI. Чтобы привязать "
-                      "Telegram к аккаунту, откройте профиль на сайте, нажмите "
-                      "«Привязать Telegram» и перейдите по ссылке. Забыли пароль "
-                      "от привязанного аккаунта — напишите /recover.")
+        if security.user_by_telegram(str(chat_id)):
+            send(chat_id, "Это бот восстановления пароля MeetFlowAI. Этот Telegram уже "
+                          "привязан к аккаунту. Забыли пароль — напишите /recover.")
+            return
+        _ask_phone(chat_id, "link")
         return
     user = consume_link_code(code)
     if not user:
         send(chat_id, "Код привязки не подошёл или устарел. Запросите новый в "
                       "профиле на сайте.")
         return
-    from . import security   # поздний импорт: security не должен тянуть telegram
     security.set_telegram(user, str(chat_id), _sender_name(msg))
     log.info("Telegram привязан к аккаунту %s (chat %s)", user, chat_id)
     send(chat_id, f"Готово: Telegram привязан к аккаунту «{user}». Сюда будут "
