@@ -133,6 +133,11 @@ def record_meeting(url: str, out_path: str, cfg: dict,
     joined_at = None      # см. audio_state: обработчик сбоя читает и это
     try:
         if not bot.join(url, should_stop=should_stop):
+            if should_stop and should_stop():
+                # Ручная остановка во время входа — не провал бота и не
+                # повод для скриншота «изменилась вёрстка».
+                return {"ok": False, "reason": "stopped",
+                        "error": "Остановлено во время входа на встречу."}
             shot = str(Path(out_path).with_suffix(".join-failed.png"))
             bot.screenshot(shot)
             # Диагностика не должна менять диагноз: любая осечка при

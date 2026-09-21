@@ -139,7 +139,7 @@ _CALL_LINK_TITLES = [
 _SHELL = '#yamb-root, .yamb-root, [class*="yamb-windowed"], [class*="yamb-"]'
 # Главная оболочки вместо встречи: плитка «Подключиться к звонку» открывает
 # окно «Номер звонка или ссылка на него» (см. _CALL_LINK_TITLES).
-_HOME_JOIN_TILES = ['text=Подключиться к звонку', 'text=Join a call']
+_HOME_JOIN_TILES = ['text="Подключиться к звонку"', 'text="Join a call"']
 _MUTE_MIC = [
     'button[aria-label*="икрофон"]', 'button[aria-label*="mic" i]',
     '[data-testid*="microphone"]',
@@ -214,6 +214,20 @@ _POPUP_CLOSE_MAIN = [
 # Launch args: auto-accept mic/cam prompts; fake mic so we never send real audio;
 # suppress the noisy first-run/default-browser/translate popups that otherwise
 # show up in the recording.
+def _first_visible(fr, sel: str):
+    """Первый ВИДИМЫЙ элемент по селектору. `query_selector` отдаёт первый по
+    DOM — SPA держит скрытые дубли (мобильная вёрстка), и видимая кнопка
+    дальше по дереву оставалась незамеченной."""
+    els = fr.query_selector_all(sel)
+    for el in els[:8]:
+        try:
+            if el.is_visible():
+                return el
+        except Exception:  # noqa: BLE001
+            continue
+    return None
+
+
 def _policy_schemes() -> set[str]:
     """Схемы из VTX_APP_SCHEMES (те же умолчания, что в docker/entrypoint.sh)."""
     raw = os.environ.get("VTX_APP_SCHEMES") or (
@@ -541,14 +555,32 @@ class TelemostBot:
         """Проба: доходят ли до страницы события мыши через CDP. При открытом
         системном диалоге Chromium («Open xdg-open?») — не доходят (проверено на
         стенде: 0 событий с диалогом, 1+ без него). None — проба не удалась."""
+        # Слушатель — во ВСЕХ фреймах: если точка попадает на <iframe> (окно
+        # встречи на весь экран), событие получает документ фрейма, и проба
+        # только по главному документу сочла бы страницу заблокированной.
+        arm = ("() => { window.__vtxProbe = 0; window.addEventListener('mousemove',"
+               " () => { window.__vtxProbe++; }, {once: true}); }")
         try:
-            self._page.evaluate(
-                "() => { window.__vtxProbe = 0; document.addEventListener('mousemove',"
-                " () => { window.__vtxProbe++; }, {once: true}); }")
+            frames = [fr for fr in _frames_of(self._page)]
+            armed = []
+            for fr in frames:
+                try:
+                    fr.evaluate(arm)
+                    armed.append(fr)
+                except Exception:  # noqa: BLE001
+                    continue
+            if not armed:
+                return None
             self._page.mouse.move(200, 200)
             self._page.mouse.move(210, 205)
             self._page.wait_for_timeout(300)
-            return int(self._page.evaluate("() => window.__vtxProbe || 0")) == 0
+            for fr in armed:
+                try:
+                    if int(fr.evaluate("() => window.__vtxProbe || 0")) > 0:
+                        return False
+                except Exception:  # noqa: BLE001
+                    continue
+            return True
         except Exception:  # noqa: BLE001
             return None
 
@@ -600,14 +632,20 @@ class TelemostBot:
                 scheme = url.split(":", 1)[0].lower() if ":" in url else ""
                 if not scheme or scheme in _WEB_SCHEMES:
                     return
+                # Флаг — на КАЖДУЮ попытку (повтор той же ссылки после
+                # перезагрузки или в звонке снова даёт диалог); дедуп — только
+                # для строки лога. Playwright API из callback'а не зовётся.
+                self._dialog_pending = True
+                self._dialog_since = time.time()
                 if url in self._app_links:
                     return
                 self._app_links.append(url)
-                self._on_log(f"⚠ Страница пыталась открыть приложение по ссылке "
-                             f"{url[:80]} (схема «{scheme}»; в VTX_APP_SCHEMES она "
-                             f"{'есть' if scheme in _policy_schemes() else 'НЕ вписана'}).")
-                self._dialog_pending = True
-                self._dialog_since = time.time()
+                try:
+                    self._on_log(f"⚠ Страница пыталась открыть приложение по ссылке "
+                                 f"{url[:80]} (схема «{scheme}»; в VTX_APP_SCHEMES она "
+                                 f"{'есть' if scheme in _policy_schemes() else 'НЕ вписана'}).")
+                except Exception:  # noqa: BLE001
+                    pass
             cdp.on("Page.frameRequestedNavigation", on_nav)
         except Exception:  # noqa: BLE001
             pass
@@ -625,8 +663,8 @@ class TelemostBot:
         фрейме (встреча Телемоста с 21.09.2026 живёт в <iframe>)."""
         for fr in _frames_of(self._page):
             try:
-                el = fr.query_selector(sel)
-                if el and (not visible or el.is_visible()):
+                el = _first_visible(fr, sel) if visible else fr.query_selector(sel)
+                if el:
                     return el
             except Exception:  # noqa: BLE001
                 continue
@@ -691,10 +729,12 @@ class TelemostBot:
                 return not (el.is_visible())
             except Exception:  # noqa: BLE001
                 return True
+        # ⚠️ Escape здесь НЕЛЬЗЯ: без диалога он уходит в страницу и в
+        # оболочке закрывает окно встречи (ревью 21.09) — а этот метод зовётся
+        # и раз в 20 с во время записи.
         attempts = (
-            lambda: el.click(timeout=5000),
-            lambda: self._page.keyboard.press("Escape"),
-            lambda: el.click(force=True, timeout=5000),
+            lambda: el.click(timeout=3000),
+            lambda: el.click(force=True, timeout=3000),
             lambda: el.evaluate("e => e.click()"),
         )
         for attempt in attempts:
@@ -754,18 +794,24 @@ class TelemostBot:
         join_budget = int(self.cfg.get("join_timeout_sec", 60))
         self._launch()
         self._on_log(f"Открываю встречу: {url}")
-        t0 = time.time()
-        self._page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        try:
+            self._page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        except Exception as e:  # noqa: BLE001
+            self._on_log(f"Страница встречи не загрузилась: {e}")
+            return False
+        t0 = time.time()                 # бюджет — от загрузки, не от запуска
         guest = (self.cfg.get("auth_mode") or "guest") != "profile"
         if not guest:
             self._on_log("Вход под аккаунтом — имя из профиля.")
         name = self.cfg.get("bot_join_name") or "Протокол-бот"
         named = reloaded = continued = False
-        link_tries = home_tries = 0
+        link_tries = home_tries = cont_tries = 0
         last_probe = t0
         in_call = False
         deadline = t0 + join_budget
+        errors = 0
         while time.time() < deadline and not self._aborted():
+          try:
             # Уже в звонке (вход сработал сам или сохранился с прошлого раза).
             if self.is_in_call():
                 in_call = True
@@ -778,8 +824,9 @@ class TelemostBot:
             last_probe = time.time() if time.time() - last_probe > 5 else last_probe
             # Заглушка «Продолжить в браузере» — она ПЕРВАЯ: её «Продолжить»
             # совпадает с одним из селекторов кнопки входа.
-            el = self._find_first(_CONTINUE_BROWSER)
+            el = self._find_first(_CONTINUE_BROWSER) if cont_tries < 3 else None
             if el and self._try_click(el):
+                cont_tries += 1
                 if not continued:
                     self._on_log("Прошёл заглушку «Продолжить в браузере».")
                 continued = True
@@ -794,11 +841,11 @@ class TelemostBot:
                         self._on_log(f"Указал имя: {name}")
                     except Exception:  # noqa: BLE001
                         pass
-            form = self._call_link_form()
+            form = self._call_link_form() if link_tries < 3 else None
             if form:
                 inp, btn = form
                 try:
-                    inp.fill(url)
+                    inp.fill(url, timeout=3000)
                     if btn and link_tries % 2 == 0:
                         btn.click(timeout=3000)
                     else:
@@ -825,7 +872,7 @@ class TelemostBot:
             if el:
                 # Микрофон и камеру — выключить ДО входа, но не ждать их:
                 # после входа ensure_muted проверит ещё раз.
-                for sels in (_MUTE_MIC, _MUTE_CAM):
+                for sels in (_MIC_IS_ON, _CAM_IS_ON):    # только «выключить»
                     m = self._find_first(sels)
                     if m:
                         self._try_click(m)
@@ -834,7 +881,7 @@ class TelemostBot:
                     # Ждём органы управления звонком; не дождались — это НЕ
                     # вход (21.09: нажатой «кнопкой входа» оказался «+» на
                     # главной оболочки, и бот 45 с писал список чатов).
-                    if self._wait_in_call(20000):
+                    if self._wait_in_call(10000):
                         in_call = True
                         break
                     self._on_log("После нажатия органов звонка нет — пробую дальше.")
@@ -844,26 +891,46 @@ class TelemostBot:
             # Окно встречи так и не открылось (ни фрейма, ни кнопок), а
             # закрывать уже нечего — один раз перезагружаем страницу встречи:
             # оболочка, показавшая промо, сама встречу не поднимает.
-            if not reloaded and time.time() - t0 > 15 \
-                    and len(_frames_of(self._page)) <= 1:
+            # Признак «окна нет» — оболочка есть, а кнопки входа во фреймах
+            # нет (число фреймов не показатель: у оболочки служебные iframe).
+            if not reloaded and time.time() - t0 > 15 and self._shell_present():
                 reloaded = True
+                named = continued = False
+                cont_tries = link_tries = home_tries = 0
                 self._on_log("Окно встречи не открылось — перезагружаю страницу встречи.")
                 try:
-                    self._page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                    self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
                 except Exception as e:  # noqa: BLE001
                     self._on_log(f"Перезагрузка не удалась: {e}")
                 continue
             self._page.wait_for_timeout(300)
+          except Exception as e:  # noqa: BLE001
+            # Осечка одной итерации (закрытый фрейм, гонка с перерисовкой) —
+            # не повод ронять вход: наружу исключение уходило без скриншота.
+            errors += 1
+            if errors <= 2:
+                self._on_log(f"⚠ Сбой на входе, пробую дальше: {e}")
+            if errors > 10:
+                break
+            try:
+                self._page.wait_for_timeout(500)
+            except Exception:  # noqa: BLE001
+                break
         joined = in_call
         if in_call:
             self.ensure_muted()
             self._on_log(f"Бот в звонке ✓ ({time.time() - t0:.0f} с от открытия страницы)")
+            self.expand_meeting()
+            # Разворот окна может задеть не ту кнопку — перепроверяем.
+            if not self._wait_in_call(5000):
+                self._on_log("⚠ После разворота окна органы звонка пропали.")
+                in_call = joined = False
+        elif self._aborted():
+            self._on_log("Вход прерван по команде «Стоп».")
         else:
             self._on_log("В звонок войти не удалось: органов управления звонком "
                          "так и не появилось.")
-        if in_call or joined:
-            self.expand_meeting()
-        if not in_call and not joined:
+        if not in_call and not joined and not self._aborted():
             # Вёрстка Телемоста меняется без предупреждения. Чтобы подобрать
             # новые селекторы, нужно знать, ЧТО бот увидел, — пишем в карточку
             # заголовок, адрес и подписи всех видимых кнопок.
@@ -881,13 +948,13 @@ class TelemostBot:
         вложенных фреймах: в главном документе «Подключиться к звонку», «+»
         и submit-кнопки диалогов входом не являются."""
         frames = _frames_of(self._page)
-        if self._shell_present() and len(frames) > 1:
-            frames = frames[1:]
+        if self._shell_present():
+            frames = frames[1:]          # пусто — значит окна встречи ещё нет
         for sel in _JOIN_BUTTONS:
             for fr in frames:
                 try:
-                    el = fr.query_selector(sel)
-                    if el and el.is_visible():
+                    el = _first_visible(fr, sel)
+                    if el:
                         return el
                 except Exception:  # noqa: BLE001
                     continue
@@ -932,6 +999,9 @@ class TelemostBot:
                 return True
             if time.time() >= deadline or self._aborted():
                 return False
+            # Телемост просит приложение именно при входе — диалог может
+            # появиться прямо здесь.
+            self._dismiss_system_dialog()
             self._page.wait_for_timeout(poll_ms)
 
     def _is_fullscreen(self) -> bool:
@@ -982,7 +1052,7 @@ class TelemostBot:
             if not el:
                 break
             try:
-                el.click()
+                el.click(timeout=3000)
             except Exception:  # noqa: BLE001
                 break
             for _ in range(10):                  # до 1,5 с, но не дольше нужного
@@ -1035,10 +1105,21 @@ class TelemostBot:
         звонок» есть и в боковой панели оболочки Мессенджера — ещё на стадии
         «Подключение», до входа; по ней бот 18 минут писал прелобби. Поэтому
         кнопки завершения считаются только ВНЕ виджета оболочки."""
-        if self._find_first(_IN_CALL_STRONG, visible=False) is not None:
-            return True
+        frames = _frames_of(self._page)
+        shell = self._shell_present()
+        # При оболочке органы звонка — только во фрейме встречи; в главном
+        # документе «участники» есть и в шапке чата (ревью 21.09). Скрытые
+        # элементы во фрейме считаются: панель управления прячется, когда
+        # мышь неподвижна, а сам фрейм существует только у открытой встречи.
+        for sel in _IN_CALL_STRONG:
+            for fr in (frames[1:] if shell else frames):
+                try:
+                    if fr.query_selector(sel) is not None:
+                        return True
+                except Exception:  # noqa: BLE001
+                    continue
         for sel in _IN_CALL_HANGUP:
-            for fr in _frames_of(self._page):
+            for fr in (frames[1:] if shell else frames):
                 try:
                     for el in fr.query_selector_all(sel):
                         try:
