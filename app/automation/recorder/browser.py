@@ -133,6 +133,13 @@ _CALL_LINK_TITLES = [
     "Номер звонка или ссылка", "Ссылка на звонок", "Ссылка на встречу",
     "Call number or link", "Link to the call",
 ]
+# Оболочка Мессенджера в главном документе. Когда она есть, встреча живёт во
+# вложенном фрейме, и кнопки «входа» в самой оболочке (главная страница,
+# «+», «Подключиться к звонку», submit-кнопки диалогов) входом НЕ являются.
+_SHELL = '#yamb-root, .yamb-root, [class*="yamb-windowed"], [class*="yamb-"]'
+# Главная оболочки вместо встречи: плитка «Подключиться к звонку» открывает
+# окно «Номер звонка или ссылка на него» (см. _CALL_LINK_TITLES).
+_HOME_JOIN_TILES = ['text=Подключиться к звонку', 'text=Join a call']
 _MUTE_MIC = [
     'button[aria-label*="икрофон"]', 'button[aria-label*="mic" i]',
     '[data-testid*="microphone"]',
@@ -207,6 +214,14 @@ _POPUP_CLOSE_MAIN = [
 # Launch args: auto-accept mic/cam prompts; fake mic so we never send real audio;
 # suppress the noisy first-run/default-browser/translate popups that otherwise
 # show up in the recording.
+def _policy_schemes() -> set[str]:
+    """Схемы из VTX_APP_SCHEMES (те же умолчания, что в docker/entrypoint.sh)."""
+    raw = os.environ.get("VTX_APP_SCHEMES") or (
+        "telemost,yandex-telemost,yandextelemost,ya-telemost,yandexmessenger,"
+        "yandex-messenger,ya-messenger,yamb,yandex360,ya360")
+    return {x.strip().lower() for x in raw.split(",") if x.strip()}
+
+
 def _xtest_key(display: str, keysym: int) -> bool:
     """Нажать и отпустить клавишу на X-дисплее через расширение XTest
     (ctypes, без xdotool — его в образе нет). False — если библиотек или
@@ -522,24 +537,52 @@ class TelemostBot:
         self._page = self._ctx.pages[0] if self._ctx.pages else self._ctx.new_page()
         self._watch_app_links()
 
-    def _x_press_escape(self, delays=(0.7, 2.5)) -> None:
-        """Нажать Escape НА УРОВНЕ X-СЕРВЕРА (XTest), а не через Playwright.
-        Системный диалог Chromium «Open xdg-open?» — отдельное окно: клики и
-        клавиши через CDP до него не доходят, а X-событие доходит — Escape в
-        нём означает «Cancel». В самой странице Escape безвреден. Нажимается с
-        паузой (диалог появляется не мгновенно) и повторно — на случай, если
-        страница попросила приложение ещё раз."""
+    def _input_blocked(self) -> bool | None:
+        """Проба: доходят ли до страницы события мыши через CDP. При открытом
+        системном диалоге Chromium («Open xdg-open?») — не доходят (проверено на
+        стенде: 0 событий с диалогом, 1+ без него). None — проба не удалась."""
+        try:
+            self._page.evaluate(
+                "() => { window.__vtxProbe = 0; document.addEventListener('mousemove',"
+                " () => { window.__vtxProbe++; }, {once: true}); }")
+            self._page.mouse.move(200, 200)
+            self._page.mouse.move(210, 205)
+            self._page.wait_for_timeout(300)
+            return int(self._page.evaluate("() => window.__vtxProbe || 0")) == 0
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _dismiss_system_dialog(self, force: bool = False) -> bool:
+        """Закрыть системный диалог Chromium, если он ЕСТЬ. Диалог рисуется
+        внутри окна браузера (отдельного X-окна нет), CDP его не видит и не
+        закрывает; закрывает только Escape через XTest на дисплей слота. Но
+        Escape, ушедший в страницу без диалога, закрывает ОКНО ВСТРЕЧИ в
+        оболочке (21.09: бот оказался на главной) — поэтому нажимаем ТОЛЬКО
+        когда проба показала, что ввод заблокирован. Проверка идёт по флагу от
+        _watch_app_links (страница попросила приложение) или по `force`."""
+        if not force and not getattr(self, "_dialog_pending", False):
+            return False
+        if time.time() - getattr(self, "_dialog_since", 0.0) < 0.5:
+            return False                     # диалогу нужно время появиться
+        self._dialog_pending = False
+        blocked = self._input_blocked()
+        if not blocked:
+            if blocked is False:
+                self._on_log("Диалог «Open xdg-open?» не появился — страница отвечает.")
+            return False
         display = self._display or os.environ.get("DISPLAY") or ""
-        if not display:
-            return
-
-        def run():
-            for d in delays:
-                time.sleep(d)
-                if not _xtest_key(display, 0xFF1B):     # XK_Escape
-                    return
-
-        threading.Thread(target=run, name="x-escape", daemon=True).start()
+        closed = False
+        for _ in range(3):
+            if not display or not _xtest_key(display, 0xFF1B):    # XK_Escape
+                break
+            self._page.wait_for_timeout(400)
+            if self._input_blocked() is False:
+                closed = True
+                break
+        self._on_log("Закрыл системный диалог «Open xdg-open?» клавишей Escape."
+                     if closed else "⚠ Страница не принимает ввод — похоже, системный "
+                     "диалог Chromium открыт и Escape его не закрыл.")
+        return closed
 
     def _watch_app_links(self) -> None:
         """Записывать в лог карточки попытки страницы открыть ПРИЛОЖЕНИЕ по
@@ -561,10 +604,10 @@ class TelemostBot:
                     return
                 self._app_links.append(url)
                 self._on_log(f"⚠ Страница пыталась открыть приложение по ссылке "
-                             f"{url[:80]} — диалог «Open xdg-open?» закрываю "
-                             f"клавишей Escape; чтобы он не появлялся вовсе, "
-                             f"добавьте схему «{scheme}» в VTX_APP_SCHEMES.")
-                self._x_press_escape()
+                             f"{url[:80]} (схема «{scheme}»; в VTX_APP_SCHEMES она "
+                             f"{'есть' if scheme in _policy_schemes() else 'НЕ вписана'}).")
+                self._dialog_pending = True
+                self._dialog_since = time.time()
             cdp.on("Page.frameRequestedNavigation", on_nav)
         except Exception:  # noqa: BLE001
             pass
@@ -717,15 +760,22 @@ class TelemostBot:
         if not guest:
             self._on_log("Вход под аккаунтом — имя из профиля.")
         name = self.cfg.get("bot_join_name") or "Протокол-бот"
-        joined = named = reloaded = continued = False
-        link_tries = 0
+        named = reloaded = continued = False
+        link_tries = home_tries = 0
+        last_probe = t0
+        in_call = False
         deadline = t0 + join_budget
         while time.time() < deadline and not self._aborted():
             # Уже в звонке (вход сработал сам или сохранился с прошлого раза).
             if self.is_in_call():
+                in_call = True
                 self._on_log("Бот уже в звонке.")
-                joined = True
                 break
+            # Системный диалог «Open xdg-open?» — по флагу от страницы, а
+            # каждые 5 с — и без него (проба дешёвая, диалог мог прийти иначе).
+            if self._dismiss_system_dialog(force=time.time() - last_probe > 5):
+                continue
+            last_probe = time.time() if time.time() - last_probe > 5 else last_probe
             # Заглушка «Продолжить в браузере» — она ПЕРВАЯ: её «Продолжить»
             # совпадает с одним из селекторов кнопки входа.
             el = self._find_first(_CONTINUE_BROWSER)
@@ -756,12 +806,22 @@ class TelemostBot:
                 except Exception:  # noqa: BLE001
                     pass
                 if not link_tries:
-                    self._on_log("Оболочка открыла главную и спросила ссылку "
-                                 "на звонок — ввёл ссылку встречи.")
+                    self._on_log("Оболочка спросила ссылку на звонок — ввёл ссылку встречи.")
                 link_tries += 1
                 self._page.wait_for_timeout(500)
                 continue
-            el = self._find_first(_JOIN_BUTTONS)
+            # Плитка главной — пока ссылку ещё не вводили: после ввода она
+            # может оставаться в DOM за окном встречи и открыть окно снова.
+            tile = self._find_first(_HOME_JOIN_TILES) if not link_tries else None
+            if tile and home_tries < 3:
+                if not home_tries:
+                    self._on_log("Оболочка открыла главную вместо встречи — иду "
+                                 "через «Подключиться к звонку».")
+                home_tries += 1
+                self._try_click(tile)
+                self._page.wait_for_timeout(500)
+                continue
+            el = self._join_button()
             if el:
                 # Микрофон и камеру — выключить ДО входа, но не ждать их:
                 # после входа ensure_muted проверит ещё раз.
@@ -770,8 +830,15 @@ class TelemostBot:
                     if m:
                         self._try_click(m)
                 if self._try_click(el):
-                    joined = True
-                    break
+                    self._on_log(f"Нажал кнопку входа ({time.time() - t0:.0f} с), подключаюсь…")
+                    # Ждём органы управления звонком; не дождались — это НЕ
+                    # вход (21.09: нажатой «кнопкой входа» оказался «+» на
+                    # главной оболочки, и бот 45 с писал список чатов).
+                    if self._wait_in_call(20000):
+                        in_call = True
+                        break
+                    self._on_log("После нажатия органов звонка нет — пробую дальше.")
+                    continue
             if self._dismiss_popups():
                 continue
             # Окно встречи так и не открылось (ни фрейма, ни кнопок), а
@@ -787,16 +854,13 @@ class TelemostBot:
                     self._on_log(f"Перезагрузка не удалась: {e}")
                 continue
             self._page.wait_for_timeout(300)
-        if joined and not self.is_in_call():
-            self._on_log(f"Нажал кнопку входа ({time.time() - t0:.0f} с), подключаюсь…")
-        elif not joined:
-            self._on_log("Кнопку входа не нашёл — возможно, уже в звонке.")
-        # Ждём органы управления звонком, но не дольше нужного (было 6 с всегда);
-        # если кнопку входа так и не нажали — только короткая проверка.
-        in_call = self._wait_in_call(20000 if joined else 3000)
-        self.ensure_muted()
-        self._on_log(f"Бот в звонке ✓ ({time.time() - t0:.0f} с от открытия страницы)"
-                     if in_call else "Не вижу элементов звонка — проверяю ещё раз…")
+        joined = in_call
+        if in_call:
+            self.ensure_muted()
+            self._on_log(f"Бот в звонке ✓ ({time.time() - t0:.0f} с от открытия страницы)")
+        else:
+            self._on_log("В звонок войти не удалось: органов управления звонком "
+                         "так и не появилось.")
         if in_call or joined:
             self.expand_meeting()
         if not in_call and not joined:
@@ -805,6 +869,29 @@ class TelemostBot:
             # заголовок, адрес и подписи всех видимых кнопок.
             self._on_log("Что на странице: " + page_summary(self._page))
         return in_call or joined
+
+    def _shell_present(self) -> bool:
+        try:
+            return _frames_of(self._page)[0].query_selector(_SHELL) is not None
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _join_button(self):
+        """Кнопка входа на встречу. При оболочке Мессенджера — ТОЛЬКО во
+        вложенных фреймах: в главном документе «Подключиться к звонку», «+»
+        и submit-кнопки диалогов входом не являются."""
+        frames = _frames_of(self._page)
+        if self._shell_present() and len(frames) > 1:
+            frames = frames[1:]
+        for sel in _JOIN_BUTTONS:
+            for fr in frames:
+                try:
+                    el = fr.query_selector(sel)
+                    if el and el.is_visible():
+                        return el
+                except Exception:  # noqa: BLE001
+                    continue
+        return None
 
     def _call_link_form(self):
         """Окно оболочки «Номер звонка или ссылка на него»: (поле, кнопка)
@@ -1206,6 +1293,7 @@ class TelemostBot:
                 self.ensure_muted()
                 try:
                     self._dismiss_popups()
+                    self._dismiss_system_dialog()
                 except Exception:  # noqa: BLE001
                     pass
                 last_mute = time.time()
