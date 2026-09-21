@@ -285,3 +285,131 @@ def test_профиль_слота_помечается_закрытым_кор�
     data = json.loads((d / "Preferences").read_text(encoding="utf-8"))
     assert data["profile"] == {"exit_type": "Normal", "exited_cleanly": True} and data["x"] == 1
     _mark_clean_exit(tmp_path / "нет-такого")          # нет профиля — тишина
+
+
+# ---------------------------------------------------------------------------
+# 21.09.2026 (вечер): вход — один цикл опроса, а не цепочка шагов с паузами.
+# Раньше каждый шаг ждал СВОЙ таймаут до конца, даже когда элемента не было
+# (10 с заглушка, 8 с имя, 5 с микрофон/камера, 3+4+6 с пауз) — полминуты
+# до входа, начало разговора мимо записи.
+# ---------------------------------------------------------------------------
+class _LivePage(_FramedPage):
+    """Страница, у которой кнопки появляются ПО ХОДУ: `script` — список
+    «на каком опросе какой селектор появляется в дочернем фрейме»."""
+
+    def __init__(self, script: dict[int, dict], strong_after: int | None = None):
+        # tag="\0": query_selector_all отдаёт только точные совпадения — иначе
+        # любая кнопка сходила бы за «Завершить звонок» в is_in_call.
+        self.child = _Frame("child", {}, tag="\0")
+        super().__init__({}, self.child)
+        self.script, self.strong_after, self.polls = script, strong_after, 0
+        self.gotos: list[str] = []
+
+    def goto(self, url, **kw): self.gotos.append(url)
+
+    def wait_for_timeout(self, ms):
+        self.waits += 1
+        self.polls += 1
+        for sel, el in self.script.get(self.polls, {}).items():
+            self.child._els[sel] = el
+        if self.strong_after is not None and self.polls >= self.strong_after:
+            self.child._els['button:has-text("Участники")'] = _Btn("Участники")
+
+
+def _fake_clock(monkeypatch, page, step=1.0):
+    """Секунда «проходит» за каждый опрос — тест не ждёт реального времени."""
+    clock = [0.0]
+    monkeypatch.setattr("app.automation.recorder.browser.time.time", lambda: clock[0])
+    orig = page.wait_for_timeout
+    def wait(ms):
+        clock[0] += step
+        orig(ms)
+    page.wait_for_timeout = wait
+
+
+def _joiner(page, cfg=None):
+    bot = _bot(page)
+    bot.cfg = cfg or {"auth_mode": "profile", "join_timeout_sec": 60}
+    bot._launch = lambda: None
+    bot._display = None
+    return bot
+
+
+def test_вход_идёт_по_мере_появления_кнопок_без_лишних_пауз():
+    cont = _Btn("Продолжить в браузере", vanish=True)
+    join = _Btn("Подключиться")
+    mic = _Btn(aria="Выключить микрофон")
+    page = _LivePage({2: {'button:has-text("Продолжить в браузере")': cont},
+                      5: {'button:has-text("Подключиться")': join,
+                          'button[aria-label*="икрофон"]': mic}},
+                     strong_after=8)
+    bot = _joiner(page)
+    assert bot.join("https://telemost.yandex.ru/j/1") is True
+    assert cont.clicks == 1 and join.clicks == 1 and mic.clicks >= 1
+    assert page.polls < 15, f"вход занял {page.polls} опросов по 300 мс"
+    assert any("Прошёл заглушку" in ln for ln in bot.log)
+    assert any(ln.startswith("Бот в звонке ✓") for ln in bot.log)
+
+
+def test_продолжить_на_заглушке_не_считается_входом(monkeypatch):
+    """«Продолжить» есть и в списке кнопок входа: клик по заглушке не должен
+    объявляться входом."""
+    cont = _Btn("Продолжить", vanish=False)      # заглушка никуда не девается
+    page = _LivePage({1: {'button:has-text("Продолжить")': cont}})
+    _fake_clock(monkeypatch, page)
+    bot = _joiner(page, {"auth_mode": "profile", "join_timeout_sec": 20})
+    assert bot.join("https://telemost.yandex.ru/j/1") is False
+    assert cont.clicks >= 1
+    assert not any("Нажал кнопку входа" in ln for ln in bot.log)
+
+
+def test_уже_в_звонке_выход_из_цикла_сразу():
+    page = _LivePage({}, strong_after=0)
+    page.child._els['button:has-text("Участники")'] = _Btn("Участники")
+    bot = _joiner(page)
+    assert bot.join("https://telemost.yandex.ru/j/1") is True
+    assert page.polls == 0
+    assert any("уже в звонке" in ln for ln in bot.log)
+
+
+def test_гость_вводит_имя_под_аккаунтом_нет():
+    inp = _Btn(); join = _Btn("Подключиться")
+    page = _LivePage({1: {'input[name="name"]': inp, 'button:has-text("Подключиться")': join}},
+                     strong_after=3)
+    bot = _joiner(page, {"auth_mode": "guest", "bot_join_name": "Бот", "join_timeout_sec": 10})
+    assert bot.join("u") is True
+    assert inp.value == "Бот"
+    inp2 = _Btn()
+    page = _LivePage({1: {'input[name="name"]': inp2, 'button:has-text("Подключиться")': _Btn("Подключиться")}},
+                     strong_after=3)
+    bot = _joiner(page)
+    bot.join("u")
+    assert not hasattr(inp2, "value")
+
+
+def test_без_окна_встречи_одна_перезагрузка(monkeypatch):
+    page = _LivePage({})
+    page.frames = [page]                          # фреймов нет — оболочка пустая
+    _fake_clock(monkeypatch, page)
+    bot = _joiner(page, {"auth_mode": "profile", "join_timeout_sec": 40})
+    assert bot.join("https://telemost.yandex.ru/j/1") is False
+    assert page.gotos.count("https://telemost.yandex.ru/j/1") == 2, "ровно одна перезагрузка"
+    assert any("перезагружаю" in ln for ln in bot.log)
+
+
+def test_попытка_открыть_приложение_жмёт_escape_на_x(monkeypatch):
+    """Диалог «Open xdg-open?» — отдельное окно Chromium, CDP до него не
+    достаёт. Escape уходит через XTest на дисплей слота."""
+    import app.automation.recorder.browser as b
+    pressed = []
+    monkeypatch.setattr(b, "_xtest_key", lambda d, k: pressed.append((d, k)) or True)
+    page = _LivePage({})
+    bot = _joiner(page)
+    bot._display = ":99"
+    bot._x_press_escape(delays=(0, 0))
+    import time as _t
+    for _ in range(50):
+        if len(pressed) == 2:
+            break
+        _t.sleep(0.02)
+    assert pressed == [(":99", 0xFF1B), (":99", 0xFF1B)]
