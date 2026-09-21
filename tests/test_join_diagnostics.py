@@ -194,3 +194,41 @@ def test_поле_поиска_мессенджера_не_принимаетс�
     page2 = _FramedPage({}, _Frame("child", {'input[placeholder*="мя"]': name}))
     assert _bot(page2)._fill_any(_NAME_INPUTS, "Протокол-бот", overall_ms=300)
     assert name.value == "Протокол-бот"
+
+
+# ---------------------------------------------------------------------------
+# 21.09.2026, второй заход: скриншот с карточки показал промо-окно «Большое
+# обновление в Телемосте» поверх оболочки — окно встречи за ним не открывалось.
+# ---------------------------------------------------------------------------
+def test_промо_окно_закрывается_кнопкой_подтверждения():
+    ok = _Btn("Звучит отлично")
+    page = _FramedPage({'button:has-text("Звучит отлично")': ok}, _Frame("child", {}))
+    bot = _bot(page)
+    assert bot._dismiss_popups() is True
+    assert ok.clicks == 1
+    assert any("Закрыл всплывающее окно" in ln and "Звучит отлично" in ln for ln in bot.log)
+
+
+def test_крестик_закрывает_диалог_оболочки_но_не_окно_встречи():
+    """У прелобби встречи (во фрейме) свой крестик «Закрыть» — он закрывает
+    саму встречу. Его трогать нельзя; крестик диалога в главном документе — можно."""
+    meeting_x = _Btn("", aria="Закрыть")
+    child = _Frame("child", {'button[aria-label="Закрыть"]': meeting_x,
+                             '[role="dialog"] button[aria-label="Закрыть"]': meeting_x})
+    page = _FramedPage({}, child)
+    bot = _bot(page)
+    assert bot._dismiss_popups() is False
+    assert meeting_x.clicks == 0
+    dialog_x = _Btn("", aria="Закрыть")
+    page2 = _FramedPage({'[role="dialog"] button[aria-label="Закрыть"]': dialog_x}, child)
+    bot2 = _bot(page2)
+    assert bot2._dismiss_popups() is True
+    assert dialog_x.clicks == 1 and meeting_x.clicks == 0
+
+
+def test_без_всплывающих_окон_ничего_не_нажимается():
+    join = _Btn("Подключиться")
+    page = _FramedPage({}, _Frame("child", {'button:has-text("Подключиться")': join}))
+    bot = _bot(page)
+    assert bot._dismiss_popups() is False
+    assert join.clicks == 0 and bot.log == []
