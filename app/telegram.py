@@ -16,6 +16,13 @@
 Написать человеку первым бот не может: Telegram разрешает боту писать только
 тем, кто сам ему написал, — поэтому без шага 2 привязка невозможна.
 
+Смена пароля ПРЯМО В ЧАТЕ (для тех, кто забыл пароль): «/recover» или
+deep link `?start=recover` (кнопка на странице восстановления) → бот
+проверяет, что чат привязан к аккаунту, просит новый пароль одним
+сообщением → `security.reset_password_by_telegram` меняет его и сбрасывает
+сессии → сообщение с паролем удаляется из чата (`deleteMessage`). Личность
+подтверждает сам привязанный чат — как телефон при SMS-коде.
+
 `send()` НИКОГДА не бросает: возвращает (ok, detail) и пишет в лог. Как и в
 `sms`, вызывающий не должен показывать клиенту, дошло ли сообщение
 (анти-энумерация логинов при восстановлении).
@@ -44,11 +51,17 @@ sent_messages: list[dict] = []
 _MAX_KEPT = 50
 
 LINK_CODE_TTL = int(os.getenv("VTX_TELEGRAM_LINK_TTL_SEC", "600"))
+RECOVER_TTL = 600                  # сколько ждём новый пароль после /recover
+_RECOVER_WORDS = {"/recover", "/password", "сменить пароль", "смена пароля",
+                  "восстановить пароль", "забыл пароль", "забыла пароль"}
+_CANCEL_WORDS = {"/cancel", "отмена", "отменить"}
 
 _LOCK = threading.RLock()
 # код привязки → {"user": логин, "exp": срок}
 _LINK_CODES: dict[str, dict] = {}
 _ME: dict | None = None            # кэш getMe (имя бота для ссылки t.me)
+# chat_id → срок: бот ждёт от этого чата НОВЫЙ ПАРОЛЬ одним сообщением
+_RECOVER_WAIT: dict[str, float] = {}
 _POLL_THREAD: threading.Thread | None = None
 _STOP = threading.Event()
 _OFFSET = 0
@@ -161,6 +174,68 @@ def link_url(code: str) -> str:
     return f"https://t.me/{name}?start={code}" if name else ""
 
 
+def recover_url() -> str:
+    """Ссылка «сменить пароль в Telegram» для страницы восстановления."""
+    name = bot_username()
+    return f"https://t.me/{name}?start=recover" if name else ""
+
+
+def _site_url() -> str:
+    from . import config
+    return config.SITE_URL or ""
+
+
+def _delete_message(chat_id, message_id) -> None:
+    """Убрать из чата сообщение с паролем — лучшее, что можно сделать с
+    секретом, который уже отправлен. Сбой не страшен."""
+    if message_id is None:
+        return
+    try:
+        _api("deleteMessage", {"chat_id": str(chat_id), "message_id": int(message_id)})
+    except RuntimeError as e:
+        log.warning("сообщение с паролем в чате %s не удалено: %s", chat_id, e)
+
+
+def _begin_recover(chat_id) -> None:
+    from . import security
+    user = security.user_by_telegram(str(chat_id))
+    if not user:
+        send(chat_id, "Этот Telegram не привязан ни к одному аккаунту, поэтому "
+                      "сменить пароль здесь нельзя. Восстановите пароль по SMS на "
+                      "сайте (страница «Забыли пароль?») или попросите "
+                      "администратора команды.")
+        return
+    with _LOCK:
+        _RECOVER_WAIT[str(chat_id)] = time.time() + RECOVER_TTL
+    send(chat_id, f"Меняем пароль для аккаунта «{user}». Отправьте НОВЫЙ пароль "
+                  f"одним сообщением (не короче {security.MIN_PASSWORD_LEN} "
+                  f"символов). Сообщение с паролем я удалю из чата. "
+                  f"Передумали — напишите /cancel. Жду {RECOVER_TTL // 60} мин.")
+
+
+def _finish_recover(chat_id, msg: dict, text: str) -> None:
+    from . import security
+    with _LOCK:
+        exp = _RECOVER_WAIT.get(str(chat_id), 0.0)
+    if exp < time.time():
+        with _LOCK:
+            _RECOVER_WAIT.pop(str(chat_id), None)
+        send(chat_id, "Время ожидания вышло. Напишите /recover ещё раз.")
+        return
+    _delete_message(chat_id, msg.get("message_id"))
+    res = security.reset_password_by_telegram(str(chat_id), text)
+    if not res.get("ok"):
+        send(chat_id, f"{res.get('error')} Отправьте другой пароль или /cancel.")
+        return
+    with _LOCK:
+        _RECOVER_WAIT.pop(str(chat_id), None)
+    log.info("пароль аккаунта %s сменён через Telegram (chat %s)", res["username"], chat_id)
+    site = _site_url()
+    send(chat_id, f"Готово: пароль для «{res['username']}» изменён, прежние "
+                  f"сессии на сайте закрыты. Войдите с новым паролем"
+                  + (f": {site}/login" if site else "."))
+
+
 def _sender_name(msg: dict) -> str:
     frm = msg.get("from") or {}
     if frm.get("username"):
@@ -177,7 +252,25 @@ def handle_update(upd: dict) -> None:
     chat_id = chat.get("id")
     if not text or chat_id is None:
         return
+    lowered = text.lower()
     parts = text.split(maxsplit=1)
+    # Смена пароля: команда, слова или deep link ?start=recover.
+    if lowered in _CANCEL_WORDS:
+        with _LOCK:
+            waiting = _RECOVER_WAIT.pop(str(chat_id), None) is not None
+        if waiting:
+            send(chat_id, "Смена пароля отменена.")
+        return
+    if lowered in _RECOVER_WORDS or (
+            parts[0].startswith("/start") and len(parts) > 1
+            and parts[1].strip().lower() == "recover"):
+        _begin_recover(chat_id)
+        return
+    with _LOCK:
+        waiting = str(chat_id) in _RECOVER_WAIT
+    if waiting and not text.startswith("/"):
+        _finish_recover(chat_id, msg, text)
+        return
     if parts[0].startswith("/start"):
         code = parts[1].strip() if len(parts) > 1 else ""
     elif parts[0].startswith("/"):
@@ -187,7 +280,8 @@ def handle_update(upd: dict) -> None:
     if not code:
         send(chat_id, "Это бот восстановления пароля MeetFlowAI. Чтобы привязать "
                       "Telegram к аккаунту, откройте профиль на сайте, нажмите "
-                      "«Привязать Telegram» и перейдите по ссылке.")
+                      "«Привязать Telegram» и перейдите по ссылке. Забыли пароль "
+                      "от привязанного аккаунта — напишите /recover.")
         return
     user = consume_link_code(code)
     if not user:

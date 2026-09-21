@@ -37,7 +37,10 @@
     .link { background:none; width:auto; margin:10px 0 0; padding:0; color:var(--accent);
             font-size:13px; font-weight:500; }
     .link:disabled { color:var(--muted); opacity:1; }
-  </style>
+      .tg-box{margin:0 0 18px;padding:14px 16px;border-radius:14px;background:rgba(42,171,238,.08);border:1px solid rgba(42,171,238,.35);font-size:13.5px;line-height:1.45}
+    .tg-btn{display:inline-block;margin-top:10px;padding:10px 16px;border-radius:12px;background:#2AABEE;color:#fff !important;text-decoration:none;font-weight:600}
+    .tg-or{margin-top:8px;font-size:12px;opacity:.7}
+</style>
 </head>
 <body>
   <div class="card">
@@ -52,6 +55,13 @@
       <p class="sub">Личный кабинет — ваши данные и токены доступны только вам.</p>
     {% endif %}
 
+    {% if mode == "recover" and telegram_url %}
+    <div class="tg-box">
+      <div><b>Привязали Telegram?</b> Смените пароль прямо в чате с ботом: он попросит новый пароль одним сообщением.</div>
+      <a class="tg-btn" href="{{ telegram_url }}" target="_blank" rel="noopener">Сменить пароль в Telegram</a>
+      <div class="tg-or">или по коду — ниже</div>
+    </div>
+    {% endif %}
     {% if mode == "recover" %}
     <form id="f" autocomplete="on">
       <label for="username">Логин</label>

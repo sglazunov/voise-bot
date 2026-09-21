@@ -258,3 +258,75 @@ def test_send_не_бросает_и_пишет_журнал(tg):
     tg.fail_send = True
     ok, detail = telegram.send(5, "ещё")
     assert ok is False and "403" in detail
+
+
+# --------------------------------------------------------------------------- #
+# Смена пароля прямо в чате с ботом (/recover)
+# --------------------------------------------------------------------------- #
+def _msg(chat_id, text, message_id=77):
+    return {"update_id": 5, "message": {"text": text, "message_id": message_id,
+                                        "chat": {"id": chat_id}, "from": {"username": "ivan"}}}
+
+
+def test_recover_в_чате_меняет_пароль_и_удаляет_сообщение(client, tg):
+    register(client); login(client)
+    _link(client, tg, chat_id=555)
+    client.post("/api/auth/logout")
+    telegram.handle_update(_msg(555, "/start recover"))
+    assert "Отправьте НОВЫЙ пароль" in tg.sent()[-1]["text"]
+    telegram.handle_update(_msg(555, "brand-new-pass1", message_id=91))
+    assert ("deleteMessage", {"chat_id": "555", "message_id": 91}) in tg.calls
+    assert tg.sent()[-1]["text"].startswith("Готово")
+    assert login(client, password="password123").status_code != 200
+    assert login(client, password="brand-new-pass1").status_code == 200
+    assert "555" not in telegram._RECOVER_WAIT
+
+
+def test_recover_сбрасывает_старые_сессии(client, tg):
+    register(client); login(client)
+    _link(client, tg, chat_id=555)
+    assert client.get("/api/profile").status_code == 200
+    telegram.handle_update(_msg(555, "/recover"))
+    telegram.handle_update(_msg(555, "another-pass-9"))
+    assert client.get("/api/profile").status_code == 401, "старая сессия должна умереть"
+
+
+def test_recover_из_непривязанного_чата_отказывает(tg):
+    telegram.handle_update(_msg(999, "/recover"))
+    assert "не привязан" in tg.sent()[-1]["text"]
+    assert "999" not in telegram._RECOVER_WAIT
+    telegram.handle_update(_msg(999, "somepassword1"))     # это не пароль, а код привязки
+    assert "не подошёл" in tg.sent()[-1]["text"]
+
+
+def test_короткий_пароль_и_отмена(client, tg):
+    register(client); login(client)
+    _link(client, tg, chat_id=555)
+    telegram.handle_update(_msg(555, "сменить пароль"))
+    telegram.handle_update(_msg(555, "123"))
+    assert "не короче" in tg.sent()[-1]["text"]
+    assert "555" in telegram._RECOVER_WAIT, "ждём другой пароль"
+    telegram.handle_update(_msg(555, "/cancel"))
+    assert "отменена" in tg.sent()[-1]["text"]
+    assert "555" not in telegram._RECOVER_WAIT
+    assert login(client, password="password123").status_code == 200, "пароль не менялся"
+
+
+def test_ожидание_пароля_истекает(client, tg):
+    register(client); login(client)
+    _link(client, tg, chat_id=555)
+    telegram.handle_update(_msg(555, "/recover"))
+    telegram._RECOVER_WAIT["555"] = time.time() - 1
+    telegram.handle_update(_msg(555, "late-password-1"))
+    assert "Время ожидания вышло" in tg.sent()[-1]["text"]
+    assert login(client, password="password123").status_code == 200
+
+
+def test_страница_восстановления_показывает_кнопку_telegram(client, tg, monkeypatch):
+    r = client.get("/recover")
+    assert r.status_code == 200
+    assert "https://t.me/meetflow_bot?start=recover" in r.text
+    assert "Сменить пароль в Telegram" in r.text
+    monkeypatch.delenv("VTX_TELEGRAM_BOT_TOKEN", raising=False)
+    r = client.get("/recover")
+    assert "Сменить пароль в Telegram" not in r.text

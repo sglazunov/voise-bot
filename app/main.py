@@ -638,7 +638,10 @@ def series_forget_last(key: str, user: str = Depends(current_user)):
 # ---- Password recovery by phone (public, heavily throttled) ---------------
 @app.get("/recover", response_class=HTMLResponse)
 def recover_page(request: Request):
-    return _login_page(request, mode="recover", first_run=False)
+    # Кнопка «Сменить пароль в Telegram» — только когда бот настроен и
+    # отвечает (имя берётся из getMe, кэшируется).
+    tg_url = telegram.recover_url() if telegram.configured() else ""
+    return _login_page(request, mode="recover", first_run=False, telegram_url=tg_url)
 
 
 class RecoverRequestBody(BaseModel):
