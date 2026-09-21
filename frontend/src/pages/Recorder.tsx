@@ -269,6 +269,12 @@ export default function Recorder() {
             }} />
           <button className="btn btn-ghost" onClick={() => act({ kind: "scroll", dy: 300 })}>Ниже</button>
           <button className="btn btn-ghost" onClick={() => act({ kind: "goto", url: "" })}>Сначала</button>
+          {/* Промо-окна Телемоста («Большое обновление → Звучит отлично»)
+              закрываются один раз на профиль. Бот работает на копиях
+              мастер-профиля, поэтому закрыть промо навсегда можно только
+              здесь, в мастере. */}
+          <button className="btn btn-ghost" title="Открыть Телемост в профиле бота — закрыть промо-окно один раз"
+            onClick={() => act({ kind: "goto", url: "https://telemost.yandex.ru/" })}>Открыть Телемост</button>
           <button className="btn btn-primary" onClick={closeLogin}>Готово</button>
         </div>
       </Modal>

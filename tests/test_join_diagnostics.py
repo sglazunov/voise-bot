@@ -52,12 +52,17 @@ from app.automation.recorder.browser import TelemostBot, _FULLSCREEN_CLASS
 
 
 class _Btn(_El):
-    def __init__(self, text="", aria="", box=None, **kw):
+    def __init__(self, text="", aria="", box=None, vanish=False, **kw):
         super().__init__(text, aria, **kw)
         self.clicks = 0
         self._box = box
+        self._vanish = vanish      # промо-кнопка: после клика исчезает
 
-    def click(self): self.clicks += 1
+    def click(self, **kw):
+        self.clicks += 1
+        if self._vanish:
+            self._v = False
+    def evaluate(self, js): self.click()
     def fill(self, v): self.value = v
     def bounding_box(self): return self._box
 
@@ -89,6 +94,10 @@ class _FramedPage(_Frame):
 
     def title(self): return "Яндекс Телемост — 8 новых сообщений"
     def wait_for_timeout(self, ms): self.waits += 1
+    class keyboard:
+        pressed: list = []
+        @classmethod
+        def press(cls, k): cls.pressed.append(k)
     def evaluate(self, js):
         assert _FULLSCREEN_CLASS in js
         return self.fullscreen
@@ -201,7 +210,7 @@ def test_поле_поиска_мессенджера_не_принимаетс�
 # обновление в Телемосте» поверх оболочки — окно встречи за ним не открывалось.
 # ---------------------------------------------------------------------------
 def test_промо_окно_закрывается_кнопкой_подтверждения():
-    ok = _Btn("Звучит отлично")
+    ok = _Btn("Звучит отлично", vanish=True)
     page = _FramedPage({'button:has-text("Звучит отлично")': ok}, _Frame("child", {}))
     bot = _bot(page)
     assert bot._dismiss_popups() is True
@@ -219,7 +228,7 @@ def test_крестик_закрывает_диалог_оболочки_но_н
     bot = _bot(page)
     assert bot._dismiss_popups() is False
     assert meeting_x.clicks == 0
-    dialog_x = _Btn("", aria="Закрыть")
+    dialog_x = _Btn("", aria="Закрыть", vanish=True)
     page2 = _FramedPage({'[role="dialog"] button[aria-label="Закрыть"]': dialog_x}, child)
     bot2 = _bot(page2)
     assert bot2._dismiss_popups() is True
@@ -232,3 +241,18 @@ def test_без_всплывающих_окон_ничего_не_нажимае
     bot = _bot(page)
     assert bot._dismiss_popups() is False
     assert join.clicks == 0 and bot.log == []
+
+
+def test_окно_не_закрылось_кликом_пробуются_запасные_способы():
+    """21.09: клик по «Звучит отлично» проходил, а окно оставалось — карточка
+    трижды писала «закрыл». Теперь исчезновение проверяется, пробуются Escape,
+    принудительный и JS-клик, и в лог идёт честное «не закрылось»."""
+    stuck = _Btn("Звучит отлично")           # не исчезает никогда
+    page = _FramedPage({'button:has-text("Звучит отлично")': stuck}, _Frame("child", {}))
+    page.keyboard.pressed.clear()
+    bot = _bot(page)
+    assert bot._dismiss_popups() is False
+    assert stuck.clicks >= 3, "обычный, принудительный и JS-клик"
+    assert "Escape" in page.keyboard.pressed
+    assert any("не закрылось" in ln for ln in bot.log)
+    assert not any(ln.startswith("Закрыл") for ln in bot.log)

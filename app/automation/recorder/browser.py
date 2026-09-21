@@ -507,13 +507,42 @@ class TelemostBot:
             seen.add(label)
             try:
                 text = (el.inner_text() or "").strip() or (el.get_attribute("aria-label") or "")
-                el.click()
+            except Exception:  # noqa: BLE001
+                text = ""
+            if self._press_until_gone(el, label):
                 closed = True
                 self._on_log(f"Закрыл всплывающее окно: «{text or label}».")
-                self._page.wait_for_timeout(800)
-            except Exception:  # noqa: BLE001
-                break
+            else:
+                # 21.09: клик по «Звучит отлично» проходил, а окно оставалось —
+                # без этой строки в карточке было «закрыл» три раза подряд.
+                self._on_log(f"⚠ Всплывающее окно «{text or label}» не закрылось "
+                             "ни кликом, ни Escape, ни JS-кликом.")
         return closed
+
+    def _press_until_gone(self, el, sel: str) -> bool:
+        """Нажать кнопку всплывающего окна и УБЕДИТЬСЯ, что она исчезла.
+        Способы по очереди: обычный клик, Escape, принудительный клик,
+        JS-клик. Успех — селектор больше не виден."""
+        def gone() -> bool:
+            try:
+                return not (el.is_visible())
+            except Exception:  # noqa: BLE001
+                return True
+        attempts = (
+            lambda: el.click(timeout=5000),
+            lambda: self._page.keyboard.press("Escape"),
+            lambda: el.click(force=True, timeout=5000),
+            lambda: el.evaluate("e => e.click()"),
+        )
+        for attempt in attempts:
+            try:
+                attempt()
+            except Exception:  # noqa: BLE001
+                continue
+            self._page.wait_for_timeout(800)
+            if gone():
+                return True
+        return False
 
     def _click_any(self, selectors, overall_ms=12000, poll_ms=500) -> bool:
         """Poll ALL selectors repeatedly until one is clickable or we time out.
@@ -583,12 +612,33 @@ class TelemostBot:
         # 4) Join the call (poll up to the configured budget). Ждём кусками, между
         #    ними закрываем всплывающие окна: промо может выскочить и позже.
         joined = False
+        reloaded = False
         deadline = time.time() + join_budget
         while not joined and time.time() < deadline and not self._aborted():
             chunk = min(10000, max(1000, int((deadline - time.time()) * 1000)))
             joined = self._click_any(_JOIN_BUTTONS, overall_ms=chunk)
-            if not joined and self._dismiss_popups():
+            if joined:
+                break
+            if self._dismiss_popups():
                 self._click_any(_CONTINUE_BROWSER, overall_ms=3000)
+                continue
+            # Окно встречи так и не открылось (ни фрейма, ни кнопок), а
+            # закрывать уже нечего — один раз перезагружаем страницу встречи:
+            # оболочка, показавшая промо, сама встречу не поднимает.
+            if not reloaded and len(_frames_of(self._page)) <= 1 \
+                    and not self._find_first(_CONTINUE_BROWSER) \
+                    and time.time() - deadline < -15:
+                reloaded = True
+                self._on_log("Окно встречи не открылось — перезагружаю страницу встречи.")
+                try:
+                    self._page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                    self._page.wait_for_timeout(3000)
+                except Exception as e:  # noqa: BLE001
+                    self._on_log(f"Перезагрузка не удалась: {e}")
+                self._dismiss_popups()
+                if self._click_any(_CONTINUE_BROWSER, overall_ms=8000):
+                    self._on_log("Прошёл заглушку «Продолжить в браузере».")
+                    self._page.wait_for_timeout(4000)
         self._on_log("Нажал кнопку входа, подключаюсь…" if joined
                      else "Кнопку входа не нашёл — возможно, уже в звонке.")
         self._page.wait_for_timeout(6000)
@@ -1176,8 +1226,11 @@ class _LoginSession:
             page.goto(url, wait_until="domcontentloaded", timeout=45000)
 
 
+# Телемост здесь не случайно: промо-окна оболочки («Большое обновление»)
+# закрываются один раз НА ПРОФИЛЬ, а бот работает на копиях мастер-профиля —
+# закрыть промо в мастере можно только через это окно.
 _LOGIN_HOSTS = ("passport.yandex.ru", "passport.yandex.com", "passport.ya.ru",
-                "id.yandex.ru", "oauth.yandex.ru")
+                "id.yandex.ru", "oauth.yandex.ru", "telemost.yandex.ru")
 
 
 def _allowed_login_url(url: str) -> bool:
