@@ -1752,6 +1752,38 @@ JSON-LD (SoftwareApplication с Offer, FAQPage), canonical/OG. Маршруты:
 мастере через это окно. Тесты — `tests/test_join_diagnostics.py` (13),
 всего 810.
 
+⚠️ **Третий заход (запись 18 минут прелобби): промо ушло, окно встречи
+открылось, но поверх — системный диалог Chromium «Open xdg-open?»** (Телемост
+при входе пробует открыть своё приложение по своей схеме ссылок) и пузырь
+«Restore pages?». Разобрано НА СТЕНДЕ (Xvfb `:77` + `-fbdir` → XWD → PNG
+через Pillow; ffmpeg Playwright'а без x11grab, xwd/xdotool в среде нет;
+⚠️ гасить Xvfb по pid, `pkill -f "Xvfb :77"` убивает свою же оболочку):
+- при открытом диалоге клик через CDP в страницу НЕ доходит — поэтому
+  «Подключиться» не нажималось, хотя было видно;
+- `URLBlocklist` (и на схему, и `*`+allowlist) НЕ годится: `location.href`
+  на внешнюю схему подменяет страницу на `chrome-error://` «заблокировано
+  администратором»;
+- pref `protocol_handler.excluded_schemes` в этом Chromium диалог не убирает;
+- **работает `AutoLaunchProtocolsFromOrigins`** (`allowed_origins: ["*"]`):
+  Chromium «запускает» xdg-open молча, тот в контейнере ничего не открывает,
+  страница цела, клики проходят. Политика читается из
+  `/etc/chromium/policies/managed/` (проверено на Playwright-Chromium).
+  Пишет её `docker/entrypoint.sh` (root, до gosu) из `VTX_APP_SCHEMES`
+  (умолчание — десяток догадок: telemost, yandex-telemost, yamb…). Схема
+  нужна ТОЧНАЯ, поэтому `TelemostBot._watch_app_links` через CDP
+  `Page.frameRequestedNavigation` пишет в карточку «⚠ Страница пыталась
+  открыть приложение по ссылке <url> — добавьте схему в VTX_APP_SCHEMES».
+  Если диалог в записи остался — взять схему из этой строки, дописать в
+  `.env`, `docker compose up -d` (образ пересобирать не надо).
+- `--hide-crash-restore-bubble` + `_mark_clean_exit` (Preferences
+  `exit_type=Normal`) у копии профиля слота — пузыря «Restore pages?» нет.
+- **`is_in_call` верил кнопке «Завершить звонок» из виджета звонка боковой
+  панели оболочки** (`yamb-call-widget__end-button`), которая есть уже на
+  стадии «Подключение» — так и писалось прелобби 18 минут. Теперь
+  `_IN_CALL_STRONG` (Участники/Демонстрация/Чат) либо кнопка завершения ВНЕ
+  `[class*=call-widget]`. Тесты — `tests/test_join_diagnostics.py` (15),
+  всего 812.
+
 **Скриншот неудачного входа — с карточки встречи.** `MeetingState.screenshot`
 (путь `<запись>.join-failed.png`, из `res["screenshot"]` рекордера; в
 снапшоте и в восстановлении), `public()["has_screenshot"]` — только если файл

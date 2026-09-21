@@ -145,15 +145,20 @@ _CAM_IS_ON = [
     'button[aria-label*="stop video" i]', 'button[aria-label*="turn off camera" i]',
 ]
 # Controls that exist only while in the call (any one present = in call).
-_IN_CALL = [
+_IN_CALL_STRONG = [
     'button:has-text("Участники")', 'button:has-text("Демонстрация")',
     'button:text-is("Чат")', 'button:has-text("Показать всех")',
     'button[aria-label*="частник"]', 'button[aria-label*="емонстрац"]',
+]
+# Кнопки завершения: считаются, только если НЕ внутри виджета звонка боковой
+# панели оболочки (`yamb-call-widget…`) — там они есть уже на «Подключение».
+_IN_CALL_HANGUP = [
     'button[aria-label*="авершить"]', 'button[aria-label*="окинуть"]',
     'button[aria-label*="ыйти"]', 'button[aria-label*="leave" i]',
     'button[aria-label*="hang" i]', '[data-testid*="hangup"]',
     'button:has-text("Завершить")', 'button:has-text("Покинуть")',
 ]
+_IN_CALL = _IN_CALL_STRONG + _IN_CALL_HANGUP
 # Оболочка Мессенджера: слева список чатов, встреча — в окне справа. В запись
 # попадал бы список чужих переписок, а плитки участников ужимались; кнопка в
 # левом верхнем углу окна встречи разворачивает его на весь экран (у <html>
@@ -166,6 +171,9 @@ _FULLSCREEN_TOGGLE = [
     'button[aria-label*="collapse" i]',
 ]
 _FULLSCREEN_CLASS = "yamb-windowed-meeting-fullscreen"
+# Схемы, переход по которым — обычная навигация, а не «открыть приложение».
+_WEB_SCHEMES = {"http", "https", "ws", "wss", "data", "blob", "about", "chrome",
+                "chrome-error", "chrome-extension", "file", "javascript"}
 
 # Всплывающие окна оболочки: «Большое обновление в Телемосте → Звучит
 # отлично», онбординг, предложения установить приложение. 21.09 такое окно
@@ -204,6 +212,9 @@ _LAUNCH_ARGS = [
     # нет, и Chromium сам выбирает «basic»; фиксируем это явно, чтобы копия
     # профиля под слот (см. _slot_profile) расшифровывалась тем же ключом.
     "--password-store=basic",
+    # Профиль слота — копия мастера, который Chromium считает «закрытым
+    # некорректно»: без этого флага в углу висит пузырь «Restore pages?».
+    "--hide-crash-restore-bubble",
 ]
 # In a Linux container Chromium must run without the sandbox (esp. as root) and
 # not rely on the tiny default /dev/shm. Audio just follows the default Pulse
@@ -363,9 +374,29 @@ def _slot_profile(master: Path, tag: str, on_log=None) -> Path:
         shutil.rmtree(clone, ignore_errors=True)
         clone.mkdir(parents=True, exist_ok=True)
         return clone
+    _mark_clean_exit(clone)
     size = sum(f.stat().st_size for f in clone.rglob("*") if f.is_file())
     log(f"Профиль бота скопирован для слота {safe} ({size // (1024 * 1024)} МБ).")
     return clone
+
+
+def _mark_clean_exit(profile: Path) -> None:
+    """Пометить профиль «закрыт корректно»: у копии мастера в Preferences
+    остаётся exit_type=Crashed, и Chromium показывает «Restore pages?»."""
+    import json
+    pref = profile / "Default" / "Preferences"
+    if not pref.exists():
+        return
+    try:
+        data = json.loads(pref.read_text(encoding="utf-8"))
+        prof = data.setdefault("profile", {})
+        if prof.get("exit_type") == "Normal" and prof.get("exited_cleanly", True):
+            return
+        prof["exit_type"] = "Normal"
+        prof["exited_cleanly"] = True
+        pref.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
 
 
 class TelemostBot:
@@ -449,6 +480,34 @@ class TelemostBot:
             no_viewport=not headless,  # use the actual window size when headed
             viewport=None if not headless else {"width": 1280, "height": 720})
         self._page = self._ctx.pages[0] if self._ctx.pages else self._ctx.new_page()
+        self._watch_app_links()
+
+    def _watch_app_links(self) -> None:
+        """Записывать в лог карточки попытки страницы открыть ПРИЛОЖЕНИЕ по
+        своей схеме (yandex-telemost://…). Такой переход вызывает системный
+        диалог Chromium «Open xdg-open?», который перекрывает страницу и не
+        пропускает клики бота. Диалог гасится политикой из VTX_APP_SCHEMES
+        (docker/entrypoint.sh) — а какую схему вписать, видно только отсюда."""
+        self._app_links: list[str] = []
+        try:
+            cdp = self._ctx.new_cdp_session(self._page)
+            cdp.send("Page.enable")
+
+            def on_nav(ev):
+                url = str(ev.get("url") or "")
+                scheme = url.split(":", 1)[0].lower() if ":" in url else ""
+                if not scheme or scheme in _WEB_SCHEMES:
+                    return
+                if url in self._app_links:
+                    return
+                self._app_links.append(url)
+                self._on_log(f"⚠ Страница пыталась открыть приложение по ссылке "
+                             f"{url[:80]} — если в записи виден диалог «Open "
+                             f"xdg-open?», добавьте схему «{scheme}» в VTX_APP_SCHEMES.")
+            cdp.on("Page.frameRequestedNavigation", on_nav)
+        except Exception:  # noqa: BLE001
+            pass
+
     def _aborted(self) -> bool:
         sc = getattr(self, "_should_stop", None)
         try:
@@ -750,7 +809,24 @@ class TelemostBot:
                     pass
 
     def is_in_call(self) -> bool:
-        return self._find_first(_IN_CALL, visible=False) is not None
+        """В звонке = видны его органы управления. ⚠️ Кнопка «Завершить
+        звонок» есть и в боковой панели оболочки Мессенджера — ещё на стадии
+        «Подключение», до входа; по ней бот 18 минут писал прелобби. Поэтому
+        кнопки завершения считаются только ВНЕ виджета оболочки."""
+        if self._find_first(_IN_CALL_STRONG, visible=False) is not None:
+            return True
+        for sel in _IN_CALL_HANGUP:
+            for fr in _frames_of(self._page):
+                try:
+                    for el in fr.query_selector_all(sel):
+                        try:
+                            if not el.evaluate("e => !!e.closest('[class*=call-widget]')"):
+                                return True
+                        except Exception:  # noqa: BLE001
+                            return True
+                except Exception:  # noqa: BLE001
+                    continue
+        return False
 
     def participant_count(self) -> int | None:
         """Best-effort count of participants (None if it can't be read).

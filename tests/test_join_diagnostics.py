@@ -62,7 +62,11 @@ class _Btn(_El):
         self.clicks += 1
         if self._vanish:
             self._v = False
-    def evaluate(self, js): self.click()
+    in_widget = False            # лежит ли кнопка в виджете звонка оболочки
+    def evaluate(self, js):
+        if "closest" in js:
+            return self.in_widget
+        self.click()
     def fill(self, v): self.value = v
     def bounding_box(self): return self._box
 
@@ -256,3 +260,28 @@ def test_окно_не_закрылось_кликом_пробуются_зап
     assert "Escape" in page.keyboard.pressed
     assert any("не закрылось" in ln for ln in bot.log)
     assert not any(ln.startswith("Закрыл") for ln in bot.log)
+
+
+def test_кнопка_завершить_в_виджете_оболочки_не_значит_в_звонке():
+    """Скриншот записи 21.09: бот 18 минут писал прелобби «Подключиться» —
+    в боковой панели оболочки на стадии «Подключение» уже есть красная
+    «Завершить звонок» (yamb-call-widget__end-button), и is_in_call верил ей."""
+    widget_btn = _Btn("", aria="Завершить звонок"); widget_btn.in_widget = True
+    page = _FramedPage({'button[aria-label*="авершить"]': widget_btn}, _Frame("child", {}))
+    assert _bot(page).is_in_call() is False
+    real_btn = _Btn("", aria="Завершить звонок")        # in_widget=False — панель звонка
+    page2 = _FramedPage({}, _Frame("child", {'button[aria-label*="авершить"]': real_btn}))
+    assert _bot(page2).is_in_call() is True
+    page3 = _FramedPage({}, _Frame("child", {'button:has-text("Участники")': _Btn("Участники 2")}))
+    assert _bot(page3).is_in_call() is True
+
+
+def test_профиль_слота_помечается_закрытым_корректно(tmp_path):
+    import json
+    from app.automation.recorder.browser import _mark_clean_exit
+    d = tmp_path / "Default"; d.mkdir()
+    (d / "Preferences").write_text(json.dumps({"profile": {"exit_type": "Crashed", "exited_cleanly": False}, "x": 1}), encoding="utf-8")
+    _mark_clean_exit(tmp_path)
+    data = json.loads((d / "Preferences").read_text(encoding="utf-8"))
+    assert data["profile"] == {"exit_type": "Normal", "exited_cleanly": True} and data["x"] == 1
+    _mark_clean_exit(tmp_path / "нет-такого")          # нет профиля — тишина
