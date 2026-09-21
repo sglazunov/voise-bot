@@ -41,3 +41,138 @@ def test_пустая_страница_не_роняет_сводку():
         def title(self): raise RuntimeError("closed")
         def query_selector_all(self, sel): raise RuntimeError("closed")
     assert "ни одной видимой" in page_summary(Broken())
+
+
+# ---------------------------------------------------------------------------
+# 21.09.2026: встреча внутри <iframe> оболочки Мессенджера. Главный документ —
+# список чатов, кнопки «Подключиться»/«Участники»/«Чат» — во вложенном фрейме.
+# Поиск только по главному документу их не видел — бот «не входил» на встречу.
+# ---------------------------------------------------------------------------
+from app.automation.recorder.browser import TelemostBot, _FULLSCREEN_CLASS
+
+
+class _Btn(_El):
+    def __init__(self, text="", aria="", box=None, **kw):
+        super().__init__(text, aria, **kw)
+        self.clicks = 0
+        self._box = box
+
+    def click(self): self.clicks += 1
+    def fill(self, v): self.value = v
+    def bounding_box(self): return self._box
+
+
+class _Frame:
+    """Фрейм: словарь «селектор → элемент»; всё остальное — пусто."""
+    def __init__(self, url, els, content="<html/>", box=None, tag="button"):
+        self.url, self._els, self._content, self._box, self._tag = url, els, content, box, tag
+
+    def query_selector(self, sel): return self._els.get(sel)
+    def query_selector_all(self, sel):
+        return [e for k, e in self._els.items() if self._tag in sel or k == sel]
+    def content(self): return self._content
+    def frame_element(self):
+        box = self._box
+        class _FE:
+            def bounding_box(self_inner): return box
+        return _FE()
+
+
+class _FramedPage(_Frame):
+    url = "https://telemost.yandex.ru/j/1"
+
+    def __init__(self, els, child: _Frame, fullscreen=False):
+        super().__init__(self.url, els)
+        self.frames = [self, child]
+        self.fullscreen = fullscreen
+        self.waits = 0
+
+    def title(self): return "Яндекс Телемост — 8 новых сообщений"
+    def wait_for_timeout(self, ms): self.waits += 1
+    def evaluate(self, js):
+        assert _FULLSCREEN_CLASS in js
+        return self.fullscreen
+
+
+def _bot(page):
+    bot = object.__new__(TelemostBot)
+    bot._page = page
+    bot.log = []
+    bot._on_log = bot.log.append
+    bot._should_stop = None
+    bot.cfg = {}
+    return bot
+
+
+def test_элемент_во_вложенном_фрейме_находится():
+    join = _Btn("Подключиться")
+    child = _Frame("https://telemost.yandex.ru/j/1?embedded",
+                   {'button:has-text("Подключиться")': join,
+                    'button:has-text("Участники")': _Btn("Участники 1")})
+    page = _FramedPage({'button[aria-label="Почта"]': _Btn("", aria="Почта")}, child)
+    bot = _bot(page)
+    assert bot._find('button:has-text("Подключиться")') is join
+    assert bot._click_any(['button:has-text("Подключиться")'], overall_ms=1000)
+    assert join.clicks == 1
+    assert bot.is_in_call(), "«Участники» во фрейме = в звонке"
+    assert bot.participant_count() == 1
+
+
+def test_сводка_страницы_видит_кнопки_фрейма():
+    child = _Frame("child", {"b": _Btn("Подключиться")})
+    page = _FramedPage({"a": _Btn("", aria="Почта")}, child)
+    s = page_summary(page)
+    assert "Почта" in s and "Подключиться" in s and "фреймов: 2" in s
+
+
+def test_разворот_окна_встречи_по_подписи_кнопки(tmp_path):
+    toggle = _Btn("", aria="Свернуть панель")
+    child = _Frame("child", {'button[aria-label*="Свернуть"]': toggle})
+    page = _FramedPage({}, child)
+    bot = _bot(page)
+    # клик переводит оболочку в полноэкранный режим
+    orig_click = toggle.click
+    def click():
+        orig_click(); page.fullscreen = True
+    toggle.click = click
+    assert bot.expand_meeting() is True
+    assert toggle.clicks == 1
+    assert any("на весь экран" in ln for ln in bot.log)
+
+
+def test_разворот_окна_по_кнопке_в_углу_без_подписи():
+    """Подписи у кнопки может не быть — тогда берётся кнопка-иконка в левом
+    верхнем углу ОКНА ВСТРЕЧИ (координаты со сдвигом на положение iframe)."""
+    corner = _Btn("", box={"x": 560, "y": 40, "width": 40, "height": 40})
+    far = _Btn("", box={"x": 900, "y": 40, "width": 40, "height": 40})
+    child = _Frame("child", {"corner": corner, "far": far},
+                   box={"x": 536, "y": 12, "width": 1112, "height": 915})
+    page = _FramedPage({}, child)
+    bot = _bot(page)
+    orig = corner.click
+    def click():
+        orig(); page.fullscreen = True
+    corner.click = click
+    assert bot.expand_meeting() is True
+    assert corner.clicks == 1 and far.clicks == 0
+
+
+def test_без_оболочки_разворот_молчит():
+    """Старая вёрстка (гость без Мессенджера): кнопки нет, класса нет —
+    это не ошибка, и предупреждения в карточке быть не должно."""
+    page = _FramedPage({}, _Frame("child", {}))
+    bot = _bot(page)
+    assert bot.expand_meeting() is False
+    assert not any("⚠" in ln for ln in bot.log)
+
+
+def test_html_сохраняется_по_каждому_фрейму(tmp_path):
+    child = _Frame("https://telemost.yandex.ru/j/1?embedded", {}, content="<b>meet</b>")
+    page = _FramedPage({}, child)
+    page._content = "<html>shell</html>"
+    bot = _bot(page)
+    out = tmp_path / "rec.join-failed.html"
+    bot.dump_html(str(out))
+    assert out.read_text(encoding="utf-8") == "<html>shell</html>"
+    fr = tmp_path / "rec.join-failed.frame1.html"
+    assert "meet" in fr.read_text(encoding="utf-8") and "embedded" in fr.read_text(encoding="utf-8")

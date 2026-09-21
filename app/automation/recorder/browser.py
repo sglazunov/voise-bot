@@ -45,25 +45,48 @@ def page_summary(page, limit: int = 20) -> str:
     except Exception:  # noqa: BLE001
         pass
     labels: list[str] = []
-    try:
-        for el in page.query_selector_all('button, a, [role="button"], input'):
-            try:
-                if not el.is_visible():
+    n_frames = 0
+    for fr in _frames_of(page):
+        n_frames += 1
+        try:
+            for el in fr.query_selector_all('button, a, [role="button"], input'):
+                try:
+                    if not el.is_visible():
+                        continue
+                    text = (el.inner_text() or "").strip().replace("\n", " ")
+                    aria = (el.get_attribute("aria-label") or "").strip()
+                    ph = (el.get_attribute("placeholder") or "").strip()
+                    label = text or aria or ph
+                    if label and label not in labels:
+                        labels.append(label[:40])
+                    if len(labels) >= limit:
+                        break
+                except Exception:  # noqa: BLE001
                     continue
-                text = (el.inner_text() or "").strip().replace("\n", " ")
-                aria = (el.get_attribute("aria-label") or "").strip()
-                ph = (el.get_attribute("placeholder") or "").strip()
-                label = text or aria or ph
-                if label and label not in labels:
-                    labels.append(label[:40])
-                if len(labels) >= limit:
-                    break
-            except Exception:  # noqa: BLE001
-                continue
-    except Exception:  # noqa: BLE001
-        pass
+        except Exception:  # noqa: BLE001
+            continue
+        if len(labels) >= limit:
+            break
+    if n_frames > 1:
+        parts.append(f"фреймов: {n_frames}")
     parts.append("кнопки: " + (" | ".join(labels) if labels else "ни одной видимой"))
     return "; ".join(parts)
+
+
+def _frames_of(page) -> list:
+    """Главный документ И все вложенные фреймы.
+
+    ⚠️ С 21.09.2026 Телемост открывается внутри оболочки Мессенджера
+    (`yamb-windowed-meeting`), а сама встреча — кнопки «Подключиться»,
+    «Участники», «Чат» — живёт в <iframe>. `page.query_selector` вложенные
+    документы не видит, поэтому любой поиск элемента идёт по этому списку."""
+    try:
+        frames = list(page.frames)      # включает главный фрейм
+    except Exception:  # noqa: BLE001
+        frames = []
+    if not frames:
+        frames = [page]
+    return frames
 
 
 # Candidate selectors (first match wins). Tune against the live site if needed.
@@ -110,13 +133,26 @@ _CAM_IS_ON = [
 # Controls that exist only while in the call (any one present = in call).
 _IN_CALL = [
     'button:has-text("Участники")', 'button:has-text("Демонстрация")',
-    'button:has-text("Чат")', 'button:has-text("Показать всех")',
+    'button:text-is("Чат")', 'button:has-text("Показать всех")',
     'button[aria-label*="частник"]', 'button[aria-label*="емонстрац"]',
     'button[aria-label*="авершить"]', 'button[aria-label*="окинуть"]',
     'button[aria-label*="ыйти"]', 'button[aria-label*="leave" i]',
     'button[aria-label*="hang" i]', '[data-testid*="hangup"]',
     'button:has-text("Завершить")', 'button:has-text("Покинуть")',
 ]
+# Оболочка Мессенджера: слева список чатов, встреча — в окне справа. В запись
+# попадал бы список чужих переписок, а плитки участников ужимались; кнопка в
+# левом верхнем углу окна встречи разворачивает его на весь экран (у <html>
+# появляется класс `yamb-windowed-meeting-fullscreen`).
+_FULLSCREEN_TOGGLE = [
+    'button[aria-label*="Свернуть"]', 'button[aria-label*="свернуть"]',
+    'button[aria-label*="панел"]', 'button[aria-label*="Панел"]',
+    'button[aria-label*="весь экран"]', 'button[aria-label*="олноэкран"]',
+    'button[aria-label*="sidebar" i]', 'button[aria-label*="fullscreen" i]',
+    'button[aria-label*="collapse" i]',
+]
+_FULLSCREEN_CLASS = "yamb-windowed-meeting-fullscreen"
+
 # Launch args: auto-accept mic/cam prompts; fake mic so we never send real audio;
 # suppress the noisy first-run/default-browser/translate popups that otherwise
 # show up in the recording.
@@ -384,6 +420,26 @@ class TelemostBot:
         except Exception:
             return False
 
+    # -- поиск по всем фреймам ----------------------------------------------
+    def _find(self, sel: str, visible: bool = True):
+        """Первый элемент по селектору в главном документе ИЛИ во вложенном
+        фрейме (встреча Телемоста с 21.09.2026 живёт в <iframe>)."""
+        for fr in _frames_of(self._page):
+            try:
+                el = fr.query_selector(sel)
+                if el and (not visible or el.is_visible()):
+                    return el
+            except Exception:  # noqa: BLE001
+                continue
+        return None
+
+    def _find_first(self, selectors, visible: bool = True):
+        for sel in selectors:
+            el = self._find(sel, visible=visible)
+            if el:
+                return el
+        return None
+
     def _click_any(self, selectors, overall_ms=12000, poll_ms=500) -> bool:
         """Poll ALL selectors repeatedly until one is clickable or we time out.
 
@@ -392,13 +448,12 @@ class TelemostBot:
         expected control yet). Bails early if the user pressed «Остановить»."""
         deadline = time.time() + overall_ms / 1000
         while time.time() < deadline and not self._aborted():
-            for sel in selectors:
+            el = self._find_first(selectors)
+            if el:
                 try:
-                    el = self._page.query_selector(sel)
-                    if el and el.is_visible():
-                        el.click()
-                        return True
-                except Exception:
+                    el.click()
+                    return True
+                except Exception:  # noqa: BLE001
                     pass
             self._page.wait_for_timeout(poll_ms)
         return False
@@ -406,13 +461,12 @@ class TelemostBot:
     def _fill_any(self, selectors, value, overall_ms=6000) -> bool:
         deadline = time.time() + overall_ms / 1000
         while time.time() < deadline:
-            for sel in selectors:
+            el = self._find_first(selectors)
+            if el:
                 try:
-                    el = self._page.query_selector(sel)
-                    if el and el.is_visible():
-                        el.fill(value)
-                        return True
-                except Exception:
+                    el.fill(value)
+                    return True
+                except Exception:  # noqa: BLE001
                     pass
             self._page.wait_for_timeout(400)
         return False
@@ -453,6 +507,8 @@ class TelemostBot:
         in_call = self.is_in_call()
         self._on_log("Бот в звонке ✓" if in_call
                      else "Не вижу элементов звонка — проверяю ещё раз…")
+        if in_call or joined:
+            self.expand_meeting()
         if not in_call and not joined:
             # Вёрстка Телемоста меняется без предупреждения. Чтобы подобрать
             # новые селекторы, нужно знать, ЧТО бот увидел, — пишем в карточку
@@ -460,36 +516,101 @@ class TelemostBot:
             self._on_log("Что на странице: " + page_summary(self._page))
         return in_call or joined
 
+    def _is_fullscreen(self) -> bool:
+        try:
+            return bool(self._page.evaluate(
+                f"document.documentElement.classList.contains('{_FULLSCREEN_CLASS}')"))
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _corner_button(self):
+        """Кнопка-иконка в левом верхнем углу окна встречи (та, что разворачивает
+        его на весь экран), когда у неё нет подписи, по которой её можно найти.
+        Координаты у Playwright — относительно окна браузера, у вложенного
+        фрейма прибавляется положение самого <iframe>."""
+        for fr in _frames_of(self._page):
+            try:
+                ox = oy = 0.0
+                fe = fr.frame_element() if hasattr(fr, "frame_element") else None
+                if fe is not None:
+                    fb = fe.bounding_box()
+                    if not fb:
+                        continue
+                    ox, oy = fb["x"], fb["y"]
+                for el in fr.query_selector_all("button"):
+                    try:
+                        if not el.is_visible() or (el.inner_text() or "").strip():
+                            continue
+                        b = el.bounding_box()
+                        if b and b["x"] - ox < 110 and b["y"] - oy < 110 \
+                                and b["width"] <= 64 and b["height"] <= 64:
+                            return el
+                    except Exception:  # noqa: BLE001
+                        continue
+            except Exception:  # noqa: BLE001
+                continue
+        return None
+
+    def expand_meeting(self) -> bool:
+        """Развернуть окно встречи на весь экран, спрятав боковую панель
+        Мессенджера. Без этого в запись попадает список чужих чатов, а плитки
+        участников занимают половину кадра. Если оболочки нет (гостевой вход
+        по старой вёрстке) — просто нечего делать."""
+        if self._is_fullscreen():
+            self._on_log("Окно встречи уже на весь экран.")
+            return True
+        for attempt in range(2):
+            el = self._find_first(_FULLSCREEN_TOGGLE) or self._corner_button()
+            if not el:
+                break
+            try:
+                el.click()
+            except Exception:  # noqa: BLE001
+                break
+            self._page.wait_for_timeout(1500)
+            if self._is_fullscreen():
+                self._on_log("Свернул боковую панель — окно встречи на весь экран.")
+                return True
+        if self._find("." + _FULLSCREEN_CLASS + "-layout, .yamb-windowed-meeting",
+                      visible=False) is None:
+            return False            # старая вёрстка без оболочки — норма
+        self._on_log("⚠ Не нашёл кнопку «свернуть панель»: в записи останется "
+                     "боковая панель Мессенджера. " + page_summary(self._page))
+        return False
+
     def dump_html(self, path: str) -> None:
         """Сохранить HTML страницы рядом со скриншотом сбоя — по нему можно
-        подобрать селекторы под новую вёрстку, не заходя на встречу руками."""
+        подобрать селекторы под новую вёрстку, не заходя на встречу руками.
+        Вложенные фреймы — отдельными файлами `<имя>.frame<N>.html`: встреча
+        живёт именно там, а сохранённый главный документ её не содержит."""
         try:
             Path(path).write_text(self._page.content(), encoding="utf-8")
         except Exception as e:  # noqa: BLE001
             self._on_log(f"HTML страницы не сохранён: {e}")
+            return
+        for i, fr in enumerate(_frames_of(self._page)):
+            if i == 0:
+                continue
+            try:
+                extra = Path(path).with_suffix(f".frame{i}.html")
+                extra.write_text(f"<!-- {fr.url} -->\n" + fr.content(), encoding="utf-8")
+            except Exception:  # noqa: BLE001
+                continue
 
     def ensure_muted(self) -> None:
         """Turn the bot's mic and camera OFF (only if currently ON, so we never
         un-mute). Prevents the bot from sending any audio/video into the call."""
         for sels, what in ((_MIC_IS_ON, "микрофон"), (_CAM_IS_ON, "камеру")):
-            for sel in sels:
+            el = self._find_first(sels)
+            if el:
                 try:
-                    el = self._page.query_selector(sel)
-                    if el and el.is_visible():
-                        el.click()
-                        self._on_log(f"Выключил {what} бота.")
-                        break
-                except Exception:
+                    el.click()
+                    self._on_log(f"Выключил {what} бота.")
+                except Exception:  # noqa: BLE001
                     pass
 
     def is_in_call(self) -> bool:
-        for sel in _IN_CALL:
-            try:
-                if self._page.query_selector(sel):
-                    return True
-            except Exception:
-                continue
-        return False
+        return self._find_first(_IN_CALL, visible=False) is not None
 
     def participant_count(self) -> int | None:
         """Best-effort count of participants (None if it can't be read).
@@ -501,7 +622,7 @@ class TelemostBot:
         for sel in ('button:has-text("Участники")', 'button:has-text("Participants")',
                     'button[aria-label*="частник"]', 'button[aria-label*="articipant" i]'):
             try:
-                el = self._page.query_selector(sel)
+                el = self._find(sel, visible=False)
                 if not el:
                     continue
                 txt = ((el.inner_text() or "") + " "
@@ -522,13 +643,7 @@ class TelemostBot:
     )
 
     def alone_screen(self) -> bool:
-        for sel in self._ALONE_HINTS:
-            try:
-                if self._page.query_selector(sel):
-                    return True
-            except Exception:
-                continue
-        return False
+        return self._find_first(self._ALONE_HINTS, visible=False) is not None
 
     # Экран, который Телемост показывает, когда организатор завершил встречу для
     # всех. Ловим его ПО ТЕКСТУ, а не по исчезновению кнопок: часть управления на
@@ -545,13 +660,7 @@ class TelemostBot:
 
     def call_ended(self) -> bool:
         """Организатор завершил встречу для всех — писать больше нечего."""
-        for sel in self._ENDED_HINTS:
-            try:
-                if self._page.query_selector(sel):
-                    return True
-            except Exception:
-                continue
-        return False
+        return self._find_first(self._ENDED_HINTS, visible=False) is not None
 
     def screenshot(self, path: str) -> None:
         try:
@@ -580,14 +689,7 @@ class TelemostBot:
 
     def _chat_open(self) -> bool:
         """Is the chat panel open (works for both guest and signed-in modes)?"""
-        for sel in self._CHAT_OPEN_HINTS:
-            try:
-                el = self._page.query_selector(sel)
-                if el and el.is_visible():
-                    return True
-            except Exception:
-                continue
-        return False
+        return self._find_first(self._CHAT_OPEN_HINTS) is not None
 
     def open_chat(self) -> None:
         """Open the chat panel ONCE at the start of recording and NEVER touch
