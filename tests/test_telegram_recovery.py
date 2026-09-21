@@ -46,9 +46,13 @@ def tg(monkeypatch):
     monkeypatch.setattr(telegram, "_api", fake)
     monkeypatch.setattr(telegram, "_ME", None)
     telegram._LINK_CODES.clear()
+    telegram._PHONE_WAIT.clear()
+    telegram._RECOVER_WAIT.clear()
     telegram.sent_messages.clear()
     yield fake
     telegram._LINK_CODES.clear()
+    telegram._PHONE_WAIT.clear()
+    telegram._RECOVER_WAIT.clear()
     telegram.sent_messages.clear()
 
 
@@ -330,3 +334,91 @@ def test_страница_восстановления_показывает_кн
     monkeypatch.delenv("VTX_TELEGRAM_BOT_TOKEN", raising=False)
     r = client.get("/recover")
     assert "Сменить пароль в Telegram" not in r.text
+
+
+# --------------------------------------------------------------------------- #
+# Непривязанный чат: привязка по номеру телефона (кнопка request_contact)
+# --------------------------------------------------------------------------- #
+def _contact(chat_id, phone, from_id=1001, user_id=1001):
+    """Сообщение с контактом. `user_id` — чей это номер по мнению Telegram:
+    у своей карточки он равен отправителю, у чужой из адресной книги — нет."""
+    contact = {"phone_number": phone, "first_name": "Иван"}
+    if user_id is not None:
+        contact["user_id"] = user_id
+    return {"update_id": 6, "message": {"contact": contact, "message_id": 80,
+                                        "chat": {"id": chat_id},
+                                        "from": {"id": from_id, "username": "ivan"}}}
+
+
+def test_непривязанному_чату_предлагают_поделиться_номером(tg):
+    telegram.handle_update(_msg(999, "/recover"))
+    reply = tg.sent()[-1]
+    kb = reply["reply_markup"]["keyboard"][0][0]
+    assert kb["request_contact"] is True
+    assert reply["reply_markup"]["one_time_keyboard"] is True
+    assert "при регистрации" in reply["text"] and "Чужой контакт" in reply["text"]
+    assert "SMS" not in reply["text"]
+    assert telegram._PHONE_WAIT["999"]["intent"] == "recover"
+    assert "999" not in telegram._RECOVER_WAIT
+
+
+def test_контакт_с_телефоном_аккаунта_привязывает_и_меняет_пароль(client, tg):
+    register(client); login(client)
+    client.post("/api/auth/logout")
+    telegram.handle_update(_msg(999, "/start recover"))
+    telegram.handle_update(_contact(999, "79990000000"))
+    assert security.telegram_of("alice")["chat_id"] == "999"
+    texts = [m["text"] for m in tg.sent()]
+    assert any("Номер совпал" in t and "alice" in t for t in texts)
+    linked = [m for m in tg.sent() if "Номер совпал" in m["text"]][-1]
+    assert linked["reply_markup"] == {"remove_keyboard": True}
+    assert "Отправьте НОВЫЙ пароль" in tg.sent()[-1]["text"]
+    assert "999" not in telegram._PHONE_WAIT, "намерение потрачено"
+    telegram.handle_update(_msg(999, "brand-new-pass1", message_id=91))
+    assert ("deleteMessage", {"chat_id": "999", "message_id": 91}) in tg.calls
+    assert tg.sent()[-1]["text"].startswith("Готово")
+    assert login(client, password="password123").status_code != 200
+    assert login(client, password="brand-new-pass1").status_code == 200
+
+
+@pytest.mark.parametrize("phone", ["8 999 000-00-00", "+7 (999) 000-00-00", "+79990000000"])
+def test_телефон_в_другом_написании_тоже_совпадает(client, tg, phone):
+    register(client)
+    telegram.handle_update(_msg(999, "/recover"))
+    telegram.handle_update(_contact(999, phone))
+    assert security.telegram_of("alice")["chat_id"] == "999"
+    assert "Отправьте НОВЫЙ пароль" in tg.sent()[-1]["text"]
+
+
+def test_чужой_контакт_отклоняется(client, tg):
+    register(client)
+    telegram.handle_update(_msg(999, "/recover"))
+    telegram.handle_update(_contact(999, "79990000000", from_id=1001, user_id=2002))
+    assert security.telegram_of("alice") == {}
+    assert "собственный номер" in tg.sent()[-1]["text"]
+    assert "999" not in telegram._RECOVER_WAIT
+    # контакт без user_id (карточка не-пользователя Telegram) — тоже чужой
+    telegram.handle_update(_contact(999, "79990000000", user_id=None))
+    assert security.telegram_of("alice") == {}
+
+
+def test_номера_нет_среди_аккаунтов(client, tg):
+    register(client)
+    telegram.handle_update(_msg(999, "/recover"))
+    telegram.handle_update(_contact(999, "79990009999"))
+    assert security.telegram_of("alice") == {}
+    reply = tg.sent()[-1]
+    assert "нет" in reply["text"] and reply["reply_markup"] == {"remove_keyboard": True}
+    assert "9990000000" not in reply["text"] and "alice" not in reply["text"]
+    assert "999" not in telegram._RECOVER_WAIT
+
+
+def test_start_без_намерения_привязывает_без_смены_пароля(client, tg):
+    register(client)
+    telegram.handle_update(_msg(999, "/start"))
+    assert tg.sent()[-1]["reply_markup"]["keyboard"][0][0]["request_contact"] is True
+    telegram.handle_update(_contact(999, "79990000000"))
+    assert security.telegram_of("alice")["chat_id"] == "999"
+    assert "999" not in telegram._RECOVER_WAIT
+    assert "Номер совпал" in tg.sent()[-1]["text"]
+    assert login(client, password="password123").status_code == 200, "пароль не менялся"
