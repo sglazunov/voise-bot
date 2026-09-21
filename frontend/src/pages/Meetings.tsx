@@ -136,8 +136,12 @@ export default function Meetings() {
   }
 
   const all = s?.meetings ?? [];
+  // «Сегодня» — не только по дате: задача Weeek без времени (no_time) и всё,
+  // что бот делает прямо сейчас, тоже относятся к сегодняшнему дню. Раньше
+  // карточка без времени в этом фильтре была невидима, пока время не поставят.
   const list = all.filter((m) =>
-    filter === "today" ? isToday(m.start) : filter === "work" ? WORK.includes(m.state) :
+    filter === "today" ? (isToday(m.start) || m.state === "no_time" || WORK.includes(m.state)) :
+    filter === "work" ? WORK.includes(m.state) :
     filter === "done" ? m.state === "done" : true);
 
   return (
