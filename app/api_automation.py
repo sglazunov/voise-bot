@@ -168,6 +168,23 @@ def automation_scheduler_run_now(task_id: str, user: str = Depends(current_user)
     return res
 
 
+class RunByUrl(BaseModel):
+    url: str
+    title: str = ""
+    do_protocol: bool | None = None
+
+
+@router.post("/scheduler/run-url")
+def automation_scheduler_run_url(body: RunByUrl, user: str = Depends(current_user)):
+    """Отправить бота на встречу по ссылке — без задачи Weeek. Запись, облако,
+    распознавание и протокол — как у обычной встречи; в Weeek ничего не пишется."""
+    from .automation.scheduler import scheduler
+    res = scheduler.run_url(user, body.url, body.title, body.do_protocol)
+    if not res.get("ok"):
+        raise HTTPException(400, res.get("error"))
+    return res
+
+
 @router.post("/scheduler/poll-now")
 def automation_scheduler_poll_now(user: str = Depends(current_user)):
     """Force an immediate Weeek re-poll (the manual «Обновить статус» button)."""

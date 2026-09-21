@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Video, RefreshCw, Square, Clock, Loader2, Link2, NotebookPen, Radio, ScrollText, Camera, Download } from "lucide-react";
+import { Video, RefreshCw, Square, Clock, Loader2, Link2, NotebookPen, Radio, ScrollText, Camera, Download, Link } from "lucide-react";
 import { Page } from "../components/Layout";
 import { Ellipsis, Switch, StatusBadge, Modal, useToast } from "../components/ui";
 import { api } from "../lib/api";
@@ -56,6 +56,21 @@ export default function Meetings() {
   // Скриншот страницы, на которой бот НЕ СМОГ войти: открывается прямо с
   // карточки, чтобы не лезть за файлом по ssh.
   const [shotFor, setShotFor] = useState<Meeting | null>(null);
+  // Запуск бота просто по ссылке — без задачи Weeek.
+  const [byUrl, setByUrl] = useState("");
+  const [byTitle, setByTitle] = useState("");
+  const [byProto, setByProto] = useState(true);
+  const [byBusy, setByBusy] = useState(false);
+  async function runByUrl() {
+    if (!byUrl.trim()) { toast("Вставьте ссылку на встречу", true); return; }
+    setByBusy(true);
+    try {
+      const r = await api.post("/api/automation/scheduler/run-url",
+        { url: byUrl.trim(), title: byTitle.trim(), do_protocol: byProto });
+      toast(r.detail || "Запись запущена"); setByUrl(""); setByTitle(""); setFilter("today"); load();
+    } catch (e: any) { toast(e.message, true); }
+    finally { setByBusy(false); }
+  }
   const [notesText, setNotesText] = useState("");
   const [notesSaving, setNotesSaving] = useState(false);
   const [liveText, setLiveText] = useState("");
@@ -130,6 +145,26 @@ export default function Meetings() {
       actions={<button className="btn btn-ghost" onClick={pollNow} disabled={polling}>
         {polling ? <Loader2 size={15} className="animate-spin" /> : <RefreshCw size={15} />}
         {polling ? "Обновляю…" : "Обновить из Weeek"}</button>}>
+      <div className="glass p-3 mb-3.5">
+        <div className="text-[12.5px] font-semibold mb-2 flex items-center gap-1.5">
+          <Link size={14} color="var(--accent)" /> Отправить бота по ссылке
+        </div>
+        <div className="flex gap-2 flex-wrap items-center">
+          <input className="field flex-1 min-w-[220px]" placeholder="https://telemost.yandex.ru/j/…"
+            value={byUrl} onChange={(e) => setByUrl(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") runByUrl(); }} />
+          <input className="field min-w-[160px]" placeholder="Название (необязательно)"
+            value={byTitle} onChange={(e) => setByTitle(e.target.value)} />
+          <label className="flex items-center gap-2 text-[12.5px]" style={{ color: "var(--muted)" }}>
+            Протокол <Switch size="sm" on={byProto} onChange={() => setByProto(!byProto)} />
+          </label>
+          <button className="btn btn-primary" onClick={runByUrl} disabled={byBusy}>
+            {byBusy ? <Loader2 size={14} className="animate-spin" /> : <Video size={14} />} Подключиться</button>
+        </div>
+        <div className="text-[11.5px] mt-1.5" style={{ color: "var(--muted)" }}>
+          Без задачи в Weeek: запись, облако и протокол — как обычно, ссылки в Weeek не пишутся.
+        </div>
+      </div>
       <div className="glass p-2.5 flex items-center gap-2 mb-3.5 flex-wrap">
         {FILTERS.map((f) => (
           <button key={f.id} onClick={() => setFilter(f.id)}
@@ -158,6 +193,7 @@ export default function Meetings() {
                   <span className="flex items-center gap-1"><Clock size={12} /> {fmtDateTime(m.start)}</span>
                   {/* the detail line runs long ("…распознавание+протокол — job 6ca…"),
                       so a pill shape only looks right when it stays short */}
+                  {m.adhoc && <span className="glass2 rounded-lg px-2 py-0.5" title="Запущена по ссылке, без задачи Weeek">по ссылке</span>}
                   {m.detail && <span className="glass2 rounded-lg px-2 py-0.5 line-clamp-2 min-w-0">{m.detail}</span>}
                 </div>
               </div>
@@ -191,7 +227,7 @@ export default function Meetings() {
                     onClick={() => setShotFor(m)}>
                     <Camera size={14} /></button>
                 ) : null}
-                {!rec && (
+                {!rec && !m.adhoc && (
                   <button className="btn-ghost grid place-items-center flex-none"
                     style={{ width: 30, height: 30, borderRadius: 9 }}
                     title="Прикрепить ссылки на видео/протокол к задаче Weeek"

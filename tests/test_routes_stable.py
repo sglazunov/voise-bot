@@ -74,6 +74,7 @@ EXPECTED = {
     "POST /api/automation/recorder/test",
     "POST /api/automation/scheduler/poll-now",
     "POST /api/automation/scheduler/run-now",
+    "POST /api/automation/scheduler/run-url",
     "POST /api/automation/scheduler/stop-recording",
     "POST /api/automation/settings",
     "POST /api/context",

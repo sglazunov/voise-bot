@@ -5,6 +5,7 @@ export type Meeting = {
   has_recording?: boolean; // лежит ли на диске готовая запись этой встречи
   logs?: string[];        // хвост лога рекордера — что бот видел на встрече
   has_screenshot?: boolean; // есть скриншот страницы, на которой бот не смог войти
+  adhoc?: boolean;          // встреча «по ссылке», без задачи Weeek
 };
 export type Status = {
   running: boolean; enabled: boolean; recording: boolean; active: number;

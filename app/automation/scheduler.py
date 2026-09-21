@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
 import threading
 import time
 from dataclasses import dataclass, field
@@ -118,6 +119,7 @@ class MeetingState:
                 # затирал готовую запись — имя файла детерминировано.
                 "has_recording": self.recording_exists(),
                 "has_screenshot": self.screenshot_exists(),
+                "adhoc": is_adhoc(self.task_id),
                 # Лог рекордера копился в памяти, но наружу отдавалась только
                 # ПОСЛЕДНЯЯ строка (как detail). Из-за этого любую проблему бота
                 # — не сработавшее стоп-слово, не найденную кнопку чата, запись
@@ -174,6 +176,38 @@ def _protocol_wanted(cfg: dict, owner: str, title: str, log=None) -> bool:
     except Exception:  # noqa: BLE001 — карточка серии не должна ломать запись
         _LOG.debug("Приоритет серии не прочитан", exc_info=True)
     return True
+
+
+# Встречи «по ссылке» — без задачи Weeek. У них свой префикс task_id: по нему
+# конвейер пропускает всё, что пишет В Weeek (поля «Видео/Протокол встречи»,
+# комментарий), — записать некуда. Двоеточия в id быть не может: ключ карточки
+# режется по «:» (см. _resume_pending).
+_ADHOC_PREFIX = "link-"
+
+
+def is_adhoc(task_id) -> bool:
+    return str(task_id or "").startswith(_ADHOC_PREFIX)
+
+
+_TELEMOST_HOSTS = ("telemost.yandex.ru", "telemost.yandex.com")
+
+
+def telemost_url(raw: str) -> str | None:
+    """Ссылка на встречу Телемоста в каноническом виде или None."""
+    from urllib.parse import urlsplit
+    u = (raw or "").strip()
+    if not u:
+        return None
+    if not u.lower().startswith(("http://", "https://")):
+        u = "https://" + u
+    try:
+        p = urlsplit(u)
+    except ValueError:
+        return None
+    host = (p.hostname or "").lower()
+    if host not in _TELEMOST_HOSTS or not p.path or p.path == "/":
+        return None
+    return f"https://{host}{p.path}" + (f"?{p.query}" if p.query else "")
 
 
 def room_key(url: str) -> str:
@@ -841,7 +875,11 @@ class Scheduler:
 
             # Write the recording link into the task's «Видео встречи» custom field.
             field = (cfg.get("weeek_video_field") or "").strip()
-            if cfg.get("weeek_set_video_field", True) and st.cloud_url and field:
+            if is_adhoc(st.task_id):
+                if st.cloud_url:
+                    log(f"Облако: {st.cloud_url} (встреча по ссылке — в Weeek "
+                        "записывать некуда).")
+            elif cfg.get("weeek_set_video_field", True) and st.cloud_url and field:
                 delivery.write_weeek_field(
                     cfg.get("weeek_token"), st.task_id, field, st.cloud_url, log,
                     protected=cfg.get("weeek_protected_fields"))
@@ -857,7 +895,10 @@ class Scheduler:
             # Recording always happens; transcription and protocol are separate
             # toggles so the user records only what they need.
             do_transcribe = bool(cfg.get("do_transcribe", True))
-            do_protocol = _protocol_wanted(cfg, user, st.title, log)
+            # У встречи «по ссылке» протокол выбран человеком в форме запуска —
+            # общий тумблер и приоритет серии не применяются.
+            do_protocol = (bool(st.do_protocol) if is_adhoc(st.task_id)
+                           else _protocol_wanted(cfg, user, st.title, log))
             job = None
             if do_transcribe:
                 stage = ("Распознаю речь и собираю протокол…" if do_protocol
@@ -876,7 +917,7 @@ class Scheduler:
                     # survives service restarts and re-runs on «Пересобрать»,
                     # unlike a waiter thread of this process.
                     deliver_protocol_cloud=deliver,
-                    deliver_weeek_task=str(st.task_id) if deliver else "",
+                    deliver_weeek_task=str(st.task_id) if deliver and not is_adhoc(st.task_id) else "",
                     provider=cfg.get("analyze_provider") or "auto",
                     capture_screen=bool(cfg.get("ocr_screen", True)),
                     # Telemost recordings always show the active speaker (green
@@ -1252,7 +1293,8 @@ class Scheduler:
                 if not (st.do_protocol and cfg.get("upload_protocol", True)):
                     continue
                 try:
-                    store.redeliver(jid, weeek_task=task_id, cloud=True)
+                    store.redeliver(jid, weeek_task=("" if is_adhoc(task_id) else task_id),
+                                    cloud=True)
                 except Exception:  # noqa: BLE001
                     _LOG.warning("Повторная доставка задачи %s не удалась", jid,
                                 exc_info=True)
@@ -1302,7 +1344,7 @@ class Scheduler:
             language=config.DEFAULT_LANGUAGE, diarize=False,
             analyze=do_protocol,
             deliver_protocol_cloud=deliver,
-            deliver_weeek_task=str(st.task_id) if deliver else "",
+            deliver_weeek_task=str(st.task_id) if deliver and not is_adhoc(st.task_id) else "",
             provider=cfg.get("analyze_provider") or "auto",
             capture_screen=bool(cfg.get("ocr_screen", True)),
             identify_speakers=True,  # Д7: спикеры с видео — безусловно для записей бота
@@ -1568,6 +1610,13 @@ class Scheduler:
                     "У этой встречи уже есть запись — повторный заход затёр бы "
                     "её. Нужен протокол — нажмите «Пересобрать». Нужна новая "
                     "запись — сначала удалите старую с сервера."}
+        return self._launch_manual(user, st)
+
+    def _launch_manual(self, team: str, st: MeetingState, register: bool = False) -> dict:
+        """Общий запуск кнопкой: занять слот, проверить «уже пишется» и «бот
+        уже в этой комнате» ПОД ОДНИМ локом, запустить поток записи.
+        `register=True` — карточка новая (встреча по ссылке), кладём в
+        `_states` там же, под тем же локом."""
         # Слот берём ДО проверки, чтобы проверка-и-захват состояния прошли под
         # одним локом. Раньше проверка «уже записывается» и присвоение
         # state="recording" стояли в РАЗНЫХ блоках лока: между ними успевал
@@ -1582,16 +1631,44 @@ class Scheduler:
                 return {"ok": False, "error": "Эта встреча уже записывается."}
             if st.url and any(room_key(s.url) == room_key(st.url)
                               and s.state == "recording" and s.key != st.key
-                              for s in self._states.values() if s.owner == user):
+                              for s in self._states.values() if s.owner == team):
                 recorder.release_slot(slot)
                 return {"ok": False, "error": "Бот уже в этом звонке — эта "
                         "ссылка сейчас записывается. Второй бот в ту же комнату "
                         "ничего не добавит; ссылки можно прикрепить к задаче "
                         "вручную после записи."}
             st.state, st.detail, st.stop_flag = "recording", "Бот заходит на встречу…", False
+            if register:
+                self._states[st.key] = st
         threading.Thread(target=self._run, args=(st, slot, True),
                          daemon=True).start()
-        return {"ok": True, "detail": "Запись запущена."}
+        return {"ok": True, "detail": "Запись запущена.", "task_id": str(st.task_id)}
+
+    def run_url(self, user: str, url: str, title: str = "",
+                do_protocol: bool | None = None) -> dict:
+        """Отправить бота на встречу ПРОСТО ПО ССЫЛКЕ — без задачи Weeek.
+
+        Карточка получает task_id с префиксом `link-`: запись, облако,
+        распознавание и протокол идут как обычно, а всё, что пишется В Weeek,
+        пропускается — записать некуда."""
+        team = security.team_of(user)
+        canon = telemost_url(url)
+        if not canon:
+            return {"ok": False, "error": "Нужна ссылка на встречу Телемоста вида "
+                    "https://telemost.yandex.ru/j/…"}
+        cfg = auto_settings.load(team)
+        now = datetime.now(timezone.utc)
+        local = now.astimezone(self._tz(cfg))
+        title = " ".join(str(title or "").split())[:120] \
+            or f"Встреча по ссылке {local.strftime('%d.%m %H:%M')}"
+        task_id = f"{_ADHOC_PREFIX}{local.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(2)}"
+        st = MeetingState(
+            key=f"{team}:{task_id}:{now.isoformat()}", task_id=task_id,
+            title=title, url=canon, start=now, owner=team,
+            state="scheduled", detail="", record_flag=True,
+            do_protocol=(bool(cfg.get("do_protocol", True)) if do_protocol is None
+                         else bool(do_protocol)))
+        return self._launch_manual(team, st, register=True)
 
 
 # Imported here (not at top) to avoid a heavy import cycle at module load.
