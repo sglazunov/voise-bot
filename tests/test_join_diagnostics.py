@@ -176,3 +176,21 @@ def test_html_сохраняется_по_каждому_фрейму(tmp_path):
     assert out.read_text(encoding="utf-8") == "<html>shell</html>"
     fr = tmp_path / "rec.join-failed.frame1.html"
     assert "meet" in fr.read_text(encoding="utf-8") and "embedded" in fr.read_text(encoding="utf-8")
+
+
+def test_поле_поиска_мессенджера_не_принимается_за_поле_имени():
+    """В оболочке Мессенджера единственное текстовое поле — поиск по чатам
+    (placeholder «Поиск», type=text). Прежний общий селектор input[type=text]
+    вписывал туда имя бота — «Указал имя: Протокол-бот» в строку поиска."""
+    from app.automation.recorder.browser import _NAME_INPUTS
+    search = _Btn("", aria="Поиск", ph="Поиск")
+    page = _FramedPage({'input[type="text"]': search, 'input[aria-label="Поиск"]': search},
+                       _Frame("child", {}))
+    bot = _bot(page)
+    assert not bot._fill_any(_NAME_INPUTS, "Протокол-бот", overall_ms=300)
+    assert not hasattr(search, "value")
+    # а настоящее поле имени — находится
+    name = _Btn("", ph="Ваше имя")
+    page2 = _FramedPage({}, _Frame("child", {'input[placeholder*="мя"]': name}))
+    assert _bot(page2)._fill_any(_NAME_INPUTS, "Протокол-бот", overall_ms=300)
+    assert name.value == "Протокол-бот"
