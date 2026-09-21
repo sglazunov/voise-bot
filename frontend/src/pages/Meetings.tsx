@@ -11,10 +11,11 @@ const FILTERS = [
 ];
 const WORK = ["recording", "uploading", "transcribing", "analyzing"];
 // States where the bot isn't running but the user can still launch it manually.
-// Состояния, из которых бота ещё можно запустить руками. Для "error" это
-// верно ТОЛЬКО пока записи нет: если запись уже лежит на диске, повторный заход
-// открыл бы тот же файл на запись (имя детерминировано) и затёр её.
-const JOINABLE = ["missed", "skipped", "no_time", "error"];
+// Состояния, из которых бота можно (снова) отправить на встречу руками —
+// и когда записи ещё нет, и когда бот уже был (выпал из звонка, а встреча
+// идёт): новая часть пишется отдельным файлом, прежняя запись и её протокол
+// остаются (сервер берёт путь через _free_path).
+const JOINABLE = ["missed", "skipped", "no_time", "error", "done"];
 // Адрес скриншота/HTML неудачного входа; `v` — чтобы браузер не показал
 // картинку прошлой попытки из кэша (сервер и так отвечает no-store).
 const shotUrl = (m: Meeting, kind: "png" | "html") =>
@@ -247,19 +248,17 @@ export default function Meetings() {
                   <button className="btn btn-ghost" onClick={() => runNow(m)}>Сейчас</button>
                   <span>Пишем</span><Switch size="sm" on={willRecord} onChange={() => setDecision(m, !willRecord)} />
                 </div>
-              ) : JOINABLE.includes(m.state) && !m.has_recording ? (
-                <div className="w-full lg:w-auto flex justify-end">
-                  <button className="btn btn-primary" onClick={() => runNow(m)}
-                    title="Запустить бота на эту встречу вручную">
-                    <Video size={14} /> Подключиться</button>
-                </div>
-              ) : m.state === "error" && m.has_recording ? (
-                // Красная карточка при ЦЕЛОЙ записи означает, что упало
-                // распознавание или сборка протокола. Предлагать здесь
-                // «Подключиться» — значит звать перезаписать готовую встречу.
-                <div className="w-full lg:w-auto flex justify-end text-[11.5px]"
-                  style={{ color: "var(--muted)" }}>
-                  Запись цела — нажмите «Пересобрать» на странице распознавания.
+              ) : JOINABLE.includes(m.state) ? (
+                <div className="w-full lg:w-auto flex items-center justify-end gap-2">
+                  {m.has_recording && m.state === "error" && (
+                    <span className="text-[11.5px]" style={{ color: "var(--muted)" }}>
+                      Запись цела — протокол чинится кнопкой «Пересобрать» на странице распознавания.
+                    </span>)}
+                  <button className={m.has_recording ? "btn btn-ghost" : "btn btn-primary"} onClick={() => runNow(m)}
+                    title={m.has_recording
+                      ? "Отправить бота на встречу ещё раз: новая часть запишется отдельным файлом, прежняя запись сохранится"
+                      : "Запустить бота на эту встречу вручную"}>
+                    <Video size={14} /> {m.has_recording ? "Подключиться снова" : "Подключиться"}</button>
                 </div>
               ) : null}
             </div>
