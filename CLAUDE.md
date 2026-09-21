@@ -1726,6 +1726,16 @@ JSON-LD (SoftwareApplication с Offer, FAQPage), canonical/OG. Маршруты:
 именем пропускается — имя берётся из профиля.
 Тесты — `tests/test_join_diagnostics.py` (9), всего 801.
 
+**Скриншот неудачного входа — с карточки встречи.** `MeetingState.screenshot`
+(путь `<запись>.join-failed.png`, из `res["screenshot"]` рекордера; в
+снапшоте и в восстановлении), `public()["has_screenshot"]` — только если файл
+на диске есть. Эндпоинт `GET /api/automation/meetings/{task_id}/screenshot?kind=png|html`
+(`scheduler.join_screenshot`, `Cache-Control: no-store`; HTML отдаётся как
+`attachment` с `text/plain` — чужие скрипты в контексте нашего домена не
+нужны). На странице «Встречи» у карточки кнопка-камера → модальное окно с
+картинкой и ссылками «Скачать PNG / HTML». Тесты —
+`tests/test_join_screenshot.py` (5), всего 806.
+
 ## Особенности, которые легко нарушить
 - **Регистрация открыта всем**, кто знает адрес (создаётся отдельная пустая
   команда). Ограничение — только на уровне прокси/VPN; переключателя в приложении

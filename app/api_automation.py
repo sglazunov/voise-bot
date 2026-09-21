@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import Response
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, ConfigDict
 
 from . import logs, security
@@ -237,6 +237,28 @@ def meeting_live(task_id: str, user: str = Depends(current_user)):
     if not res.get("ok"):
         raise HTTPException(404, res.get("error"))
     return res
+
+
+@router.get("/meetings/{task_id}/screenshot")
+def meeting_screenshot(task_id: str, kind: str = "png",
+                       user: str = Depends(current_user)):
+    """Скриншот (`kind=png`) или HTML (`kind=html`) страницы, на которой бот
+    НЕ СМОГ войти на встречу. Раньше файлы лежали в папке записей и «почему
+    не зашёл» разбиралось по ssh; теперь — прямо с карточки встречи."""
+    from .automation.scheduler import scheduler
+    if kind not in ("png", "html"):
+        raise HTTPException(400, "kind: png | html")
+    path = scheduler.join_screenshot(user, task_id, kind)
+    if path is None:
+        raise HTTPException(404, "Скриншота для этой встречи нет.")
+    media = "image/png" if kind == "png" else "text/html; charset=utf-8"
+    # Сохранённая страница Телемоста отдаётся как ФАЙЛ, а не рендерится:
+    # чужие скрипты в контексте нашего сайта не нужны.
+    headers = {"Cache-Control": "no-store"}
+    if kind == "html":
+        headers["Content-Disposition"] = f'attachment; filename="{path.name}"'
+        media = "text/plain; charset=utf-8"
+    return FileResponse(path, media_type=media, headers=headers)
 
 
 @router.get("/meetings/{task_id}/notes")

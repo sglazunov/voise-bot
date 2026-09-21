@@ -66,6 +66,10 @@ class MeetingState:
     # возвращает это в результате, а планировщик раньше выбрасывал — и
     # четырёхчасовые записи пустой комнаты приходилось разбирать руками.
     stop_reason: str | None = None
+    # Скриншот и HTML страницы при НЕУДАЧНОМ входе (<запись>.join-failed.png /
+    # .html). Раньше лежали в папке записей, и «почему бот не зашёл» можно
+    # было понять только по ssh; теперь открываются с карточки встречи.
+    screenshot: str | None = None
     rec_bytes: int = 0                # размер записи: немая встреча видна сразу
     recorded_sec: float = 0.0         # сколько длилась запись (по часам сервера)
     # На сколько секунд бот опоздал в звонок относительно времени встречи.
@@ -84,6 +88,12 @@ class MeetingState:
     live_text: str = ""
     live_updated_at: float = 0.0
     live_notes: str = ""
+
+    def screenshot_exists(self) -> bool:
+        try:
+            return bool(self.screenshot) and Path(self.screenshot).stat().st_size > 0
+        except OSError:
+            return False
 
     def recording_exists(self) -> bool:
         """Лежит ли на диске непустая запись этой встречи."""
@@ -107,6 +117,7 @@ class MeetingState:
                 # карточки он предлагал «Подключиться», и повторный заход
                 # затирал готовую запись — имя файла детерминировано.
                 "has_recording": self.recording_exists(),
+                "has_screenshot": self.screenshot_exists(),
                 # Лог рекордера копился в памяти, но наружу отдавалась только
                 # ПОСЛЕДНЯЯ строка (как detail). Из-за этого любую проблему бота
                 # — не сработавшее стоп-слово, не найденную кнопку чата, запись
@@ -776,6 +787,7 @@ class Scheduler:
             # выясняли руками по логам. Теперь она доезжает до карточки, до
             # снапшота и до метрики (docs/ТЗ-МЕТРИКИ.md §14.2).
             st.stop_reason = res.get("reason") or None
+            st.screenshot = res.get("screenshot") or None
             st.rec_bytes = int(res.get("size") or 0)
             st.recorded_sec = max(0.0, time.time() - rec_started)
             st.audio_warning = bool(res.get("audio_warning"))
@@ -1233,6 +1245,7 @@ class Scheduler:
                     upload_error=snap.get("upload_error"),
                     cloud_path=snap.get("cloud_path"),
                     stop_reason=snap.get("stop_reason"),
+                    screenshot=snap.get("screenshot"),
                     rec_bytes=int(snap.get("rec_bytes") or 0))
                 with self._lock:
                     st = self._states.setdefault(key, st)
@@ -1317,6 +1330,7 @@ class Scheduler:
         st.upload_error = snap.get("upload_error")
         st.cloud_path = snap.get("cloud_path")
         st.stop_reason = snap.get("stop_reason")
+        st.screenshot = snap.get("screenshot")
         st.rec_bytes = int(snap.get("rec_bytes") or 0)
         state = snap.get("state")
         if state in ("done", "error", "missed", "skipped"):
@@ -1353,6 +1367,20 @@ class Scheduler:
     # прошлонедельную карточку, а окно живой расшифровки показывало прошлый
     # разговор — и это выглядело как «бот пишет не ту встречу».
     _ACTIVE_STATES = ("recording", "uploading", "transcribing", "analyzing")
+
+    def join_screenshot(self, user: str, task_id, kind: str = "png") -> "Path | None":
+        """Путь к скриншоту (`png`) или HTML (`html`) неудачного входа этой
+        встречи — только если файл есть и лежит рядом с записью."""
+        st = self._find_state(user, task_id)
+        if not st or not st.screenshot_exists():
+            return None
+        path = Path(st.screenshot)
+        if kind == "html":
+            path = path.with_suffix(".html")
+        try:
+            return path if path.stat().st_size > 0 else None
+        except OSError:
+            return None
 
     def _find_state(self, user: str, task_id) -> "MeetingState | None":
         team = security.team_of(user)

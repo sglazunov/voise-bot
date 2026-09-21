@@ -4,6 +4,7 @@ export type Meeting = {
   do_protocol?: boolean; record_flag?: boolean | null;
   has_recording?: boolean; // лежит ли на диске готовая запись этой встречи
   logs?: string[];        // хвост лога рекордера — что бот видел на встрече
+  has_screenshot?: boolean; // есть скриншот страницы, на которой бот не смог войти
 };
 export type Status = {
   running: boolean; enabled: boolean; recording: boolean; active: number;

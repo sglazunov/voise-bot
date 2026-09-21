@@ -53,6 +53,7 @@ def of_state(st) -> dict:
             "upload_error": st.upload_error,
             "cloud_path": getattr(st, "cloud_path", None),
             "stop_reason": st.stop_reason,
+            "screenshot": getattr(st, "screenshot", None),
             "rec_bytes": int(getattr(st, "rec_bytes", 0) or 0),
             "join_delay_sec": getattr(st, "join_delay_sec", None),
             "saved_at": time.time()}

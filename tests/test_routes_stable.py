@@ -15,6 +15,7 @@ EXPECTED = {
     "GET /api/automation/meetings",
     "GET /api/automation/meetings/{task_id}/live",
     "GET /api/automation/meetings/{task_id}/notes",
+    "GET /api/automation/meetings/{task_id}/screenshot",
     "GET /api/automation/recorder/audio-test",
     "GET /api/automation/recorder/login-status",
     "GET /api/automation/recorder/login/screen",
