@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Video, RefreshCw, Square, Clock, Loader2, Link2, NotebookPen, Radio, ScrollText } from "lucide-react";
+import { Video, RefreshCw, Square, Clock, Loader2, Link2, NotebookPen, Radio, ScrollText, Camera, Download } from "lucide-react";
 import { Page } from "../components/Layout";
 import { Ellipsis, Switch, StatusBadge, Modal, useToast } from "../components/ui";
 import { api } from "../lib/api";
@@ -15,6 +15,10 @@ const WORK = ["recording", "uploading", "transcribing", "analyzing"];
 // верно ТОЛЬКО пока записи нет: если запись уже лежит на диске, повторный заход
 // открыл бы тот же файл на запись (имя детерминировано) и затёр её.
 const JOINABLE = ["missed", "skipped", "no_time", "error"];
+// Адрес скриншота/HTML неудачного входа; `v` — чтобы браузер не показал
+// картинку прошлой попытки из кэша (сервер и так отвечает no-store).
+const shotUrl = (m: Meeting, kind: "png" | "html") =>
+  `/api/automation/meetings/${encodeURIComponent(String(m.task_id))}/screenshot?kind=${kind}&v=${Date.now()}`;
 
 export default function Meetings() {
   const [s, setS] = useState<Status | null>(null);
@@ -49,6 +53,9 @@ export default function Meetings() {
   // meeting itself, so they work before the recognition job even exists.
   const [notesFor, setNotesFor] = useState<Meeting | null>(null);
   const [logFor, setLogFor] = useState<Meeting | null>(null);
+  // Скриншот страницы, на которой бот НЕ СМОГ войти: открывается прямо с
+  // карточки, чтобы не лезть за файлом по ssh.
+  const [shotFor, setShotFor] = useState<Meeting | null>(null);
   const [notesText, setNotesText] = useState("");
   const [notesSaving, setNotesSaving] = useState(false);
   const [liveText, setLiveText] = useState("");
@@ -177,6 +184,13 @@ export default function Meetings() {
                     onClick={() => setLogFor(logFor?.task_id === m.task_id ? null : m)}>
                     <ScrollText size={14} /></button>
                 ) : null}
+                {m.has_screenshot ? (
+                  <button className="btn-ghost grid place-items-center flex-none"
+                    style={{ width: 30, height: 30, borderRadius: 9, color: "var(--danger, #d9534f)" }}
+                    title="Скриншот страницы, на которой бот не смог войти"
+                    onClick={() => setShotFor(m)}>
+                    <Camera size={14} /></button>
+                ) : null}
                 {!rec && (
                   <button className="btn-ghost grid place-items-center flex-none"
                     style={{ width: 30, height: 30, borderRadius: 9 }}
@@ -226,6 +240,28 @@ export default function Meetings() {
           </div>
         );
       }) : <div className="glass p-8 text-center text-[13px]" style={{ color: "var(--muted)" }}>Встреч нет.</div>}
+
+      <Modal open={!!shotFor} onClose={() => setShotFor(null)} wide
+        title={<span className="flex items-center gap-2"><Camera size={16} color="var(--accent)" /> Что видел бот при входе</span>}>
+        <div className="text-[12.5px] mb-2" style={{ color: "var(--muted)" }}>
+          {shotFor?.title || "Встреча"} — страница в момент, когда бот не нашёл кнопку входа.
+          Пришлите этот скриншот и HTML разработчику: по ним подбираются селекторы под новую вёрстку.
+        </div>
+        {shotFor && (
+          <>
+            <a href={shotUrl(shotFor, "png")} target="_blank" rel="noreferrer" title="Открыть в полный размер">
+              <img src={shotUrl(shotFor, "png")} alt="Скриншот страницы Телемоста"
+                className="rounded-xl w-full" style={{ border: "1px solid var(--line, rgba(120,140,150,.3))" }} />
+            </a>
+            <div className="flex flex-wrap gap-2 mt-3">
+              <a className="btn btn-ghost" href={shotUrl(shotFor, "png")} download>
+                <Download size={13} /> Скачать PNG</a>
+              <a className="btn btn-ghost" href={shotUrl(shotFor, "html")} download>
+                <Download size={13} /> Скачать HTML страницы</a>
+            </div>
+          </>
+        )}
+      </Modal>
 
       <Modal open={!!notesFor} onClose={() => setNotesFor(null)}
         title={<span className="flex items-center gap-2"><NotebookPen size={16} color="var(--accent)" /> {notesFor?.state === "recording" ? "Live-расшифровка и заметки" : "Заметки со встречи"}</span>}>
