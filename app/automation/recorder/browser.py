@@ -100,9 +100,13 @@ def _frames_of(page) -> list:
 
 
 # Candidate selectors (first match wins). Tune against the live site if needed.
+# ⚠️ Только поля, которые ПОХОЖИ на поле имени. Общий `input[type="text"]`
+# здесь стоял и в оболочке Мессенджера попадал в строку поиска по чатам
+# («Указал имя: Протокол-бот» — в поиск). Под аккаунтом имя не спрашивают.
 _NAME_INPUTS = [
-    'input[name="name"]', 'input[placeholder*="мя"]',
-    'input[placeholder*="name" i]', 'input[type="text"]',
+    'input[name="name"]', 'input[name*="displayName" i]',
+    'input[placeholder*="мя"]', 'input[placeholder*="name" i]',
+    'input[aria-label*="мя"]', 'input[aria-label*="name" i]',
 ]
 # Telemost first shows an interstitial ("Вы подключаетесь… → Продолжить в
 # браузере") before the pre-join screen. We must click through it.
@@ -498,10 +502,14 @@ class TelemostBot:
         else:
             self._on_log("Заглушки «Продолжить в браузере» не было (или уже пройдена).")
 
-        # 2) Display name on the guest pre-join form (if asked).
-        name = self.cfg.get("bot_join_name") or "Протокол-бот"
-        if self._fill_any(_NAME_INPUTS, name, overall_ms=8000):
-            self._on_log(f"Указал имя: {name}")
+        # 2) Display name on the guest pre-join form (if asked). Под аккаунтом
+        #    имя берётся из профиля, формы нет — шаг пропускаем.
+        if (self.cfg.get("auth_mode") or "guest") == "profile":
+            self._on_log("Вход под аккаунтом — имя из профиля.")
+        else:
+            name = self.cfg.get("bot_join_name") or "Протокол-бот"
+            if self._fill_any(_NAME_INPUTS, name, overall_ms=8000):
+                self._on_log(f"Указал имя: {name}")
 
         # 3) Mute mic & camera before joining (best effort).
         self._click_any(_MUTE_MIC, overall_ms=2500)
