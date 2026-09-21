@@ -295,6 +295,31 @@ def set_telegram(username: str, chat_id: str, name: str = "") -> bool:
     return True
 
 
+def user_by_telegram(chat_id: str) -> str | None:
+    """Логин, к которому привязан этот чат Telegram, или None."""
+    chat_id = str(chat_id or "").strip()
+    if not chat_id:
+        return None
+    for uname, rec in _load_users().items():
+        if str((rec or {}).get("telegram_chat_id") or "") == chat_id:
+            return uname
+    return None
+
+
+def reset_password_by_telegram(chat_id: str, new_password: str) -> dict:
+    """Сменить пароль из чата с ботом. Личность подтверждает САМ привязанный
+    чат (привязка делалась с текущим паролем — как телефон при SMS-коде).
+    Старые сессии сбрасываются, как и при восстановлении по коду."""
+    username = user_by_telegram(chat_id)
+    if not username:
+        return {"ok": False, "error": "Этот Telegram не привязан ни к одному аккаунту."}
+    if len(new_password or "") < MIN_PASSWORD_LEN:
+        return {"ok": False, "error": f"Пароль не короче {MIN_PASSWORD_LEN} символов."}
+    _set_password(username, new_password)
+    destroy_user_sessions(username)
+    return {"ok": True, "username": username}
+
+
 def clear_telegram(username: str, password: str) -> dict:
     """Отвязать Telegram; требует ТЕКУЩИЙ пароль (по той же причине, что и
     смена телефона: угнанная сессия не должна лишать владельца канала)."""
