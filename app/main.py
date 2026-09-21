@@ -144,6 +144,15 @@ if (SPA_DIR / "assets").is_dir():
     app.mount("/assets", StaticFiles(directory=str(SPA_DIR / "assets")), name="spa-assets")
 
 
+def _spa_index(index: Path) -> FileResponse:
+    """Оболочка SPA — всегда с проверкой у сервера. Без заголовка браузер по
+    эвристике Last-Modified держит старый index.html (а с ним — ссылки на
+    старые бандлы) и после раскатки показывает прежний интерфейс, пока
+    страницу не обновят руками. Сами бандлы в /assets хэшированы, их
+    кэшировать можно."""
+    return FileResponse(index, headers={"Cache-Control": "no-cache"})
+
+
 def _register_spa() -> None:
     """Serve the React SPA as the entire app UI: index.html for `/` and every
     other non-API, non-file path so client-side routing (deep links, refresh)
@@ -167,7 +176,7 @@ def _register_spa() -> None:
             target = (spa_root / full_path).resolve()
             if target.is_file() and target.is_relative_to(spa_root):
                 return FileResponse(target)
-        return FileResponse(index)
+        return _spa_index(index)
 
 
 # ===========================================================================
@@ -368,7 +377,7 @@ def root(request: Request):
     if getattr(request.state, "user", None):
         index = SPA_DIR / "index.html"
         if index.exists():
-            return FileResponse(index)
+            return _spa_index(index)
         raise HTTPException(404, "Сборка интерфейса не найдена")
     return _landing(request)
 

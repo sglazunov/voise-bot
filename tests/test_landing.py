@@ -110,3 +110,19 @@ class TestИконка:
     def test_в_карточке_протокола_нет_заголовков_h4(self, client):
         html = client.get("/").text
         assert "<h4" not in html and html.count("<h1") == 1
+
+
+def test_оболочка_spa_отдаётся_без_кэширования(client, monkeypatch):
+    """После раскатки браузер держал старый index.html по эвристике
+    Last-Modified — интерфейс обновлялся только после ручного обновления."""
+    from pathlib import Path
+    import app.main as m
+    from conftest import login, register
+    if not (Path(m.SPA_DIR) / "index.html").exists():
+        import pytest
+        pytest.skip("сборки SPA нет")
+    register(client); login(client)
+    for path in ("/", "/meetings"):
+        r = client.get(path)
+        assert r.status_code == 200
+        assert r.headers.get("cache-control") == "no-cache", path
