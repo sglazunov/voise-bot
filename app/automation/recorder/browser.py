@@ -126,6 +126,13 @@ _JOIN_BUTTONS = [
     '[role="button"]:has-text("Подключиться")', 'a:has-text("Подключиться к встрече")',
     '[data-testid*="join"]', 'button[type="submit"]',
 ]
+# Оболочка Мессенджера иногда открывает не встречу, а свою главную с окном
+# «Номер звонка или ссылка на него» (поле + «Подключиться»). Кнопка в нём
+# совпадает с кнопкой входа — с пустым полем бот «входил» в никуда.
+_CALL_LINK_TITLES = [
+    "Номер звонка или ссылка", "Ссылка на звонок", "Ссылка на встречу",
+    "Call number or link", "Link to the call",
+]
 _MUTE_MIC = [
     'button[aria-label*="икрофон"]', 'button[aria-label*="mic" i]',
     '[data-testid*="microphone"]',
@@ -711,6 +718,7 @@ class TelemostBot:
             self._on_log("Вход под аккаунтом — имя из профиля.")
         name = self.cfg.get("bot_join_name") or "Протокол-бот"
         joined = named = reloaded = continued = False
+        link_tries = 0
         deadline = t0 + join_budget
         while time.time() < deadline and not self._aborted():
             # Уже в звонке (вход сработал сам или сохранился с прошлого раза).
@@ -736,6 +744,23 @@ class TelemostBot:
                         self._on_log(f"Указал имя: {name}")
                     except Exception:  # noqa: BLE001
                         pass
+            form = self._call_link_form()
+            if form:
+                inp, btn = form
+                try:
+                    inp.fill(url)
+                    if btn and link_tries % 2 == 0:
+                        btn.click(timeout=3000)
+                    else:
+                        inp.press("Enter")
+                except Exception:  # noqa: BLE001
+                    pass
+                if not link_tries:
+                    self._on_log("Оболочка открыла главную и спросила ссылку "
+                                 "на звонок — ввёл ссылку встречи.")
+                link_tries += 1
+                self._page.wait_for_timeout(500)
+                continue
             el = self._find_first(_JOIN_BUTTONS)
             if el:
                 # Микрофон и камеру — выключить ДО входа, но не ждать их:
@@ -780,6 +805,31 @@ class TelemostBot:
             # заголовок, адрес и подписи всех видимых кнопок.
             self._on_log("Что на странице: " + page_summary(self._page))
         return in_call or joined
+
+    def _call_link_form(self):
+        """Окно оболочки «Номер звонка или ссылка на него»: (поле, кнопка)
+        или None. Ищется по заголовку, поле — в ближайшем контейнере, где
+        оно есть (в главном документе есть и поле «Поиск», его брать нельзя)."""
+        for fr in _frames_of(self._page):
+            for title in _CALL_LINK_TITLES:
+                try:
+                    head = fr.query_selector(f"text={title}")
+                    if not head or not head.is_visible():
+                        continue
+                    box = head.evaluate_handle(
+                        "e => { let n = e; for (let i = 0; i < 8 && n; i++) {"
+                        " if (n.querySelector('input')) return n; n = n.parentElement; }"
+                        " return null; }").as_element()
+                    if not box:
+                        continue
+                    inp = box.query_selector("input")
+                    btn = box.query_selector('button:has-text("Подключиться"), '
+                                             'button[type="submit"], button:has-text("Join")')
+                    if inp:
+                        return inp, btn
+                except Exception:  # noqa: BLE001
+                    continue
+        return None
 
     def _try_click(self, el) -> bool:
         try:

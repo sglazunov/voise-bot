@@ -413,3 +413,40 @@ def test_попытка_открыть_приложение_жмёт_escape_на
             break
         _t.sleep(0.02)
     assert pressed == [(":99", 0xFF1B), (":99", 0xFF1B)]
+
+
+class _LinkForm:
+    """Окно «Номер звонка или ссылка на него»: заголовок → контейнер → поле + кнопка."""
+    def __init__(self):
+        self.inp = _Btn(); self.inp.pressed = []
+        self.inp.press = lambda k: self.inp.pressed.append(k)
+        self.btn = _Btn("Подключиться")
+        self.gone = False
+    # заголовок
+    def is_visible(self): return not self.gone
+    def evaluate_handle(self, js): return self
+    def as_element(self): return self
+    def query_selector(self, sel):
+        return self.inp if sel == "input" else self.btn
+
+
+def test_окно_ссылка_на_звонок_заполняется_и_не_считается_входом():
+    """Кадр записи 21.09: оболочка открыла главную с окном «Номер звонка или
+    ссылка на него», а кнопка «Подключиться» в нём совпадает с кнопкой входа —
+    бот нажимал её с пустым полем и «входил» в никуда."""
+    form = _LinkForm()
+    page = _LivePage({}, strong_after=6)
+    page.child._els["text=Номер звонка или ссылка"] = form
+    page.child._els['button:has-text("Подключиться")'] = form.btn
+    url = "https://telemost.yandex.ru/j/777"
+    def click(**kw):
+        form.btn.clicks += 1
+        if form.inp.value == url:
+            form.gone = True
+            del page.child._els['button:has-text("Подключиться")']
+    form.btn.click = click
+    bot = _joiner(page)
+    assert bot.join(url) is True
+    assert form.inp.value == url and form.btn.clicks == 1
+    assert any("спросила ссылку" in ln for ln in bot.log)
+    assert not any("Нажал кнопку входа" in ln for ln in bot.log)
