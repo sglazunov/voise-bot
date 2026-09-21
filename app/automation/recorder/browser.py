@@ -46,8 +46,14 @@ def page_summary(page, limit: int = 20) -> str:
         pass
     labels: list[str] = []
     n_frames = 0
+    frame_urls: list[str] = []
     for fr in _frames_of(page):
         n_frames += 1
+        if n_frames > 1:
+            try:
+                frame_urls.append(str(fr.url)[:80])
+            except Exception:  # noqa: BLE001
+                pass
         try:
             for el in fr.query_selector_all('button, a, [role="button"], input'):
                 try:
@@ -68,7 +74,11 @@ def page_summary(page, limit: int = 20) -> str:
         if len(labels) >= limit:
             break
     if n_frames > 1:
-        parts.append(f"фреймов: {n_frames}")
+        parts.append(f"фреймов: {n_frames} (" + "; ".join(frame_urls) + ")")
+    else:
+        # ⚠️ Без вложенного фрейма окна встречи НЕТ — либо сборка старая
+        # (искала только главный документ), либо оболочка его не открыла.
+        parts.append("вложенных фреймов нет — окно встречи не открылось")
     parts.append("кнопки: " + (" | ".join(labels) if labels else "ни одной видимой"))
     return "; ".join(parts)
 
