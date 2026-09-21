@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, ConfigDict, Field
 
-from . import config, db, events, llm, analyze, logs, security, sms, user_creds
+from . import config, db, events, llm, analyze, logs, security, sms, telegram, user_creds
 from .jobs import store, STATUS_DONE, STATUS_CANCELLED
 
 log = logs.get("vtx.main")
@@ -647,7 +647,23 @@ class RecoverVerifyBody(BaseModel):
 # Neutral answer to step 1: whatever happens, the client is told the same thing,
 # so it never reveals whether a given login/phone pair exists.
 _RECOVER_SENT = {"ok": True,
-                 "detail": "Если логин и телефон совпадают, код отправлен по SMS."}
+                 "detail": "Если логин и телефон совпадают, код отправлен в "
+                           "Telegram (если он привязан) или по SMS."}
+
+
+def _send_recovery_code(username: str, phone: str, msg: str) -> str:
+    """Куда уходит код: в Telegram, если он привязан к аккаунту, иначе по SMS.
+    Недоставленное в Telegram (бот заблокирован, чат удалён) уходит по SMS —
+    телефон у аккаунта есть всегда. Возвращает канал (для лога, не клиенту)."""
+    tg = security.telegram_of(username)
+    if tg and telegram.configured():
+        ok, detail = telegram.send(tg["chat_id"], msg)
+        if ok:
+            return "telegram"
+        log.warning("Код восстановления для %s не ушёл в Telegram (%s) — шлю по SMS",
+                    security.normalize_username(username), detail)
+    sms.send(phone, msg)
+    return "sms"
 
 
 @app.post("/api/auth/recover/request")
@@ -667,7 +683,7 @@ def auth_recover_request(body: RecoverRequestBody, request: Request):
         msg = (f"Код восстановления пароля MeetFlowAI: {code}. "
                f"Действует {security.RECOVERY_CODE_TTL // 60} мин. "
                f"Никому его не сообщайте.")
-        sms.send("+" + res["phone"], msg)
+        _send_recovery_code(body.username, "+" + res["phone"], msg)
     elif res.get("error") == "cooldown":
         # Живой код уже отправлен — второй раз не шлём. Ответ при этом обязан
         # остаться ТЕМ ЖЕ: в cooldown попадают только после верной пары
@@ -706,8 +722,14 @@ def profile_info(user: str = Depends(current_user)):
     """Профиль: логин, маска телефона, роль, команда, код приглашения."""
     is_admin = security.is_admin(user)
     team = security.team_of(user)
+    tg = security.telegram_of(user)
     return {"username": user, "phone_masked": security.masked_phone(user),
             "is_admin": is_admin,
+            # Telegram для кодов восстановления: включён ли канал на сервере и
+            # привязан ли он к этому аккаунту (chat_id наружу не отдаётся).
+            "telegram_enabled": telegram.configured(),
+            "telegram_linked": bool(tg),
+            "telegram_name": tg.get("name", "") if tg else "",
             "team": team,
             # The invite code lets others join THIS team; only the admin has one.
             # It rotates daily — expires_at drives the countdown in the UI.
@@ -746,6 +768,34 @@ def profile_change_phone(body: PhoneChange, user: str = Depends(current_user)):
     if not res.get("ok"):
         raise HTTPException(400, res.get("error"))
     return {"ok": True, "phone_masked": security.masked_phone(user)}
+
+
+class TelegramLink(BaseModel):
+    password: str
+
+
+@app.post("/api/profile/telegram/link")
+def profile_telegram_link(body: TelegramLink, user: str = Depends(current_user)):
+    """Выдать одноразовый код привязки Telegram. Требует ТЕКУЩИЙ пароль — как
+    смена телефона: угнанная сессия не должна перевести восстановление пароля
+    на чужой Telegram. Сама привязка завершается, когда человек отправит боту
+    «/start <код>» (`telegram.handle_update`)."""
+    if not telegram.configured():
+        raise HTTPException(400, "Telegram-бот на сервере не настроен "
+                                 "(VTX_TELEGRAM_BOT_TOKEN).")
+    if not security.verify_user(user, body.password):
+        raise HTTPException(400, "Текущий пароль неверный.")
+    code = telegram.new_link_code(user)
+    return {"ok": True, "code": code, "url": telegram.link_url(code),
+            "bot": telegram.bot_username(), "ttl": telegram.LINK_CODE_TTL}
+
+
+@app.post("/api/profile/telegram/unlink")
+def profile_telegram_unlink(body: TelegramLink, user: str = Depends(current_user)):
+    res = security.clear_telegram(user, body.password)
+    if not res.get("ok"):
+        raise HTTPException(400, res.get("error"))
+    return {"ok": True}
 
 
 class PasswordChange(BaseModel):
@@ -789,6 +839,8 @@ def _start_scheduler() -> None:
     setting, so it's safe to always run — it idles until turned on in the UI."""
     if db.enabled():
         db.init_schema()  # ensure tables exist (idempotent)
+    if telegram.start_polling():
+        log.info("Telegram-бот для кодов восстановления включён")
     try:
         from .automation.scheduler import scheduler
         scheduler.start()

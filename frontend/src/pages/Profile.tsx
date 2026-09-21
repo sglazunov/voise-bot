@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { UserCircle, Phone, KeyRound, ShieldCheck, Trash2, AlertTriangle, Users, Copy, Check, UserMinus, User, ChevronDown } from "lucide-react";
+import { UserCircle, Phone, KeyRound, ShieldCheck, Trash2, AlertTriangle, Users, Copy, Check, UserMinus, User, ChevronDown, Send, Link2Off } from "lucide-react";
 import { Page } from "../components/Layout";
 import { Card, Ellipsis, Modal, Popover, useToast } from "../components/ui";
 import { api } from "../lib/api";
@@ -11,6 +11,9 @@ export default function Profile() {
   const [oldPwd, setOldPwd] = useState(""); const [newPwd, setNewPwd] = useState("");
   const [delOpen, setDelOpen] = useState(false); const [delPwd, setDelPwd] = useState(""); const [deleting, setDeleting] = useState(false);
   const [copied, setCopied] = useState(false);
+  // Telegram для кодов восстановления: пароль для привязки/отвязки, выданный
+  // код и ссылка t.me; пока ссылка открыта — опрашиваем профиль, ждём привязки.
+  const [tgPwd, setTgPwd] = useState(""); const [tgLink, setTgLink] = useState<any>(null);
   const [membersOpen, setMembersOpen] = useState(false);
   const membersRef = useRef<HTMLDivElement>(null);   // anchor for the members Popover
   const toast = useToast();
@@ -33,6 +36,25 @@ export default function Profile() {
 
   const load = () => api.get("/api/profile").then(setInfo).catch(() => {});
   useEffect(() => { load(); }, []);
+
+  async function linkTelegram() {
+    if (!tgPwd) return toast("Введите текущий пароль", true);
+    try { const r = await api.post("/api/profile/telegram/link", { password: tgPwd }); setTgLink(r); setTgPwd(""); }
+    catch (e: any) { toast(e.message, true); }
+  }
+  async function unlinkTelegram() {
+    if (!tgPwd) return toast("Введите текущий пароль", true);
+    try { await api.post("/api/profile/telegram/unlink", { password: tgPwd }); setTgPwd(""); setTgLink(null);
+      setInfo((i: any) => ({ ...i, telegram_linked: false, telegram_name: "" })); toast("Telegram отвязан"); }
+    catch (e: any) { toast(e.message, true); }
+  }
+  useEffect(() => {
+    if (!tgLink || info?.telegram_linked) return;
+    const t = setInterval(() => api.get("/api/profile").then((i) => {
+      setInfo(i); if (i.telegram_linked) { setTgLink(null); toast("Telegram привязан"); }
+    }).catch(() => {}), 3000);
+    return () => clearInterval(t);
+  }, [tgLink, info?.telegram_linked]);
 
   async function savePhone() {
     try { const r = await api.post("/api/profile/phone", { password: phonePwd, phone });
@@ -84,6 +106,36 @@ export default function Profile() {
           <input className="field" type="password" value={phonePwd} onChange={(e) => setPhonePwd(e.target.value)} />
           <button className="btn btn-primary mt-3" onClick={savePhone}>Сохранить телефон</button>
         </Card>
+
+        {info?.telegram_enabled && (
+        <Card>
+          <div className="flex items-center gap-2 mb-2"><Send size={17} color="var(--accent)" />
+            <div className="font-bold text-[15px]">Telegram для восстановления пароля</div></div>
+          <div className="text-[12.5px] mb-3 leading-relaxed" style={{ color: "var(--muted)" }}>
+            {info?.telegram_linked
+              ? <>Код восстановления придёт в Telegram <b style={{ color: "var(--txt)" }}>{info?.telegram_name || "(привязан)"}</b>. SMS — запасной канал.</>
+              : <>Привяжите Telegram — и код восстановления пароля будет приходить в него, а не по SMS.</>}
+          </div>
+          {tgLink && !info?.telegram_linked ? (
+            <div className="glass2 rounded-2xl px-4 py-3 text-[13px] leading-relaxed">
+              Откройте бота и нажмите «Start» — привязка завершится сама:
+              <div className="mt-2"><a className="btn btn-primary" href={tgLink.url || `https://t.me/${tgLink.bot}`} target="_blank" rel="noreferrer">
+                <Send size={14} /> Открыть {tgLink.bot ? `@${tgLink.bot}` : "бота"} в Telegram</a></div>
+              <div className="mt-2" style={{ color: "var(--muted)" }}>
+                Или отправьте боту сообщение <code className="font-mono" style={{ color: "var(--accent)" }}>/start {tgLink.code}</code>.
+                Код действует {Math.round((tgLink.ttl || 600) / 60)} мин. Ждём подтверждения…</div>
+            </div>
+          ) : (
+            <>
+              <label className="lbl">Текущий пароль</label>
+              <input className="field" type="password" value={tgPwd} onChange={(e) => setTgPwd(e.target.value)} />
+              {info?.telegram_linked
+                ? <button className="btn btn-ghost mt-3" onClick={unlinkTelegram}><Link2Off size={14} /> Отвязать Telegram</button>
+                : <button className="btn btn-primary mt-3" onClick={linkTelegram}><Send size={14} /> Привязать Telegram</button>}
+            </>
+          )}
+        </Card>
+        )}
         </div>
 
         {/* Right column — team + password */}

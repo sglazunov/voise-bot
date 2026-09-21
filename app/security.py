@@ -260,6 +260,57 @@ def set_phone(username: str, password: str, new_phone: str) -> dict:
     return {"ok": True}
 
 
+# --------------------------------------------------------------------------- #
+# Telegram для восстановления пароля (chat_id бота, см. app/telegram.py)
+# --------------------------------------------------------------------------- #
+def telegram_of(username: str) -> dict:
+    """{chat_id, name} привязанного Telegram или {} — если не привязан."""
+    rec = _get_user(username)
+    chat = str(rec.get("telegram_chat_id") or "")
+    if not chat:
+        return {}
+    return {"chat_id": chat, "name": str(rec.get("telegram_name") or "")}
+
+
+def set_telegram(username: str, chat_id: str, name: str = "") -> bool:
+    """Записать chat_id в учётку (зовётся ботом после «/start <код>»). Пароль
+    проверен раньше — при ВЫДАЧЕ кода привязки (`main.profile_telegram_link`).
+    Один chat_id — один аккаунт: у другого логина с тем же чатом привязка
+    снимается, иначе коды двух аккаунтов уходили бы в один Telegram."""
+    username = normalize_username(username)
+    chat_id = str(chat_id or "").strip()
+    if not username or not chat_id:
+        return False
+    with _LOCK:
+        users = _load_users()
+        if username not in users:
+            return False
+        for uname, rec in users.items():
+            if uname != username and str((rec or {}).get("telegram_chat_id") or "") == chat_id:
+                rec.pop("telegram_chat_id", None)
+                rec.pop("telegram_name", None)
+        users[username]["telegram_chat_id"] = chat_id
+        users[username]["telegram_name"] = (name or "")[:64]
+        _save_users(users)
+    return True
+
+
+def clear_telegram(username: str, password: str) -> dict:
+    """Отвязать Telegram; требует ТЕКУЩИЙ пароль (по той же причине, что и
+    смена телефона: угнанная сессия не должна лишать владельца канала)."""
+    username = normalize_username(username)
+    if not verify_user(username, password):
+        return {"ok": False, "error": "Текущий пароль неверный."}
+    with _LOCK:
+        users = _load_users()
+        if username not in users:
+            return {"ok": False, "error": "Аккаунт не найден."}
+        users[username].pop("telegram_chat_id", None)
+        users[username].pop("telegram_name", None)
+        _save_users(users)
+    return {"ok": True}
+
+
 def _set_password(username: str, new: str) -> None:
     with _LOCK:
         users = _load_users()

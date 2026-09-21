@@ -200,6 +200,39 @@ _POPUP_CLOSE_MAIN = [
 # Launch args: auto-accept mic/cam prompts; fake mic so we never send real audio;
 # suppress the noisy first-run/default-browser/translate popups that otherwise
 # show up in the recording.
+def _xtest_key(display: str, keysym: int) -> bool:
+    """Нажать и отпустить клавишу на X-дисплее через расширение XTest
+    (ctypes, без xdotool — его в образе нет). False — если библиотек или
+    дисплея нет; никогда не бросает."""
+    try:
+        import ctypes
+        x11 = ctypes.CDLL("libX11.so.6")
+        xtst = ctypes.CDLL("libXtst.so.6")
+        x11.XOpenDisplay.restype = ctypes.c_void_p
+        x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
+        x11.XKeysymToKeycode.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+        x11.XKeysymToKeycode.restype = ctypes.c_ubyte
+        x11.XFlush.argtypes = [ctypes.c_void_p]
+        x11.XCloseDisplay.argtypes = [ctypes.c_void_p]
+        xtst.XTestFakeKeyEvent.argtypes = [ctypes.c_void_p, ctypes.c_uint,
+                                           ctypes.c_int, ctypes.c_ulong]
+        dpy = x11.XOpenDisplay(display.encode())
+        if not dpy:
+            return False
+        try:
+            kc = x11.XKeysymToKeycode(dpy, keysym)
+            if not kc:
+                return False
+            xtst.XTestFakeKeyEvent(dpy, kc, 1, 0)
+            xtst.XTestFakeKeyEvent(dpy, kc, 0, 0)
+            x11.XFlush(dpy)
+        finally:
+            x11.XCloseDisplay(dpy)
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
 _LAUNCH_ARGS = [
     "--use-fake-ui-for-media-stream",
     "--use-fake-device-for-media-stream",
@@ -482,6 +515,25 @@ class TelemostBot:
         self._page = self._ctx.pages[0] if self._ctx.pages else self._ctx.new_page()
         self._watch_app_links()
 
+    def _x_press_escape(self, delays=(0.7, 2.5)) -> None:
+        """Нажать Escape НА УРОВНЕ X-СЕРВЕРА (XTest), а не через Playwright.
+        Системный диалог Chromium «Open xdg-open?» — отдельное окно: клики и
+        клавиши через CDP до него не доходят, а X-событие доходит — Escape в
+        нём означает «Cancel». В самой странице Escape безвреден. Нажимается с
+        паузой (диалог появляется не мгновенно) и повторно — на случай, если
+        страница попросила приложение ещё раз."""
+        display = self._display or os.environ.get("DISPLAY") or ""
+        if not display:
+            return
+
+        def run():
+            for d in delays:
+                time.sleep(d)
+                if not _xtest_key(display, 0xFF1B):     # XK_Escape
+                    return
+
+        threading.Thread(target=run, name="x-escape", daemon=True).start()
+
     def _watch_app_links(self) -> None:
         """Записывать в лог карточки попытки страницы открыть ПРИЛОЖЕНИЕ по
         своей схеме (yandex-telemost://…). Такой переход вызывает системный
@@ -502,8 +554,10 @@ class TelemostBot:
                     return
                 self._app_links.append(url)
                 self._on_log(f"⚠ Страница пыталась открыть приложение по ссылке "
-                             f"{url[:80]} — если в записи виден диалог «Open "
-                             f"xdg-open?», добавьте схему «{scheme}» в VTX_APP_SCHEMES.")
+                             f"{url[:80]} — диалог «Open xdg-open?» закрываю "
+                             f"клавишей Escape; чтобы он не появлялся вовсе, "
+                             f"добавьте схему «{scheme}» в VTX_APP_SCHEMES.")
+                self._x_press_escape()
             cdp.on("Page.frameRequestedNavigation", on_nav)
         except Exception:  # noqa: BLE001
             pass
@@ -598,9 +652,10 @@ class TelemostBot:
                 attempt()
             except Exception:  # noqa: BLE001
                 continue
-            self._page.wait_for_timeout(800)
-            if gone():
-                return True
+            for _ in range(4):                   # до 800 мс, но не дольше нужного
+                self._page.wait_for_timeout(200)
+                if gone():
+                    return True
         return False
 
     def _click_any(self, selectors, overall_ms=12000, poll_ms=500) -> bool:
@@ -636,76 +691,87 @@ class TelemostBot:
 
     # -- joining ------------------------------------------------------------
     def join(self, url: str, should_stop=None) -> bool:
-        """Open the meeting and get into the call. Returns True on success."""
+        """Open the meeting and get into the call. Returns True on success.
+
+        Один цикл опроса вместо цепочки шагов с фиксированными паузами: каждые
+        ~300 мс смотрим, что видно СЕЙЧАС, и делаем то, что можно, — заглушка
+        «Продолжить в браузере», имя гостя, промо-окно, кнопка входа. Раньше
+        каждый шаг ждал свой таймаут до конца, даже когда элемента не было
+        (10 с на заглушку, 8 с на имя, 5 с на микрофон/камеру, 3+4+6 с пауз):
+        вход занимал полминуты и больше — начало разговора, где ставят задачи,
+        в запись не попадало."""
         self._should_stop = should_stop
         join_budget = int(self.cfg.get("join_timeout_sec", 60))
         self._launch()
         self._on_log(f"Открываю встречу: {url}")
+        t0 = time.time()
         self._page.goto(url, wait_until="domcontentloaded", timeout=60000)
-        self._page.wait_for_timeout(3000)
-        # 0) Промо-окно оболочки («Большое обновление в Телемосте») перекрывает
-        #    всё и не даёт окну встречи открыться — сначала закрываем его.
-        self._dismiss_popups()
-
-        # 1) Interstitial: "Продолжить в браузере".
-        if self._click_any(_CONTINUE_BROWSER, overall_ms=10000):
-            self._on_log("Прошёл заглушку «Продолжить в браузере».")
-            self._page.wait_for_timeout(4000)
-        else:
-            self._on_log("Заглушки «Продолжить в браузере» не было (или уже пройдена).")
-        self._dismiss_popups()
-
-        # 2) Display name on the guest pre-join form (if asked). Под аккаунтом
-        #    имя берётся из профиля, формы нет — шаг пропускаем.
-        if (self.cfg.get("auth_mode") or "guest") == "profile":
+        guest = (self.cfg.get("auth_mode") or "guest") != "profile"
+        if not guest:
             self._on_log("Вход под аккаунтом — имя из профиля.")
-        else:
-            name = self.cfg.get("bot_join_name") or "Протокол-бот"
-            if self._fill_any(_NAME_INPUTS, name, overall_ms=8000):
-                self._on_log(f"Указал имя: {name}")
-
-        # 3) Mute mic & camera before joining (best effort).
-        self._click_any(_MUTE_MIC, overall_ms=2500)
-        self._click_any(_MUTE_CAM, overall_ms=2500)
-
-        # 4) Join the call (poll up to the configured budget). Ждём кусками, между
-        #    ними закрываем всплывающие окна: промо может выскочить и позже.
-        joined = False
-        reloaded = False
-        deadline = time.time() + join_budget
-        while not joined and time.time() < deadline and not self._aborted():
-            chunk = min(10000, max(1000, int((deadline - time.time()) * 1000)))
-            joined = self._click_any(_JOIN_BUTTONS, overall_ms=chunk)
-            if joined:
+        name = self.cfg.get("bot_join_name") or "Протокол-бот"
+        joined = named = reloaded = continued = False
+        deadline = t0 + join_budget
+        while time.time() < deadline and not self._aborted():
+            # Уже в звонке (вход сработал сам или сохранился с прошлого раза).
+            if self.is_in_call():
+                self._on_log("Бот уже в звонке.")
+                joined = True
                 break
+            # Заглушка «Продолжить в браузере» — она ПЕРВАЯ: её «Продолжить»
+            # совпадает с одним из селекторов кнопки входа.
+            el = self._find_first(_CONTINUE_BROWSER)
+            if el and self._try_click(el):
+                if not continued:
+                    self._on_log("Прошёл заглушку «Продолжить в браузере».")
+                continued = True
+                self._page.wait_for_timeout(300)
+                continue
+            if guest and not named:
+                inp = self._find_first(_NAME_INPUTS)
+                if inp:
+                    try:
+                        inp.fill(name)
+                        named = True
+                        self._on_log(f"Указал имя: {name}")
+                    except Exception:  # noqa: BLE001
+                        pass
+            el = self._find_first(_JOIN_BUTTONS)
+            if el:
+                # Микрофон и камеру — выключить ДО входа, но не ждать их:
+                # после входа ensure_muted проверит ещё раз.
+                for sels in (_MUTE_MIC, _MUTE_CAM):
+                    m = self._find_first(sels)
+                    if m:
+                        self._try_click(m)
+                if self._try_click(el):
+                    joined = True
+                    break
             if self._dismiss_popups():
-                self._click_any(_CONTINUE_BROWSER, overall_ms=3000)
                 continue
             # Окно встречи так и не открылось (ни фрейма, ни кнопок), а
             # закрывать уже нечего — один раз перезагружаем страницу встречи:
             # оболочка, показавшая промо, сама встречу не поднимает.
-            if not reloaded and len(_frames_of(self._page)) <= 1 \
-                    and not self._find_first(_CONTINUE_BROWSER) \
-                    and time.time() - deadline < -15:
+            if not reloaded and time.time() - t0 > 15 \
+                    and len(_frames_of(self._page)) <= 1:
                 reloaded = True
                 self._on_log("Окно встречи не открылось — перезагружаю страницу встречи.")
                 try:
                     self._page.goto(url, wait_until="domcontentloaded", timeout=60000)
-                    self._page.wait_for_timeout(3000)
                 except Exception as e:  # noqa: BLE001
                     self._on_log(f"Перезагрузка не удалась: {e}")
-                self._dismiss_popups()
-                if self._click_any(_CONTINUE_BROWSER, overall_ms=8000):
-                    self._on_log("Прошёл заглушку «Продолжить в браузере».")
-                    self._page.wait_for_timeout(4000)
-        self._on_log("Нажал кнопку входа, подключаюсь…" if joined
-                     else "Кнопку входа не нашёл — возможно, уже в звонке.")
-        self._page.wait_for_timeout(6000)
-        # Make sure the bot is muted in the call (no sound goes OUT from it).
+                continue
+            self._page.wait_for_timeout(300)
+        if joined and not self.is_in_call():
+            self._on_log(f"Нажал кнопку входа ({time.time() - t0:.0f} с), подключаюсь…")
+        elif not joined:
+            self._on_log("Кнопку входа не нашёл — возможно, уже в звонке.")
+        # Ждём органы управления звонком, но не дольше нужного (было 6 с всегда);
+        # если кнопку входа так и не нажали — только короткая проверка.
+        in_call = self._wait_in_call(20000 if joined else 3000)
         self.ensure_muted()
-        in_call = self.is_in_call()
-        self._on_log("Бот в звонке ✓" if in_call
-                     else "Не вижу элементов звонка — проверяю ещё раз…")
+        self._on_log(f"Бот в звонке ✓ ({time.time() - t0:.0f} с от открытия страницы)"
+                     if in_call else "Не вижу элементов звонка — проверяю ещё раз…")
         if in_call or joined:
             self.expand_meeting()
         if not in_call and not joined:
@@ -714,6 +780,22 @@ class TelemostBot:
             # заголовок, адрес и подписи всех видимых кнопок.
             self._on_log("Что на странице: " + page_summary(self._page))
         return in_call or joined
+
+    def _try_click(self, el) -> bool:
+        try:
+            el.click(timeout=3000)
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _wait_in_call(self, overall_ms: int, poll_ms: int = 500) -> bool:
+        deadline = time.time() + overall_ms / 1000
+        while True:
+            if self.is_in_call():
+                return True
+            if time.time() >= deadline or self._aborted():
+                return False
+            self._page.wait_for_timeout(poll_ms)
 
     def _is_fullscreen(self) -> bool:
         try:
@@ -766,7 +848,10 @@ class TelemostBot:
                 el.click()
             except Exception:  # noqa: BLE001
                 break
-            self._page.wait_for_timeout(1500)
+            for _ in range(10):                  # до 1,5 с, но не дольше нужного
+                self._page.wait_for_timeout(150)
+                if self._is_fullscreen():
+                    break
             if self._is_fullscreen():
                 self._on_log("Свернул боковую панель — окно встречи на весь экран.")
                 return True
