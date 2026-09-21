@@ -14,6 +14,7 @@ export default function Profile() {
   // Telegram для кодов восстановления: пароль для привязки/отвязки, выданный
   // код и ссылка t.me; пока ссылка открыта — опрашиваем профиль, ждём привязки.
   const [tgPwd, setTgPwd] = useState(""); const [tgLink, setTgLink] = useState<any>(null);
+  const [tgErr, setTgErr] = useState("");   // ошибка сервера — прямо в карточке, не только тостом
   const [membersOpen, setMembersOpen] = useState(false);
   const membersRef = useRef<HTMLDivElement>(null);   // anchor for the members Popover
   const toast = useToast();
@@ -38,12 +39,14 @@ export default function Profile() {
   useEffect(() => { load(); }, []);
 
   async function linkTelegram() {
-    if (!tgPwd) return toast("Введите текущий пароль", true);
+    if (!tgPwd) return setTgErr("Введите текущий пароль от этого аккаунта.");
+    setTgErr("");
     try { const r = await api.post("/api/profile/telegram/link", { password: tgPwd }); setTgLink(r); setTgPwd(""); }
-    catch (e: any) { toast(e.message, true); }
+    catch (e: any) { setTgPwd(""); setTgErr(e.message + " Введите пароль, которым входите на сайт, — браузер мог подставить другой."); toast(e.message, true); }
   }
   async function unlinkTelegram() {
-    if (!tgPwd) return toast("Введите текущий пароль", true);
+    if (!tgPwd) return setTgErr("Введите текущий пароль от этого аккаунта.");
+    setTgErr("");
     try { await api.post("/api/profile/telegram/unlink", { password: tgPwd }); setTgPwd(""); setTgLink(null);
       setInfo((i: any) => ({ ...i, telegram_linked: false, telegram_name: "" })); toast("Telegram отвязан"); }
     catch (e: any) { toast(e.message, true); }
@@ -128,7 +131,12 @@ export default function Profile() {
           ) : (
             <>
               <label className="lbl">Текущий пароль</label>
-              <input className="field" type="password" value={tgPwd} onChange={(e) => setTgPwd(e.target.value)} />
+              {/* autoComplete="new-password" — единственный способ запретить браузеру
+                  подставлять сюда сохранённый пароль: с автоподстановкой сервер
+                  отвечал «Текущий пароль неверный», а человек не понимал почему. */}
+              <input className="field" type="password" value={tgPwd} autoComplete="new-password"
+                onChange={(e) => { setTgPwd(e.target.value); setTgErr(""); }} />
+              {tgErr && <div className="text-[12px] mt-1.5" style={{ color: "#f87171" }}>{tgErr}</div>}
               {info?.telegram_linked
                 ? <button className="btn btn-ghost mt-3" onClick={unlinkTelegram}><Link2Off size={14} /> Отвязать Telegram</button>
                 : <button className="btn btn-primary mt-3" onClick={linkTelegram}><Send size={14} /> Привязать Telegram</button>}
