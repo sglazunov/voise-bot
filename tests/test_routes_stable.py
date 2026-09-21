@@ -94,6 +94,8 @@ EXPECTED = {
     "POST /api/profile/delete",
     "POST /api/profile/password",
     "POST /api/profile/phone",
+    "POST /api/profile/telegram/link",
+    "POST /api/profile/telegram/unlink",
     "POST /api/profile/team/remove",
     "POST /api/providers/connect",
     "POST /api/providers/custom/refresh",

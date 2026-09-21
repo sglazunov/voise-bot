@@ -46,7 +46,7 @@
       <p class="sub">С кодом приглашения — войдёте в команду и её настройки. Без кода — создадите своё окружение и станете его админом.</p>
     {% elif mode == "recover" %}
       <h1>Восстановление пароля</h1>
-      <p class="sub">Укажите логин и номер телефона, заданный при регистрации, — и новый пароль.</p>
+      <p class="sub">Укажите логин и номер телефона, заданный при регистрации, — и новый пароль. Код придёт в Telegram, если он привязан в профиле, иначе по SMS.</p>
     {% else %}
       <h1>Вход</h1>
       <p class="sub">Личный кабинет — ваши данные и токены доступны только вам.</p>
@@ -63,7 +63,7 @@
                placeholder="+7 999 123-45-67">
       </div>
       <div id="step2" style="display:none">
-        <label for="code">Код из SMS</label>
+        <label for="code">Код из Telegram или SMS</label>
         <input id="code" name="code" inputmode="numeric" autocomplete="one-time-code"
                maxlength="6" placeholder="6 цифр">
         <label for="password">Новый пароль</label>
@@ -71,7 +71,7 @@
                placeholder="не короче 8 символов">
         <button id="resend" type="button" class="link">Отправить код ещё раз</button>
       </div>
-      <button id="btn" type="submit">Получить код по SMS</button>
+      <button id="btn" type="submit">Получить код</button>
       <div id="err" class="err"></div>
       <div id="ok" class="ok"></div>
     </form>
@@ -140,7 +140,7 @@
     }
 
     if (MODE === 'recover') {
-      // Two steps: (1) request an SMS code, (2) verify it + set the new password.
+      // Two steps: (1) request a one-time code (Telegram or SMS), (2) verify it + set the new password.
       let step = 1, resendTimer = null;
       const ok = $('ok'), resend = $('resend');
 
@@ -173,7 +173,7 @@
         $('step2').style.display = 'block';
         $('username').readOnly = true;
         btn.textContent = 'Сменить пароль';
-        ok.textContent = 'Код отправлен по SMS, если логин и телефон совпадают. Введите его ниже.';
+        ok.textContent = 'Если логин и телефон совпадают, код отправлен в Telegram (если привязан) или по SMS. Введите его ниже.';
         ok.style.display = 'block';
         $('code').focus();
       };
