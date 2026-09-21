@@ -167,6 +167,28 @@ _FULLSCREEN_TOGGLE = [
 ]
 _FULLSCREEN_CLASS = "yamb-windowed-meeting-fullscreen"
 
+# Всплывающие окна оболочки: «Большое обновление в Телемосте → Звучит
+# отлично», онбординг, предложения установить приложение. 21.09 такое окно
+# перекрыло оболочку, и окно встречи за ним даже не открывалось — бот ждал
+# кнопку входа 60 с и ушёл. Кнопки-подтверждения ищутся во всех фреймах.
+_POPUP_BUTTONS = [
+    'button:has-text("Звучит отлично")', 'button:has-text("Понятно")',
+    'button:has-text("Хорошо")', 'button:has-text("Не сейчас")',
+    'button:has-text("Пропустить")', 'button:has-text("Позже")',
+    'button:has-text("Продолжить в браузере")',
+    'button:has-text("Got it")', 'button:has-text("Skip")', 'button:has-text("Later")',
+]
+# ⚠️ Крестик «Закрыть» — ТОЛЬКО в главном документе и только внутри диалога:
+# у прелобби встречи (во фрейме) свой крестик, он закрывает саму встречу.
+_POPUP_CLOSE_MAIN = [
+    '[role="dialog"] button[aria-label="Закрыть"]',
+    '[role="dialog"] button[aria-label*="lose" i]',
+    '.ui-popup button[aria-label="Закрыть"]',
+    '[class*="modal" i] button[aria-label="Закрыть"]',
+    '[class*="Modal"] button[aria-label="Закрыть"]',
+    '[class*="onboarding" i] button[aria-label="Закрыть"]',
+]
+
 # Launch args: auto-accept mic/cam prompts; fake mic so we never send real audio;
 # suppress the noisy first-run/default-browser/translate popups that otherwise
 # show up in the recording.
@@ -454,6 +476,45 @@ class TelemostBot:
                 return el
         return None
 
+    def _dismiss_popups(self) -> bool:
+        """Закрыть всплывающие окна оболочки (промо, онбординг). Возвращает
+        True, если что-то закрыл. Никогда не трогает окно самой встречи."""
+        closed = False
+        seen: set[str] = set()      # один селектор — один клик за проход
+        for _ in range(3):
+            el, label = None, ""
+            for sel in _POPUP_BUTTONS:
+                if sel in seen:
+                    continue
+                el = self._find(sel)
+                if el:
+                    label = sel
+                    break
+            if not el:
+                try:
+                    main = _frames_of(self._page)[0]
+                    for sel in _POPUP_CLOSE_MAIN:
+                        if sel in seen:
+                            continue
+                        cand = main.query_selector(sel)
+                        if cand and cand.is_visible():
+                            el, label = cand, sel
+                            break
+                except Exception:  # noqa: BLE001
+                    el = None
+            if not el:
+                break
+            seen.add(label)
+            try:
+                text = (el.inner_text() or "").strip() or (el.get_attribute("aria-label") or "")
+                el.click()
+                closed = True
+                self._on_log(f"Закрыл всплывающее окно: «{text or label}».")
+                self._page.wait_for_timeout(800)
+            except Exception:  # noqa: BLE001
+                break
+        return closed
+
     def _click_any(self, selectors, overall_ms=12000, poll_ms=500) -> bool:
         """Poll ALL selectors repeatedly until one is clickable or we time out.
 
@@ -494,6 +555,9 @@ class TelemostBot:
         self._on_log(f"Открываю встречу: {url}")
         self._page.goto(url, wait_until="domcontentloaded", timeout=60000)
         self._page.wait_for_timeout(3000)
+        # 0) Промо-окно оболочки («Большое обновление в Телемосте») перекрывает
+        #    всё и не даёт окну встречи открыться — сначала закрываем его.
+        self._dismiss_popups()
 
         # 1) Interstitial: "Продолжить в браузере".
         if self._click_any(_CONTINUE_BROWSER, overall_ms=10000):
@@ -501,6 +565,7 @@ class TelemostBot:
             self._page.wait_for_timeout(4000)
         else:
             self._on_log("Заглушки «Продолжить в браузере» не было (или уже пройдена).")
+        self._dismiss_popups()
 
         # 2) Display name on the guest pre-join form (if asked). Под аккаунтом
         #    имя берётся из профиля, формы нет — шаг пропускаем.
@@ -515,8 +580,15 @@ class TelemostBot:
         self._click_any(_MUTE_MIC, overall_ms=2500)
         self._click_any(_MUTE_CAM, overall_ms=2500)
 
-        # 4) Join the call (poll up to the configured budget).
-        joined = self._click_any(_JOIN_BUTTONS, overall_ms=join_budget * 1000)
+        # 4) Join the call (poll up to the configured budget). Ждём кусками, между
+        #    ними закрываем всплывающие окна: промо может выскочить и позже.
+        joined = False
+        deadline = time.time() + join_budget
+        while not joined and time.time() < deadline and not self._aborted():
+            chunk = min(10000, max(1000, int((deadline - time.time()) * 1000)))
+            joined = self._click_any(_JOIN_BUTTONS, overall_ms=chunk)
+            if not joined and self._dismiss_popups():
+                self._click_any(_CONTINUE_BROWSER, overall_ms=3000)
         self._on_log("Нажал кнопку входа, подключаюсь…" if joined
                      else "Кнопку входа не нашёл — возможно, уже в звонке.")
         self._page.wait_for_timeout(6000)
@@ -871,6 +943,10 @@ class TelemostBot:
                 except Exception:
                     pass
                 self.ensure_muted()
+                try:
+                    self._dismiss_popups()
+                except Exception:  # noqa: BLE001
+                    pass
                 last_mute = time.time()
             # Явное «встреча завершена» — выходим сразу, без выдержки: это не
             # мигание интерфейса, а конец встречи. Проверяем ДО is_in_call,
