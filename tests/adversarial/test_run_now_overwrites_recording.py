@@ -56,14 +56,26 @@ def recorded_but_failed(tmp_path):
     scheduler._states.clear()
 
 
-def test_run_now_refuses_a_meeting_that_already_has_a_recording(recorded_but_failed):
+def test_run_now_lets_the_bot_rejoin_without_touching_the_recording(
+        recorded_but_failed, monkeypatch):
+    """21.09.2026: владелец — «должна быть возможность подключиться, даже
+    если бот заходил» (бот выпал из звонка, встреча идёт). Повторный заход
+    разрешён; прежняя запись цела, потому что путь новой части берётся
+    через `_free_path` (второй тест), а карточка об этом предупреждает."""
     st, out = recorded_but_failed
+    before = out.read_bytes()
+    launched = []
+    monkeypatch.setattr(sched_mod.recorder, "acquire_slot", lambda: "slot0")
+    monkeypatch.setattr(sched_mod.recorder, "release_slot", lambda s: None)
+    monkeypatch.setattr(type(scheduler), "_run",
+                        lambda self, st, slot, manual=False: launched.append(st))
 
     res = scheduler.run_now("alice", TASK)
 
-    assert res.get("ok") is False, (
-        "повторная запись запущена поверх готовой — исходный файл "
-        f"«{out.name}» будет перезаписан ffmpeg-ом ({res})")
+    assert res.get("ok") is True, res
+    assert launched and launched[0] is st and st.state == "recording"
+    assert out.read_bytes() == before, "прежняя запись должна остаться нетронутой"
+    assert any("прежняя запись" in ln and out.name in ln for ln in st.logs)
 
 
 def test_recording_path_never_reuses_an_existing_file(recorded_but_failed):
