@@ -135,6 +135,13 @@ def record_meeting(url: str, out_path: str, cfg: dict,
         if not bot.join(url, should_stop=should_stop):
             shot = str(Path(out_path).with_suffix(".join-failed.png"))
             bot.screenshot(shot)
+            # Диагностика не должна менять диагноз: любая осечка при
+            # сохранении HTML — в лог, а наружу всё равно «не пустили».
+            try:
+                bot.dump_html(str(Path(out_path).with_suffix(".join-failed.html")))
+            except Exception as e:  # noqa: BLE001
+                _LOG.warning("HTML страницы при неудачном входе не сохранён: %s", e)
+            log(f"Скриншот и HTML страницы сохранены рядом с записью: {Path(shot).name}")
             # ⚠️ «Не пустили» и «бот не пришёл» — РАЗНЫЕ отказы, и лечатся
             # по-разному (вёрстка Телемоста против планировщика). Раньше эта
             # ветка не возвращала `reason`, и в метрике они сливались.

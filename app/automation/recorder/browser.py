@@ -30,6 +30,42 @@ BROWSER_STOP_MAX_TOKENS = int(os.getenv("VTX_CHAT_STOP_MAX_TOKENS", "6"))
 
 log = logs.get("vtx.login")
 
+def page_summary(page, limit: int = 20) -> str:
+    """Заголовок, адрес и подписи видимых кнопок/ссылок — одной строкой.
+
+    Это то, что нужно увидеть при «Не удалось войти»: скриншот показывает
+    картинку, а здесь — точные тексты, по которым пишутся селекторы."""
+    parts = []
+    try:
+        parts.append(f"«{page.title()}»")
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        parts.append(str(page.url))
+    except Exception:  # noqa: BLE001
+        pass
+    labels: list[str] = []
+    try:
+        for el in page.query_selector_all('button, a, [role="button"], input'):
+            try:
+                if not el.is_visible():
+                    continue
+                text = (el.inner_text() or "").strip().replace("\n", " ")
+                aria = (el.get_attribute("aria-label") or "").strip()
+                ph = (el.get_attribute("placeholder") or "").strip()
+                label = text or aria or ph
+                if label and label not in labels:
+                    labels.append(label[:40])
+                if len(labels) >= limit:
+                    break
+            except Exception:  # noqa: BLE001
+                continue
+    except Exception:  # noqa: BLE001
+        pass
+    parts.append("кнопки: " + (" | ".join(labels) if labels else "ни одной видимой"))
+    return "; ".join(parts)
+
+
 # Candidate selectors (first match wins). Tune against the live site if needed.
 _NAME_INPUTS = [
     'input[name="name"]', 'input[placeholder*="мя"]',
@@ -43,11 +79,14 @@ _CONTINUE_BROWSER = [
     'button:has-text("Continue in browser")',
     'a:has-text("Continue in browser")',
     'button:has-text("Продолжить")', 'a:has-text("Продолжить")',
+    'button:has-text("Остаться в браузере")', 'a:has-text("Остаться в браузере")',
+    'button:has-text("Открыть в браузере")', 'a:has-text("Открыть в браузере")',
 ]
 _JOIN_BUTTONS = [
     'button:has-text("Подключиться")', 'button:has-text("Войти")',
     'button:has-text("Присоединиться")', 'button:has-text("Join")',
     'button:has-text("Продолжить")',
+    '[role="button"]:has-text("Подключиться")', 'a:has-text("Подключиться к встрече")',
     '[data-testid*="join"]', 'button[type="submit"]',
 ]
 _MUTE_MIC = [
@@ -414,7 +453,20 @@ class TelemostBot:
         in_call = self.is_in_call()
         self._on_log("Бот в звонке ✓" if in_call
                      else "Не вижу элементов звонка — проверяю ещё раз…")
+        if not in_call and not joined:
+            # Вёрстка Телемоста меняется без предупреждения. Чтобы подобрать
+            # новые селекторы, нужно знать, ЧТО бот увидел, — пишем в карточку
+            # заголовок, адрес и подписи всех видимых кнопок.
+            self._on_log("Что на странице: " + page_summary(self._page))
         return in_call or joined
+
+    def dump_html(self, path: str) -> None:
+        """Сохранить HTML страницы рядом со скриншотом сбоя — по нему можно
+        подобрать селекторы под новую вёрстку, не заходя на встречу руками."""
+        try:
+            Path(path).write_text(self._page.content(), encoding="utf-8")
+        except Exception as e:  # noqa: BLE001
+            self._on_log(f"HTML страницы не сохранён: {e}")
 
     def ensure_muted(self) -> None:
         """Turn the bot's mic and camera OFF (only if currently ON, so we never
