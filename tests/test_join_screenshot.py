@@ -42,8 +42,9 @@ class TestЭндпоинт:
         register(client)
         login(client)
         team = security.team_of("alice")
+        # имя записи — как на бою: кириллица, запятые, точки
         st = _state(tmp_path, owner=team,
-                    screenshot=str(tmp_path / "rec.join-failed.png"))
+                    screenshot=str(tmp_path / "21.09.2026, 09:00. - ОД сайт.join-failed.png"))
         monkeypatch.setattr(sched_mod.scheduler, "_states", {st.key: st})
         return st
 
@@ -52,8 +53,8 @@ class TestЭндпоинт:
         assert r.status_code == 404
 
     def test_png_и_html_отдаются(self, client, user, tmp_path):
-        (tmp_path / "rec.join-failed.png").write_bytes(b"\x89PNG\r\n\x1a\n")
-        (tmp_path / "rec.join-failed.html").write_text("<html>shell</html>", encoding="utf-8")
+        (tmp_path / "21.09.2026, 09:00. - ОД сайт.join-failed.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        (tmp_path / "21.09.2026, 09:00. - ОД сайт.join-failed.html").write_text("<html>shell</html>", encoding="utf-8")
         r = client.get("/api/automation/meetings/42/screenshot")
         assert r.status_code == 200
         assert r.headers["content-type"] == "image/png"
@@ -62,13 +63,15 @@ class TestЭндпоинт:
         r = client.get("/api/automation/meetings/42/screenshot?kind=html")
         assert r.status_code == 200
         # HTML чужого сайта — только как файл, не как страница нашего домена
-        assert "attachment" in r.headers["content-disposition"]
+        cd = r.headers["content-disposition"]
+        assert "attachment" in cd and cd.isascii(), "заголовок только латиницей"
+        assert "telemost-42" in cd
         assert r.headers["content-type"].startswith("text/plain")
         assert "shell" in r.text
         assert client.get("/api/automation/meetings/42/screenshot?kind=exe").status_code == 400
 
     def test_чужая_встреча_не_отдаётся(self, client, user, tmp_path):
-        (tmp_path / "rec.join-failed.png").write_bytes(b"\x89PNG")
+        (tmp_path / "21.09.2026, 09:00. - ОД сайт.join-failed.png").write_bytes(b"\x89PNG")
         from fastapi.testclient import TestClient
         from app.main import app
         other = TestClient(app)
