@@ -1759,8 +1759,12 @@ JSON-LD (SoftwareApplication с Offer, FAQPage), canonical/OG. Маршруты:
 (`scheduler.join_screenshot`, `Cache-Control: no-store`; HTML отдаётся как
 `attachment` с `text/plain` — чужие скрипты в контексте нашего домена не
 нужны). На странице «Встречи» у карточки кнопка-камера → модальное окно с
-картинкой и ссылками «Скачать PNG / HTML». Тесты —
-`tests/test_join_screenshot.py` (5), всего 806.
+картинкой и ссылками «Скачать PNG / HTML». ⚠️ Имя файла в
+`Content-Disposition` — своё ASCII (`telemost-<task_id>.join-failed.html`):
+имя записи кириллическое, а заголовок Starlette кодирует в latin-1 —
+подстановка `path.name` давала `UnicodeEncodeError` и «ошибка при
+скачивании». Тест использует боевое имя с кириллицей. Тесты —
+`tests/test_join_screenshot.py` (5), всего 810.
 
 ## Особенности, которые легко нарушить
 - **Регистрация открыта всем**, кто знает адрес (создаётся отдельная пустая

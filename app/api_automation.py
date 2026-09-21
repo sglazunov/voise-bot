@@ -255,9 +255,15 @@ def meeting_screenshot(task_id: str, kind: str = "png",
     # Сохранённая страница Телемоста отдаётся как ФАЙЛ, а не рендерится:
     # чужие скрипты в контексте нашего сайта не нужны.
     headers = {"Cache-Control": "no-store"}
+    # ⚠️ Имя записи кириллическое («21.09.2026, 09:00. - ОД сайт…»), а в
+    # HTTP-заголовок годится только латиница: подстановка path.name роняла
+    # ответ на кодировке — «ошибка при скачивании». Имя файла — своё, ASCII.
+    safe = "".join(ch for ch in str(task_id) if ch.isalnum() or ch in "-_")[:40] or "meeting"
     if kind == "html":
-        headers["Content-Disposition"] = f'attachment; filename="{path.name}"'
         media = "text/plain; charset=utf-8"
+        return FileResponse(path, media_type=media, headers=headers,
+                            filename=f"telemost-{safe}.join-failed.html",
+                            content_disposition_type="attachment")
     return FileResponse(path, media_type=media, headers=headers)
 
 
