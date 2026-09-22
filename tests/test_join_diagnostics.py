@@ -531,3 +531,51 @@ def test_окно_ссылка_на_звонок_заполняется_и_не_
     assert form.inp.value == url and form.btn.clicks == 1
     assert any("спросила ссылку" in ln for ln in bot.log)
     assert not any("Нажал кнопку входа" in ln for ln in bot.log)
+
+
+# ---------------------------------------------------------------------------
+# 22.09.2026: бот вышел через полминуты после входа — «встречу завершили для
+# всех». Строка «Групповой звонок завершился» нашлась в ИСТОРИИ чата комнаты
+# (системные сообщения прошлых звонков) и в превью чатов оболочки.
+# ---------------------------------------------------------------------------
+class _Text(_El):
+    def __init__(self, text, in_history=False, visible=True):
+        super().__init__(text, visible=visible)
+        self.in_history = in_history
+    def evaluate(self, js):
+        assert "closest" in js
+        return self.in_history
+
+
+def test_конец_звонка_не_ищется_в_истории_чата_и_оболочке():
+    ended_sel = "text=Групповой звонок завершился"
+    # 1) в главном документе оболочки (превью чата) — не считается
+    page = _LivePage({})
+    page._els[_SHELL_SEL] = _El("shell")
+    page._els[ended_sel] = _Text("Групповой звонок завершился")
+    bot = _joiner(page)
+    assert bot.call_ended() is False
+    # 2) во фрейме встречи, но внутри панели чата — история, не экран
+    page.child._els[ended_sel] = _Text("Групповой звонок завершился", in_history=True)
+    assert bot.call_ended() is False
+    # 3) во фрейме встречи, но скрытый — не считается
+    page.child._els[ended_sel] = _Text("Групповой звонок завершился", visible=False)
+    assert bot.call_ended() is False
+    # 4) настоящий экран завершения во фрейме — считается
+    page.child._els[ended_sel] = _Text("Групповой звонок завершился")
+    assert bot.call_ended() is True
+
+
+def test_один_в_комнате_только_по_экрану_встречи():
+    sel = "text=пригласить других участников"
+    page = _LivePage({})
+    page._els[_SHELL_SEL] = _El("shell")
+    page._els[sel] = _Text("пригласить других участников")
+    bot = _joiner(page)
+    assert bot.alone_screen() is False
+    page.child._els[sel] = _Text("пригласить других участников")
+    assert bot.alone_screen() is True
+    # без оболочки (старая вёрстка гостя) главный документ — экран встречи
+    del page._els[_SHELL_SEL]
+    del page.child._els[sel]
+    assert bot.alone_screen() is True
