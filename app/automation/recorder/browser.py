@@ -1161,8 +1161,39 @@ class TelemostBot:
         'text=invite', 'text=Share the link',
     )
 
+    # Контейнеры, где эти фразы — НЕ экран, а история: панель чата встречи
+    # (в чате комнаты лежат системные строки «Групповой звонок завершился» от
+    # ПРОШЛЫХ звонков) и списки сообщений. 22.09: бот вышел через полминуты
+    # после входа с «встречу завершили для всех» — нашёл такую строку в чате,
+    # который сам же открыл ради стоп-слова.
+    _HISTORY_JS = ("e => !!e.closest('[class*=chat i], [class*=message i], "
+                   "[class*=msg i], [role=log], [role=list], [role=listitem], li')")
+
+    def _screen_hint(self, hints) -> bool:
+        """Есть ли на ЭКРАНЕ ВСТРЕЧИ (не в чате, не в оболочке) видимая фраза
+        из `hints`. При оболочке Мессенджера — только вложенные фреймы: в
+        главном документе те же слова стоят в превью чатов боковой панели."""
+        frames = _frames_of(self._page)
+        if self._shell_present():
+            frames = frames[1:]
+        for sel in hints:
+            for fr in frames:
+                try:
+                    for el in fr.query_selector_all(sel)[:8]:
+                        try:
+                            if not el.is_visible():
+                                continue
+                            if el.evaluate(self._HISTORY_JS):
+                                continue
+                            return True
+                        except Exception:  # noqa: BLE001
+                            continue
+                except Exception:  # noqa: BLE001
+                    continue
+        return False
+
     def alone_screen(self) -> bool:
-        return self._find_first(self._ALONE_HINTS, visible=False) is not None
+        return self._screen_hint(self._ALONE_HINTS)
 
     # Экран, который Телемост показывает, когда организатор завершил встречу для
     # всех. Ловим его ПО ТЕКСТУ, а не по исчезновению кнопок: часть управления на
@@ -1178,8 +1209,10 @@ class TelemostBot:
     )
 
     def call_ended(self) -> bool:
-        """Организатор завершил встречу для всех — писать больше нечего."""
-        return self._find_first(self._ENDED_HINTS, visible=False) is not None
+        """Организатор завершил встречу для всех — писать больше нечего.
+        Только видимый текст на экране встречи: те же слова в истории чата и
+        в превью чатов оболочки — прошлые звонки, а не этот."""
+        return self._screen_hint(self._ENDED_HINTS)
 
     def screenshot(self, path: str) -> None:
         try:
