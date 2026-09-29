@@ -128,3 +128,39 @@ class TestРегистрИПрокрутка:
         self._feed(b, ["стоп 12:08"])
         assert self._feed(b, ["стоп 12:08"]) is False
         assert self._feed(b, ["стоп 12:08"]) is False
+
+
+class TestИсторияЧатаИВиртуализация:
+    """29.09.2026: бот вышел «по стоп-слову», которого никто не писал. В логе
+    «видно 13 → 12 → 13»: виртуализированный список дорисовывал старые строки,
+    базовая линия опускалась до 12, возврат к 13 выглядел ростом."""
+
+    _bot = TestРегистрИПрокрутка._bot
+    _feed = TestРегистрИПрокрутка._feed
+
+    HISTORY = ["14 июля", "Ирина Бобылева", "Коллеги, вынуждена отключится 11:00",
+               "21 июля", "стоп 11:05", "18 августа", "Зоя Р.", "стоп 11:00",
+               "8 сентября", "Стоп 11:14", "стоп 11:14", "15 сентября", "стоп 11:00",
+               "Сегодня", "Иван Р.", "Проработка, два этапа 10:32"]
+
+    def test_колебание_счётчика_при_прокрутке_не_срабатывает(self):
+        b = self._bot()
+        assert self._feed(b, self.HISTORY) is False
+        fewer = [ln for ln in self.HISTORY if ln != "стоп 11:05"]   # строка ушла из DOM
+        assert self._feed(b, fewer) is False
+        assert self._feed(b, self.HISTORY) is False, "вернулась старая строка — не команда"
+
+    def test_старая_строка_дорисованная_прокруткой_не_срабатывает(self):
+        b = self._bot()
+        assert self._feed(b, self.HISTORY[5:]) is False           # начало истории не в DOM
+        assert self._feed(b, self.HISTORY) is False, "дорисовались строки прошлых недель"
+
+    def test_команда_под_сегодня_срабатывает(self):
+        b = self._bot()
+        assert self._feed(b, self.HISTORY) is False
+        assert self._feed(b, self.HISTORY + ["Сергей Глазунов", "стоп 10:40"]) is True
+
+    def test_без_разделителя_сегодня_работает_как_раньше(self):
+        b = self._bot()
+        assert self._feed(b, ["стоп 12:08"]) is False
+        assert self._feed(b, ["стоп 12:08", "стоп 12:30"]) is True
