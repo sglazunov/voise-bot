@@ -1323,7 +1323,7 @@ class TelemostBot:
         text = self._read_all_text()
         if text is None:
             return False
-        lines = text.splitlines()
+        lines = self._today_lines(text.splitlines())
         n = sum(1 for ln in lines if self._is_stop_line(ln, word))
         if n != self._chat_last_n:
             # When the word IS on the page but no line qualified as a command,
@@ -1354,12 +1354,29 @@ class TelemostBot:
             return True
         # Запасной признак на случай, когда две команды совпали дословно
         # (одна минута, одно слово): тогда множество не растёт, а счётчик да.
+        # ⚠️ Базовая линия НИКОГДА не опускается: список виртуализирован, и
+        # 13 → 12 → 13 — это прокрутка, а не новое сообщение (29.09: бот вышел
+        # «по стоп-слову», которого никто не писал).
         if n > self._chat_baseline:
             self._chat_baseline = n
             return True
-        if n < self._chat_baseline:
-            self._chat_baseline = n
         return False
+
+    _TODAY_MARKERS = ("сегодня", "today")
+
+    @staticmethod
+    def _today_lines(lines: list[str]) -> list[str]:
+        """Строки чата ПОСЛЕ разделителя «Сегодня». Чат комнаты общий и не
+        чистится: в нём «стоп» с прошлых встреч за месяцы, а список
+        виртуализирован — при прокрутке старые строки то появляются, то
+        уходят. Команда сегодняшней встречи может стоять только под
+        «Сегодня»; всё выше — история. Разделителя нет (старая вёрстка) —
+        берём всё, как раньше."""
+        idx = None
+        for i, ln in enumerate(lines):
+            if ln.strip().lower() in TelemostBot._TODAY_MARKERS:
+                idx = i
+        return lines[idx + 1:] if idx is not None else lines
 
     def wait_until_end(self, should_stop, max_sec: int, alone_sec: int,
                        min_participants: int = 1, chat_stop_word: str = "") -> str:
