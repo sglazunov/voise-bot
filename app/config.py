@@ -33,6 +33,33 @@ COMPUTE_TYPE = os.getenv("VTX_COMPUTE_TYPE", "int8")
 # CTranslate2 scales best with PHYSICAL cores. The 5500U has 6 — using 6 keeps
 # a couple of logical threads free for the web server + OS responsiveness.
 CPU_THREADS = int(os.getenv("VTX_CPU_THREADS", "6"))
+
+
+def _mem_total_gb() -> float:
+    try:
+        with open("/proc/meminfo", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    return int(line.split()[1]) / 1024 / 1024
+    except OSError:
+        pass
+    return 0.0
+
+
+def _auto_workers() -> int:
+    """Сколько задач распознавания вести одновременно. Каждый воркер держит
+    СВОЙ экземпляр Whisper (medium int8 — ~1,5 ГБ, large — ~3 ГБ): два
+    экземпляра на машине с 4 ГБ уходили в своп, поэтому второй воркер
+    включается сам только при 10+ ГБ памяти и 6+ ядрах."""
+    cpus = os.cpu_count() or 1
+    return 2 if (_mem_total_gb() >= 10 and cpus >= 6) else 1
+
+
+# Параллельных задач распознавания (и экземпляров модели в памяти).
+# 0 = выбрать по железу (_auto_workers). Второй экземпляр грузится с половиной
+# потоков: 6 + 3 на восьми ядрах — лёгкая переподписка, а одиночная задача
+# по-прежнему получает все VTX_CPU_THREADS.
+JOB_WORKERS = int(os.getenv("VTX_JOB_WORKERS", "0") or 0) or _auto_workers()
 # beam_size=5 for quality — the 6-core CPU has the headroom for it. Set to 1
 # (greedy) if you'd rather have faster, lower-quality transcripts.
 BEAM_SIZE = int(os.getenv("VTX_BEAM_SIZE", "5"))

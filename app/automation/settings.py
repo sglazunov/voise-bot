@@ -103,7 +103,9 @@ _DEFAULTS: dict[str, Any] = {
     "strict_verify": True,            # grounding pass: every task/decision needs a
                                       # verbatim quote; unverified ones get flagged (Д5)
     "live_transcribe": True,          # Д10: transcribe the growing recording every N min
-    "live_interval_min": 5,           # ...this often (the page shows text mid-meeting)
+    "live_interval_min": 3,           # ...this often; после встречи остаётся дораспознать
+                                      # только хвост с последнего тика — чем чаще, тем
+                                      # быстрее протокол (3 мин: хвост ≤3 мин звука)
     "analyze_preset": "auto",         # Д11: протокол под тип встречи; auto = по названию
     "custom_presets": {},             # {имя: доп. правила} — свои пресеты команды
     # --- Д15: уведомления в Telegram («протокол готов», «нет звука») ---
