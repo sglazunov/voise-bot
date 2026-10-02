@@ -81,6 +81,12 @@ REPEAT_COLLAPSE_AT = int(os.getenv("VTX_REPEAT_COLLAPSE_AT", "3"))
 # Max upload size in MB. 2 GB by default so 1 GB videos go through comfortably.
 MAX_UPLOAD_MB = int(os.getenv("VTX_MAX_UPLOAD_MB", "2048"))
 
+# Сколько ДНЕЙ записи встреч лежат на сервере. Записи уходят в облако, локальная
+# копия нужна лишь на время распознавания и повторов; 60 ГБ диска забились
+# именно ими (02.10.2026: 48,6 из 60). Файлы незавершённых задач и идущих
+# записей не трогаются; 0 — выключить уборку.
+RECORDING_RETENTION_DAYS = int(os.getenv("VTX_RECORDING_RETENTION_DAYS", "2"))
+
 # How long finished results (and their uploads) are kept before auto-cleanup.
 # Within this window a result stays downloadable even after a page reload.
 RESULT_RETENTION_HOURS = int(os.getenv("VTX_RETENTION_HOURS", "24"))
