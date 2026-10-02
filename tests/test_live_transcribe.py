@@ -7,16 +7,20 @@ from app import security
 from app.automation import snapshots
 from app.automation.scheduler import MeetingState, Scheduler
 from app.jobs import store
-from app.transcribe import _transcribe_lock, transcribe_file
+from app import transcribe
+from app.transcribe import transcribe_file
 
 
 class TestNonblockingLock:
-    def test_busy_lock_returns_none(self):
-        assert _transcribe_lock.acquire()
+    def test_busy_slots_return_none(self):
+        """Все слоты модели заняты — живой тик не ждёт, а пропускается."""
+        taken = [transcribe._acquire_slot(blocking=False) for _ in transcribe._SLOTS]
+        assert all(taken)
         try:
             assert transcribe_file("/nonexistent.wav", nonblocking=True) is None
         finally:
-            _transcribe_lock.release()
+            for slot in taken:
+                transcribe._release_slot(slot)
 
 
 def _mk_state(s: Scheduler, **kw) -> MeetingState:

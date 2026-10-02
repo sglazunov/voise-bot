@@ -1,4 +1,5 @@
-"""faster-whisper wrapper. The model is loaded once and reused for every job."""
+"""faster-whisper wrapper. Модели живут в пуле слотов — по одному экземпляру на
+воркер очереди; слот занимается на время одной расшифровки."""
 from __future__ import annotations
 
 import threading
@@ -9,34 +10,56 @@ from faster_whisper import WhisperModel
 
 from . import config
 
-_model: Optional[WhisperModel] = None
-_model_name: Optional[str] = None
-_model_lock = threading.Lock()
-# One transcription at a time: the model instance is shared, and the job worker
-# and the live-transcribe threads (Д10) must not run inference concurrently.
-_transcribe_lock = threading.Lock()
+# Пул экземпляров модели: по одному на воркер очереди (config.JOB_WORKERS).
+# Раньше экземпляр был один и один замок — два воркера упёрлись бы в него и
+# работали бы по очереди. Слот 0 грузится со всеми потоками, остальные — с
+# половиной (одиночная задача всегда берёт слот 0 и не теряет скорость).
+class _Slot:
+    def __init__(self, index: int) -> None:
+        self.index = index
+        self.lock = threading.Lock()
+        self.model: Optional[WhisperModel] = None
+        self.model_name: Optional[str] = None
+        self.threads = (config.CPU_THREADS if index == 0
+                        else max(2, config.CPU_THREADS // 2))
+
+    def get(self, name: Optional[str]) -> WhisperModel:
+        want = name or config.MODEL
+        if self.model is None or self.model_name != want:
+            self.model = WhisperModel(
+                want, device=config.DEVICE, compute_type=config.COMPUTE_TYPE,
+                cpu_threads=self.threads)
+            self.model_name = want
+        return self.model
+
+
+_POOL_SIZE = max(1, int(getattr(config, "JOB_WORKERS", 1) or 1))
+_SLOTS: List[_Slot] = [_Slot(i) for i in range(_POOL_SIZE)]
+# Сколько слотов свободно. Живая расшифровка берёт слот только если он
+# свободен прямо сейчас (nonblocking) — она не должна стоять в очереди за
+# часовой задачей.
+_SEM = threading.Semaphore(_POOL_SIZE)
+
+
+def _acquire_slot(blocking: bool) -> Optional[_Slot]:
+    if not _SEM.acquire(blocking=blocking):
+        return None
+    for slot in _SLOTS:
+        if slot.lock.acquire(blocking=False):
+            return slot
+    _SEM.release()          # не должно случаться: семафор гарантирует слот
+    return None
+
+
+def _release_slot(slot: _Slot) -> None:
+    slot.lock.release()
+    _SEM.release()
 
 
 def get_model(name: Optional[str] = None) -> WhisperModel:
-    """Load the requested Whisper model, caching one at a time.
-
-    Jobs may pick accuracy (small/medium/large-v3) per run; since only one
-    transcription runs at a time, we keep a single model in memory and reload
-    it when the requested size changes — bounding RAM to one model.
-    """
-    global _model, _model_name
-    want = name or config.MODEL
-    if _model is None or _model_name != want:
-        with _model_lock:
-            if _model is None or _model_name != want:
-                _model = WhisperModel(
-                    want,
-                    device=config.DEVICE,
-                    compute_type=config.COMPUTE_TYPE,
-                    cpu_threads=config.CPU_THREADS,
-                )
-                _model_name = want
-    return _model
+    """Экземпляр модели первого слота (предзагрузка при старте). Для самой
+    расшифровки не использовать — слот надо занимать через transcribe_file."""
+    return _SLOTS[0].get(name)
 
 
 @dataclass
@@ -62,6 +85,21 @@ def _is_hallucination(seg: "Segment") -> bool:
     lp = seg.avg_logprob
     return (ns is not None and lp is not None
             and ns > config.NS_PROB_MAX and lp < config.LOGPROB_MIN)
+
+
+def trim_chunk_edge(segments: List["Segment"], chunk_end: float,
+                    margin: float = 1.5) -> tuple[List["Segment"], float]:
+    """Живой кусок режется по времени, а не по паузе: последний сегмент почти
+    наверняка оборван на полуслове. Отбрасываем сегменты, упирающиеся в край
+    куска (до `margin` с от конца), и говорим, ДОКУДА кусок считать
+    покрытым — следующий начнётся оттуда и дораспознает обрывок целиком.
+    Возвращает (оставленные сегменты, граница покрытия в абсолютных
+    секундах). Если резать нечего (один сегмент или всё далеко от края) —
+    покрыто до конца куска."""
+    keep = [s for s in segments if s.end <= chunk_end - margin]
+    if len(keep) == len(segments) or not keep:
+        return list(segments), chunk_end
+    return keep, keep[-1].end
 
 
 def collapse_repeats(segments: List["Segment"],
@@ -100,6 +138,7 @@ def transcribe_file(
     initial_prompt: Optional[str] = None,
     model_name: Optional[str] = None,
     nonblocking: bool = False,
+    offset_sec: float = 0.0,
 ) -> Optional[tuple[List[Segment], dict]]:
     """Transcribe an audio or video file.
 
@@ -114,21 +153,25 @@ def transcribe_file(
     growing transcript and show real progress.
 
     `nonblocking=True` (the live-transcribe path) returns None instead of
-    waiting when another transcription holds the model — a live tick simply
-    skips rather than queueing up behind an hour-long job.
+    waiting when every model slot is busy — a live tick simply skips rather
+    than queueing up behind an hour-long job.
+
+    `offset_sec` сдвигает времена сегментов: файл — вырезанный кусок записи,
+    а времена нужны от начала встречи (живые куски и дораспознанный хвост).
     """
-    if not _transcribe_lock.acquire(blocking=not nonblocking):
+    slot = _acquire_slot(blocking=not nonblocking)
+    if slot is None:
         return None
     try:
-        return _transcribe_locked(audio_path, language, on_segment, on_start,
-                                  initial_prompt, model_name)
+        return _transcribe_locked(slot, audio_path, language, on_segment, on_start,
+                                  initial_prompt, model_name, offset_sec)
     finally:
-        _transcribe_lock.release()
+        _release_slot(slot)
 
 
-def _transcribe_locked(audio_path, language, on_segment, on_start,
-                       initial_prompt, model_name) -> tuple[List[Segment], dict]:
-    model = get_model(model_name)
+def _transcribe_locked(slot, audio_path, language, on_segment, on_start,
+                       initial_prompt, model_name, offset_sec=0.0) -> tuple[List[Segment], dict]:
+    model = slot.get(model_name)
     segments_iter, info = model.transcribe(
         audio_path,
         language=language or config.DEFAULT_LANGUAGE,
@@ -149,15 +192,17 @@ def _transcribe_locked(audio_path, language, on_segment, on_start,
     if on_start:
         on_start()
     out: List[Segment] = []
+    total_abs = total + offset_sec
     for seg in segments_iter:
-        s = Segment(start=seg.start, end=seg.end, text=seg.text.strip(),
+        s = Segment(start=seg.start + offset_sec, end=seg.end + offset_sec,
+                    text=seg.text.strip(),
                     avg_logprob=getattr(seg, "avg_logprob", None),
                     no_speech_prob=getattr(seg, "no_speech_prob", None))
         if _is_hallucination(s):
             continue    # dropped BEFORE the live stream — the UI never sees it
         out.append(s)
         if on_segment:
-            on_segment(s, total)
+            on_segment(s, total_abs)
 
     # Collapse hallucination loops (the same phrase repeated on silence). The
     # live stream may have briefly shown the run; the saved transcript is clean.
@@ -166,7 +211,7 @@ def _transcribe_locked(audio_path, language, on_segment, on_start,
     meta = {
         "language": getattr(info, "language", language),
         "language_probability": getattr(info, "language_probability", None),
-        "duration": total,
+        "duration": total + offset_sec,
         "model": model_name or config.MODEL,
     }
     return out, meta

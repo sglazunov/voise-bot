@@ -74,6 +74,7 @@ JOB_SCALAR_COLS = [
     "finished_at", "error", "duration", "speakers", "diarization_error",
     "speaker_error", "screen_error", "protocol_cloud_url", "delivery_error",
     "screen_segments", "analysis_error", "transcribe_sec", "stop_reason",
+    "live_path",
 ]
 JOB_JSON_COLS = ["video_participants", "analysis", "docx_providers", "weeek_tasks",
                  "llm_usage"]
@@ -178,6 +179,9 @@ ALTER TABLE jobs ADD COLUMN IF NOT EXISTS llm_usage JSONB;
 -- Чем кончилась запись, из которой взялась задача (silence, max_duration,
 -- chat_stop…). Рекордер возвращал это всегда, но никто не читал.
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS stop_reason TEXT;
+-- Живая расшифровка встречи (куски, распознанные по ходу записи) — файл
+-- рядом с записью; задача дораспознаёт только хвост после неё.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS live_path TEXT;
 CREATE TABLE IF NOT EXISTS search_docs (
     job_id     TEXT PRIMARY KEY,
     username   TEXT,

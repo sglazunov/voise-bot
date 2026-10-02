@@ -230,6 +230,7 @@ def room_key(url: str) -> str:
 class Scheduler:
     def __init__(self) -> None:
         self._states: dict[str, MeetingState] = {}
+        self._last_sweep = 0.0          # уборка записей старше N дней
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
@@ -331,9 +332,97 @@ class Scheduler:
                     except Exception as e:  # сбой одной команды не валит другие
                         _LOG.warning("Опрос команды %s сорвался", user, exc_info=True)
                         self._last_error[user] = f"{type(e).__name__}: {e}"[:300]
+                # Уборка записей — раз в час, для всех команд, включая те, у
+                # кого автоматика выключена: диск общий.
+                if time.time() - self._last_sweep >= 3600:
+                    self._last_sweep = time.time()
+                    try:
+                        self.sweep_recordings()
+                    except Exception:
+                        _LOG.warning("Уборка записей сорвалась", exc_info=True)
             except Exception:  # never let the loop die
                 _LOG.error("Сбой в цикле планировщика", exc_info=True)
             self._stop.wait(_TICK_SEC)
+
+    # Побочные файлы записи: по тому же имени с суффиксом.
+    _SIDECARS = (".ffmpeg.log", ".live.json", ".live.wav", ".tail.wav",
+                 ".join-failed.png", ".join-failed.html")
+
+    def sweep_recordings(self, days: float | None = None, now: float | None = None) -> dict:
+        """Удалить записи встреч старше `days` суток (config.RECORDING_RETENTION_DAYS).
+
+        Записи уходят в облако сразу после встречи; локальная копия нужна
+        только для распознавания и «Повторить». Но она оставалась навсегда,
+        если облако не приняло файл, протокол не собрался, бот заходил
+        повторно («имя (2).mp4») или задача ушла в ошибку, — и 60 ГБ диска
+        забились записями. Владелец: «в памяти должны быть только записи за
+        последние 2 дня, остальные удалялись».
+
+        Не трогаем: файл идущей записи (карточка в активном состоянии или
+        свежий mtime), исходник незавершённой задачи, чужие папки (копия
+        «локального облака» лежит в data/recordings, не в users/*/recordings).
+        Запись без ссылки в облаке удаляется ТОЖЕ, но с предупреждением в лог:
+        через двое суток её уже никто не дозальёт, а диск нужен следующим."""
+        days = config.RECORDING_RETENTION_DAYS if days is None else days
+        if not days or days <= 0:
+            return {"deleted": 0, "freed_mb": 0.0, "kept": 0}
+        now = now or time.time()
+        max_age = days * 86400
+        busy: set[str] = set()
+        clouded: set[str] = set()
+        with self._lock:
+            for st in self._states.values():
+                if st.out_path and st.state in self._ACTIVE_STATES:
+                    busy.add(str(st.out_path))
+                if st.out_path and st.cloud_url:
+                    clouded.add(str(st.out_path))
+        for job in store.list():
+            if job.status in store._UNFINISHED and job.audio_path:
+                busy.add(str(job.audio_path))
+        deleted = kept = 0
+        freed = 0.0
+        for team in security.list_teams():
+            rec_dir = security.user_dir(team) / "recordings"
+            if not rec_dir.is_dir():
+                continue
+            for p in sorted(rec_dir.iterdir()):
+                if not p.is_file():
+                    continue
+                base = self._recording_base(p)
+                if base in busy or str(p) in busy:
+                    kept += 1
+                    continue
+                try:
+                    st_ = p.stat()
+                except OSError:
+                    continue
+                if now - st_.st_mtime < max_age:
+                    kept += 1
+                    continue
+                try:
+                    p.unlink()
+                except OSError:
+                    _LOG.warning("Запись %s не удалена", p, exc_info=True)
+                    continue
+                deleted += 1
+                freed += st_.st_size / 1e6
+                if p.suffix == ".mp4" and base not in clouded:
+                    _LOG.warning("Удалена запись старше %s дн. БЕЗ ссылки в облаке: %s",
+                                 days, p.name)
+        if deleted:
+            _LOG.info("Уборка записей: удалено %d файлов (%.0f МБ), оставлено %d",
+                      deleted, freed, kept)
+        return {"deleted": deleted, "freed_mb": round(freed, 1), "kept": kept}
+
+    @classmethod
+    def _recording_base(cls, p: "Path") -> str:
+        """Путь записи, к которой относится файл: у побочных файлов срезается
+        суффикс («….mp4.live.json» → «….mp4»)."""
+        s = str(p)
+        for suf in cls._SIDECARS:
+            if s.endswith(suf):
+                return s[: -len(suf)]
+        return s
 
     def _nightly_wipe(self, user: str, cfg: dict) -> None:
         """Ночная страховка: пройти по СЕГОДНЯШНИМ задачам и снять с них
@@ -928,6 +1017,7 @@ class Scheduler:
                     user_notes=st.live_notes,
                     preset=preset,
                     stop_reason=st.stop_reason or "",
+                    live_path=self._live_path_if_any(out, log),
                     delete_audio_when_done=delivered_elsewhere,
                     owner=user)
                 st.job_id = job.id
@@ -1351,6 +1441,7 @@ class Scheduler:
             context_hint=str(st.title or ""),
             user_notes=st.live_notes,
             preset=preset,
+            live_path=self._live_path_if_any(out, log),
             owner=st.owner)
         st.job_id = job.id
         self._set(st, "transcribing",
@@ -1496,19 +1587,58 @@ class Scheduler:
             return {"ok": False, "error": "Встреча не найдена."}
         return {"ok": True, "notes": st.live_notes}
 
+    def _live_path_if_any(self, out: str, log=None) -> str:
+        """Путь к живой расшифровке, если она есть и что-то покрыла; в лог
+        карточки — сколько минут уже распознано по ходу встречи."""
+        path = self.live_path_for(out)
+        live = store_load_live(path)
+        if not live:
+            return ""
+        until = float(live.get("until") or 0)
+        if log:
+            log(f"Живая расшифровка покрыла {int(until // 60)} мин — задача "
+                f"дораспознает только хвост.")
+        return path
+
+    @staticmethod
+    def live_path_for(out: str) -> str:
+        """Файл живой расшифровки рядом с записью — его читает задача."""
+        return f"{out}.live.json"
+
     def _live_transcribe_loop(self, st: MeetingState, cfg: dict, out: str) -> None:
-        """Every N minutes transcribe the NEW tail of the growing fMP4, so the
-        meeting page shows text while people are still talking. The final
-        full-file transcription (better context, speakers) replaces this."""
-        interval = max(60, int(cfg.get("live_interval_min", 5)) * 60)
+        """Every N minutes transcribe the NEW tail of the growing fMP4.
+
+        Два потребителя: страница встречи (текст по ходу разговора) и —
+        главное — ИТОГОВАЯ расшифровка. Куски копятся в `<запись>.live.json`
+        ({"until": докуда покрыто, "segments": [...]}) и после встречи задача
+        дораспознаёт только хвост после `until`: протокол часовой встречи
+        готов через минуты, а не через час. Кусок режется по времени, а не по
+        паузе, поэтому сегмент у края отбрасывается (`trim_chunk_edge`) и
+        следующий кусок начинается с него — обрывок дораспознаётся целиком.
+        Подсказка Whisper (имена, термины команды) та же, что у задачи."""
+        interval = max(60, int(cfg.get("live_interval_min", 3)) * 60)
         lang = config.DEFAULT_LANGUAGE
         processed = 0.0
         ffmpeg = "ffmpeg"
+        live_file = self.live_path_for(out)
+        kept: list[dict] = []
+        try:
+            prompt = store.auto_prompt(st.owner)
+        except Exception:  # noqa: BLE001
+            prompt = ""
 
         def fmt(sec: float) -> str:
             m, s = divmod(int(sec), 60)
             h, m = divmod(m, 60)
             return f"{h:d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+
+        def persist() -> None:
+            try:
+                Path(live_file).write_text(
+                    json.dumps({"until": processed, "segments": kept},
+                               ensure_ascii=False), encoding="utf-8")
+            except OSError:
+                pass
 
         while not self._stop.is_set() and st.state == "recording":
             if self._stop.wait(interval):
@@ -1535,16 +1665,21 @@ class Scheduler:
                      "-ar", "16000", wav], capture_output=True, timeout=120)
                 if cut.returncode != 0 or not Path(wav).exists():
                     continue
-                from ..transcribe import transcribe_file
-                got = transcribe_file(wav, language=lang, nonblocking=True)
+                from ..transcribe import transcribe_file, trim_chunk_edge
+                got = transcribe_file(wav, language=lang, nonblocking=True,
+                                      initial_prompt=prompt or None,
+                                      offset_sec=processed)
                 if got is None:
-                    continue    # model busy with a real job — skip this tick
+                    continue    # все слоты модели заняты — пропускаем тик
                 segs, _meta = got
-                lines = [f"[{fmt(processed + s.start)}] {s.text}" for s in segs]
+                segs, covered = trim_chunk_edge(segs, end)
+                lines = [f"[{fmt(s.start)}] {s.text}" for s in segs]
                 if lines:
                     st.live_text = (st.live_text + "\n" + "\n".join(lines)).strip()
                     st.live_updated_at = time.time()
-                processed = end
+                kept.extend(s.to_dict() for s in segs)
+                processed = covered
+                persist()
             except Exception:   # live text is best-effort, never break recording
                 continue
             finally:
@@ -1671,6 +1806,6 @@ class Scheduler:
 
 
 # Imported here (not at top) to avoid a heavy import cycle at module load.
-from ..jobs import store  # noqa: E402
+from ..jobs import store, load_live as store_load_live  # noqa: E402
 
 scheduler = Scheduler()

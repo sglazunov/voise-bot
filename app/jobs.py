@@ -1,8 +1,9 @@
-"""A minimal single-worker job queue.
+"""A minimal job queue with a fixed number of workers.
 
-Why single worker: on a 4 GB / 4-core machine we must never run two Whisper
-transcriptions at once or the box will swap to the HDD and crawl/OOM. So jobs
-are processed strictly one at a time by one background thread.
+Воркеров — `config.JOB_WORKERS` (по умолчанию: 2 при 10+ ГБ памяти и 6+
+ядрах, иначе 1). Каждый воркер занимает свой слот модели (`transcribe`): на
+4 ГБ / 4 ядрах два Whisper разом уходили в своп, и очередь была строго из
+одной задачи; на 8 ядрах / 12 ГБ две встречи подряд считаются параллельно.
 
 Job state is persisted to a JSON file so results survive a restart.
 """
@@ -119,6 +120,11 @@ class Job:
     # thinned_out | stopped | error. Рекордер возвращает это с самого начала,
     # но никто не читал — переживает ретеншн в meeting_stats.
     stop_reason: str = ""
+    # Файл живой расшифровки (<запись>.live.json): куски, распознанные ПО ХОДУ
+    # встречи. Задача берёт их как есть и дораспознаёт только хвост после
+    # последнего покрытого места — протокол готов через минуты после конца
+    # встречи, а не через час. Пусто/нет файла — полная расшифровка, как раньше.
+    live_path: str = ""
     delete_audio_when_done: bool = False  # delete the source media after processing
                                           # (recordings already sent to the UI's cloud)
     owner: str = ""                  # the login that owns this job (isolation)
@@ -173,8 +179,10 @@ class JobStore:
         self._queue: "queue.Queue[str]" = queue.Queue()
         self._load()
         self._purge_old()
-        worker = threading.Thread(target=self._worker_loop, daemon=True, name="vtx-worker")
-        worker.start()
+        self.workers = max(1, int(getattr(config, "JOB_WORKERS", 1) or 1))
+        for i in range(self.workers):
+            threading.Thread(target=self._worker_loop, daemon=True,
+                             name=f"vtx-worker-{i}").start()
         cleaner = threading.Thread(target=self._cleaner_loop, daemon=True, name="vtx-cleaner")
         cleaner.start()
 
@@ -244,7 +252,7 @@ class JobStore:
                context_hint: str = "", model: str = "",
                delete_audio_when_done: bool = False, owner: str = "",
                user_notes: str = "", preset: str = "",
-               stop_reason: str = "") -> Job:
+               stop_reason: str = "", live_path: str = "") -> Job:
         job = Job(
             id=uuid.uuid4().hex[:12],
             filename=filename,
@@ -266,6 +274,7 @@ class JobStore:
             user_notes=(user_notes or "").strip(),
             preset=(preset or "").strip(),
             stop_reason=(stop_reason or "").strip(),
+            live_path=(live_path or "").strip(),
             delete_audio_when_done=delete_audio_when_done,
             owner=_team(owner),   # jobs belong to the TEAM, not the individual
         )
@@ -965,6 +974,72 @@ class JobStore:
             if kw.get("status") == STATUS_DONE:
                 self.index_search(job)   # Д14: transcript+protocol become searchable
 
+    def _transcribe_with_live(self, job: Job, live: dict, rules, partial,
+                              on_segment, on_start, initial_prompt):
+        """Итоговая расшифровка из живых кусков + дораспознанный хвост.
+        Живые куски уже прошли фильтр галлюцинаций и схлопывание повторов
+        (transcribe_file делает это на каждом куске); здесь к ним применяется
+        глоссарий, они кладутся в partial (для живого окна) и считаются как
+        уже сделанный прогресс. Хвост режется ffmpeg'ом в wav и распознаётся
+        со сдвигом времени. Любая осечка — полная расшифровка, как раньше."""
+        from .transcribe import Segment
+        until = float(live.get("until") or 0.0)
+        segs: list = []
+        for d in live.get("segments") or []:
+            try:
+                seg = Segment(start=float(d["start"]), end=float(d["end"]),
+                              text=str(d.get("text") or "").strip(),
+                              avg_logprob=d.get("avg_logprob"),
+                              no_speech_prob=d.get("no_speech_prob"))
+            except (KeyError, TypeError, ValueError):
+                continue
+            if rules:
+                seg.text = glossary.apply(seg.text, rules)
+            if seg.text:
+                segs.append(seg)
+        total = _media_duration(job.audio_path)
+        if until < 30 or (total and until > total + 5):
+            # Покрытия почти нет или оно не сходится с файлом — не рискуем.
+            return transcribe_file(
+                job.audio_path, language=job.language, on_segment=on_segment,
+                on_start=on_start, initial_prompt=initial_prompt,
+                model_name=job.model or None)
+        partial.extend({"start": s.start, "end": s.end, "text": s.text} for s in segs)
+        self._set(job, persist=False,
+                  progress=min(until / total, 0.95) if total else 0.5)
+        log.info("задача %s: живая расшифровка покрыла %.0f с из %.0f — "
+                 "дораспознаю хвост", job.id, until, total or 0)
+        tail = None
+        try:
+            tail = _cut_wav(job.audio_path, until)
+            if tail is None:
+                raise RuntimeError("хвост не вырезан")
+            got = transcribe_file(
+                tail, language=job.language, on_segment=on_segment,
+                on_start=on_start, initial_prompt=initial_prompt,
+                model_name=job.model or None, offset_sec=until)
+            tail_segs, meta = got
+            segments = segs + list(tail_segs)
+            meta["duration"] = total or meta.get("duration")
+            meta["live_reused_sec"] = until
+            return segments, meta
+        except JobCancelled:
+            raise
+        except Exception:
+            log.warning("задача %s: хвост после живой расшифровки не распознан — "
+                        "распознаю файл целиком", job.id, exc_info=True)
+            del partial[:]
+            return transcribe_file(
+                job.audio_path, language=job.language, on_segment=on_segment,
+                on_start=on_start, initial_prompt=initial_prompt,
+                model_name=job.model or None)
+        finally:
+            if tail:
+                try:
+                    Path(tail).unlink(missing_ok=True)
+                except OSError:
+                    pass
+
     def _worker_loop(self) -> None:
         while True:
             job_id = self._queue.get()
@@ -998,14 +1073,21 @@ class JobStore:
         return names.normalise(s)
 
     def _auto_initial_prompt(self, job: Job) -> str:
+        return self.auto_prompt(job.owner, job.initial_prompt, job.glossary)
+
+    def auto_prompt(self, owner: str, initial_prompt: str = "",
+                    glossary_text: str = "") -> str:
+        """Подсказка Whisper (имена, проекты, термины) по команде владельца.
+        Отдельно от задачи — та же подсказка нужна живой расшифровке по ходу
+        встречи, когда задачи ещё нет."""
         budget = self._PROMPT_TOKENS * 3          # ~3 chars per token
         parts: list[str] = []
-        if (job.initial_prompt or "").strip():
-            parts.append(job.initial_prompt.strip())
+        if (initial_prompt or "").strip():
+            parts.append(initial_prompt.strip())
             budget -= len(parts[0])
         try:
             from . import ai_context
-            team = _team(job.owner)
+            team = _team(owner)
             names = ai_context.known_names(team)
             # Tile captions from the team's recent recordings: real people,
             # spelled exactly as Telemost shows them.
@@ -1027,7 +1109,7 @@ class JobStore:
             projects = ai_context.project_names(team)
         except Exception:  # prompt building must never break transcription
             names, projects = [], []
-        rights = [right for _, right in glossary.parse(job.glossary)]
+        rights = [right for _, right in glossary.parse(glossary_text)]
 
         def take(items: list[str], label: str) -> None:
             nonlocal budget
@@ -1099,11 +1181,16 @@ class JobStore:
                              exc_info=True)
 
             _t0 = time.time()
-            segments, meta = transcribe_file(
-                job.audio_path, language=job.language, on_segment=on_segment,
-                on_start=on_start, initial_prompt=initial_prompt,
-                model_name=job.model or None,
-            )
+            live = load_live(job.live_path)
+            if live:
+                segments, meta = self._transcribe_with_live(
+                    job, live, rules, partial, on_segment, on_start, initial_prompt)
+            else:
+                segments, meta = transcribe_file(
+                    job.audio_path, language=job.language, on_segment=on_segment,
+                    on_start=on_start, initial_prompt=initial_prompt,
+                    model_name=job.model or None,
+                )
             # Чистое время распознавания. Мерить его как finished_at-started_at
             # нельзя: пересборка протокола сдвигает конец, начало остаётся от
             # первого прогона, и часовая встреча выглядела как семь часов
@@ -1318,6 +1405,7 @@ class JobStore:
         try:
             src = Path(job.audio_path)
             for p in (src, Path(str(src) + ".ffmpeg.log"),
+                      Path(str(src) + ".live.json"), Path(str(src) + ".tail.wav"),
                       src.with_suffix(".16k.wav"), src.with_suffix(".join-failed.png")):
                 try:
                     p.unlink(missing_ok=True)
@@ -1420,6 +1508,47 @@ def _weeek_task_id(raw: str) -> str:
     if ("http" in s or "/" in s) and nums:
         return nums[-1]
     return s
+
+
+def load_live(path: str) -> dict | None:
+    """Файл живой расшифровки: {"until": сек, "segments": [...]}. Нет файла
+    или он кривой — None (полная расшифровка)."""
+    if not path:
+        return None
+    try:
+        d = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(d, dict) or not d.get("segments"):
+        return None
+    return d
+
+
+def _media_duration(path: str) -> float:
+    import subprocess
+    try:
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "csv=p=0", path], capture_output=True, text=True, timeout=60)
+        return float((probe.stdout or "0").strip() or 0)
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+def _cut_wav(path: str, start_sec: float) -> str | None:
+    """Хвост записи с `start_sec` до конца — 16 кГц моно wav рядом с файлом."""
+    import subprocess
+    out = f"{path}.tail.wav"
+    try:
+        r = subprocess.run(
+            ["ffmpeg", "-y", "-v", "error", "-ss", f"{start_sec:.3f}", "-i", path,
+             "-vn", "-ac", "1", "-ar", "16000", out],
+            capture_output=True, timeout=600)
+    except Exception:  # noqa: BLE001
+        return None
+    if r.returncode != 0 or not Path(out).exists():
+        return None
+    return out
 
 
 def _ensure_wav(audio_path: str) -> str:
