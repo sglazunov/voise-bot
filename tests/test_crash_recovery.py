@@ -335,8 +335,9 @@ class TestRescheduledSlots:
 
 class TestOneUrlOneBot:
     def test_second_slot_same_url_not_launched(self, monkeypatch):
-        # Перенос времени: два слота одной встречи с одной ссылкой — второй бот
-        # не должен заходить в звонок, пока первый пишет.
+        # Перенос времени: два слота ОДНОЙ задачи с одной ссылкой — второй бот
+        # не должен заходить в звонок, пока первый пишет. (Другая задача в той
+        # же комнате — не дубль, а следующая встреча: tests/test_room_handoff.py.)
         import os
         from datetime import datetime, timedelta, timezone
         from app.automation import scheduler as sched_mod
@@ -400,7 +401,12 @@ class TestОднаКомнатаОдинБот:
         assert room_key(a) != room_key(b)
 
     def test_второй_бот_не_идёт_в_занятую_комнату(self, monkeypatch):
-        """Две задачи Weeek с одной комнатой, ссылки записаны по-разному."""
+        """Две задачи Weeek с одной комнатой, ссылки записаны по-разному.
+
+        Второй бот в комнату не идёт; но это НЕ дубль, а следующая встреча
+        по расписанию — её время наступило, поэтому текущей записи ставится
+        флаг передачи комнаты, а карточка остаётся в расписании
+        (tests/test_room_handoff.py)."""
         from datetime import datetime, timedelta, timezone
         from app.automation import scheduler as sched_mod
         monkeypatch.setenv("VTX_RECORDER_ENABLED", "1")
@@ -422,7 +428,8 @@ class TestОднаКомнатаОдинБот:
                             lambda: launched.append(1) or object())
         s._maybe_trigger("alice", {"lookahead_min": 2})
         assert launched == [], "второй бот не должен заходить в ту же комнату"
-        assert s._states[dup.key].state == "skipped"
+        assert s._states[dup.key].state == "scheduled"
+        assert rec.stop_flag is True and rec.handoff_to == "Планёрка"
 
     def test_ручной_запуск_тоже_проверяет_комнату(self):
         from datetime import datetime, timezone
