@@ -250,11 +250,6 @@ export default function Meetings() {
                 </div>
               ) : JOINABLE.includes(m.state) ? (
                 <div className="w-full lg:w-auto flex items-center justify-end gap-2">
-                  {m.state === "skipped" && (
-                    <span className="flex items-center gap-2 text-[12.5px]" style={{ color: "var(--muted)" }}
-                      title="Вернуть встречу в расписание: бот зайдёт сам, когда комната освободится">
-                      <span>Пишем</span><Switch size="sm" on={false} onChange={() => setDecision(m, true)} />
-                    </span>)}
                   {m.has_recording && m.state === "error" && (
                     <span className="text-[11.5px]" style={{ color: "var(--muted)" }}>
                       Запись цела — протокол чинится кнопкой «Пересобрать» на странице распознавания.
