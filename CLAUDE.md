@@ -2136,7 +2136,6 @@ npx vite build`, без `frontend/dist/index.html` падает
   безымянные образы). Проверка на сервере: `docker system df`, `du -sh
   data/users/*/recordings`.
 Тесты — `tests/test_recording_sweep.py` (6), всего 897.
->>>>>>> Stashed changes
 
 ## Особенности, которые легко нарушить
 - **Регистрация открыта всем**, кто знает адрес (создаётся отдельная пустая
