@@ -83,6 +83,10 @@ class MeetingState:
     do_protocol: bool = False         # whether this meeting also builds a protocol
     record_flag: bool | None = None   # Weeek checkbox «Запись встречи»: True/False/unset
     stop_flag: bool = False           # manual "stop this recording"
+    # Название встречи, которой бот ПЕРЕДАЁТ комнату: у команды одна постоянная
+    # ссылка Телемоста на все встречи, и по расписанию Weeek в ней начинается
+    # следующая. Запись останавливается с причиной next_meeting, а не stopped.
+    handoff_to: str | None = None
     logs: list = field(default_factory=list)
     # Д10: live transcript grown during the recording + the participant's notes
     # taken alongside it (notes attach to the job once it exists).
@@ -756,6 +760,12 @@ class Scheduler:
         # (тот же урок, что и V20).
         ended: list[tuple[MeetingState, str]] = []
         with self._lock:
+            # Кто сейчас пишет в какой комнате. ОДНА ссылка Телемоста = ОДНА
+            # одновременная запись: второй бот в ту же комнату ничего не
+            # добавляет. Считается до разбора кандидатов, чтобы «пропущено»
+            # могло назвать причину — занятую комнату.
+            busy_rooms = {room_key(s.url): s for s in self._states.values()
+                          if s.owner == user and s.url and s.state == "recording"}
             for st in self._states.values():
                 if st.owner != user:
                     continue
@@ -772,7 +782,11 @@ class Scheduler:
                 if now < start - lookahead:
                     continue  # not yet
                 if now > start + _LATE_GRACE_SEC:
-                    st.state, st.detail = "missed", "Время начала прошло — пропущено."
+                    busy = busy_rooms.get(room_key(st.url)) if st.url else None
+                    st.state, st.detail = "missed", (
+                        "Время начала прошло — пропущено: комната была занята "
+                        f"записью «{busy.title}», и она не освободилась."
+                        if busy is not None else "Время начала прошло — пропущено.")
                     ended.append((st, "missed"))
                     continue
                 ok, why = self._passes_filter(st, cfg)
@@ -787,27 +801,28 @@ class Scheduler:
         # Launch as many due meetings as there are FREE recording slots — up to
         # MAX_SLOTS run in parallel, each isolated on its own display + sink.
         candidates.sort(key=lambda x: x[0])  # earliest-starting first
-        # ОДНА ссылка Телемоста = ОДНА одновременная запись. Перенос времени
-        # (или две задачи с одной ссылкой) порождает два слота одной встречи —
-        # без этого на звонок заходили ДВА бота.
-        with self._lock:
-            busy_urls = {room_key(s.url) for s in self._states.values()
-                         if s.owner == user and s.url
-                         and s.state == "recording"}
-        for _, chosen in candidates:
+        # ОДНА ссылка Телемоста = ОДНА одновременная запись: без этого на
+        # звонок заходили ДВА бота. Но «комната занята» — три разных случая:
+        #  • та же задача (перенос времени породил второй слот) — дубль,
+        #    пропускаем навсегда;
+        #  • другая задача, её время ещё не пришло — ЖДЁМ: у команды одна
+        #    постоянная ссылка на все встречи, и предыдущая почти всегда ещё
+        #    пишется за две минуты до следующей (lookahead). Раньше вердикт
+        #    «пропущено» выносился здесь один раз и не пересматривался —
+        #    05.10 так были потеряны две встречи из трёх;
+        #  • другая задача, время пришло — ПЕРЕДАЁМ комнату: текущей записи
+        #    ставится флаг остановки (исход next_meeting), следующий тик
+        #    заводит новую запись под новой карточкой. Иначе встреча без
+        #    паузы между ними целиком уехала бы в файл предыдущей, а эта
+        #    карточка — в «пропущено». Граница встреч в постоянной комнате —
+        #    только расписание Weeek: по вёрстке Телемоста её не увидеть.
+        busy_urls = set(busy_rooms)
+        for start, chosen in candidates:
             if chosen.url and room_key(chosen.url) in busy_urls:
-                marked = False
-                with self._lock:
-                    if chosen.state == "scheduled":
-                        chosen.state, chosen.detail = (
-                            "skipped", "Бот уже в этом звонке (та же ссылка "
-                                       "записывается): всё сказанное попадёт в ту "
-                                       "запись. Ссылки этой задаче можно "
-                                       "прикрепить вручную (кнопка-скрепка).")
-                        marked = True
-                if marked:      # снапшот и метрику пишем вне лока
-                    snapshots.save(chosen)
-                    self._record_outcome(chosen, "skipped")
+                busy = busy_rooms.get(room_key(chosen.url))
+                same_task = busy is not None and str(busy.task_id) == str(chosen.task_id)
+                self._room_busy(chosen, busy, same_task=same_task,
+                                due=now >= start)
                 continue
             slot = recorder.acquire_slot()
             if slot is None:
@@ -825,6 +840,55 @@ class Scheduler:
                 continue
             busy_urls.add(room_key(chosen.url))
             threading.Thread(target=self._run, args=(chosen, slot), daemon=True).start()
+
+    def _room_busy(self, chosen: MeetingState, busy: "MeetingState | None",
+                   same_task: bool, due: bool) -> None:
+        """Кандидат упёрся в комнату, где бот уже пишет (см. _maybe_trigger)."""
+        if same_task or busy is None:
+            marked = False
+            with self._lock:
+                if chosen.state == "scheduled":
+                    chosen.state, chosen.detail = (
+                        "skipped", "Бот уже в этом звонке (та же ссылка "
+                                   "записывается): всё сказанное попадёт в ту "
+                                   "запись. Ссылки этой задаче можно "
+                                   "прикрепить вручную (кнопка-скрепка).")
+                    marked = True
+            if marked:      # снапшот и метрику пишем вне лока
+                snapshots.save(chosen)
+                self._record_outcome(chosen, "skipped")
+            return
+        if not due:
+            with self._lock:
+                if chosen.state == "scheduled":
+                    chosen.detail = (f"Ждём: в этой комнате бот ещё пишет «{busy.title}» — "
+                                     "зайдём, как только она закончится.")
+            return
+        first = False
+        with self._lock:
+            if chosen.state == "scheduled":
+                chosen.detail = (f"Время встречи наступило, а в комнате ещё идёт запись "
+                                 f"«{busy.title}» — прошу бота закончить её и зайти "
+                                 "заново под этой встречей.")
+            if busy.state == "recording" and not busy.handoff_to:
+                busy.handoff_to = chosen.title or str(chosen.task_id)
+                busy.stop_flag = True
+                first = True
+        if first:
+            when = (chosen.start.astimezone(self._tz(auto_settings.load(chosen.owner)))
+                    .strftime("%H:%M") if chosen.start else "сейчас")
+            msg = (f"В этой комнате по расписанию Weeek начинается «{busy.handoff_to}» "
+                   f"({when}) — заканчиваю запись и передаю комнату ей.")
+            busy.logs.append(msg)
+            _LOG.info("встреча %s: %s", busy.task_id, msg)
+
+    @staticmethod
+    def _effective_stop_reason(st: MeetingState, reason: "str | None") -> "str | None":
+        """Флаг остановки ставят и человек («Стоп»), и передача комнаты —
+        рекордер их не различает и отвечает `stopped`. Различаем здесь."""
+        if reason == "stopped" and st.handoff_to:
+            return "next_meeting"
+        return reason or None
 
     # -- per-meeting pipeline ----------------------------------------------
     def _run(self, st: MeetingState, slot, manual: bool = False) -> None:
@@ -909,7 +973,7 @@ class Scheduler:
             # ЧИТАЛ — и почему запись пустой комнаты шла четыре часа, каждый раз
             # выясняли руками по логам. Теперь она доезжает до карточки, до
             # снапшота и до метрики (docs/ТЗ-МЕТРИКИ.md §14.2).
-            st.stop_reason = res.get("reason") or None
+            st.stop_reason = self._effective_stop_reason(st, res.get("reason"))
             st.screenshot = res.get("screenshot") or None
             st.rec_bytes = int(res.get("size") or 0)
             st.recorded_sec = max(0.0, time.time() - rec_started)
@@ -946,6 +1010,14 @@ class Scheduler:
             # retries here and then keeps retrying in the background until the
             # video lands in the cloud (see _late_upload).
             self._set(st, "uploading", "Выгружаю запись в облако…")
+            if st.handoff_to:
+                # Комната свободна — следующая встреча стартует сейчас, а не
+                # через тик планировщика (до 15 с без записи на стыке).
+                try:
+                    self._maybe_trigger(user, cfg)
+                except Exception:
+                    _LOG.warning("Запуск следующей встречи после передачи комнаты "
+                                 "сорвался — подхватит цикл", exc_info=True)
             up = delivery.upload_with_retry(out, cfg, log)
             st.cloud_path = up.get("path") or st.cloud_path
             if up.get("ok"):
