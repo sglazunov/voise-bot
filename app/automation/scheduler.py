@@ -36,6 +36,11 @@ _LOG = logs.get("vtx.scheduler")
 # meetings on the first poll after startup).
 _LATE_GRACE_SEC = 10 * 60
 _TICK_SEC = 15
+# Комнату передают следующей встрече, только если идущая запись началась
+# ЗАМЕТНО раньше её времени. Иначе это та же встреча: бота отправили по
+# ссылке за пару минут до начала, или две задачи Weeek на один звонок с
+# временем 11:00 и 11:01 — резать такую запись нельзя.
+_HANDOFF_MIN_GAP_SEC = 10 * 60
 # Слоты одной задачи в этом окне считаются ОДНОЙ встречей с переносом
 # времени (недельный recurring — 7 суток, не попадает).
 _RESLOT_WINDOW_SEC = 20 * 3600  # loop granularity; actual Weeek polling honours poll_interval_sec
@@ -248,6 +253,10 @@ class Scheduler:
         if self._thread and self._thread.is_alive():
             return
         self._boot_time = time.time()  # don't auto-join meetings already past now
+        # Первая уборка записей — через час, а не сразу: после перезапуска
+        # прерванные задачи ещё в «ошибке», пока _resume_pending не вернёт их
+        # в очередь, и карточки встреч ещё не восстановлены из снапшотов.
+        self._last_sweep = time.time()
         self._stop.clear()
         self._thread = threading.Thread(target=self._loop, daemon=True,
                                         name="vtx-scheduler")
@@ -348,9 +357,12 @@ class Scheduler:
                 _LOG.error("Сбой в цикле планировщика", exc_info=True)
             self._stop.wait(_TICK_SEC)
 
-    # Побочные файлы записи: по тому же имени с суффиксом.
-    _SIDECARS = (".ffmpeg.log", ".live.json", ".live.wav", ".tail.wav",
-                 ".join-failed.png", ".join-failed.html")
+    # Побочные файлы записи. Два способа именования (см. jobs.media_sidecars):
+    # «X.mp4.<суффикс>» и `with_suffix` — «X.<суффикс>» без .mp4.
+    _SIDECAR_RE = re.compile(
+        r"^(?P<stem>.+?)(?P<mp4>\.mp4)?"
+        r"(?:\.ffmpeg\.log|\.live\.json(?:\.tmp)?|\.live\.wav|\.tail\.wav|\.16k\.wav"
+        r"|\.join-failed(?:\.frame\d+)?\.(?:png|html))$")
 
     def sweep_recordings(self, days: float | None = None, now: float | None = None) -> dict:
         """Удалить записи встреч старше `days` суток (config.RECORDING_RETENTION_DAYS).
@@ -389,6 +401,16 @@ class Scheduler:
             rec_dir = security.user_dir(team) / "recordings"
             if not rec_dir.is_dir():
                 continue
+            # Ссылка в облаке живёт и в снапшотах: карточки двухдневной
+            # давности в памяти может уже не быть, а предупреждение «без ссылки»
+            # по ним было бы ложным.
+            try:
+                for snap in (snapshots.load(team) or {}).values():
+                    if isinstance(snap, dict) and snap.get("out_path") and snap.get("cloud_url"):
+                        clouded.add(str(snap["out_path"]))
+            except Exception:
+                _LOG.debug("Снапшоты команды %s для уборки не прочитаны", team,
+                           exc_info=True)
             for p in sorted(rec_dir.iterdir()):
                 if not p.is_file():
                     continue
@@ -420,13 +442,11 @@ class Scheduler:
 
     @classmethod
     def _recording_base(cls, p: "Path") -> str:
-        """Путь записи, к которой относится файл: у побочных файлов срезается
-        суффикс («….mp4.live.json» → «….mp4»)."""
+        """Путь записи, к которой относится файл: «X.mp4.live.json» и
+        «X.join-failed.png» → «X.mp4»."""
         s = str(p)
-        for suf in cls._SIDECARS:
-            if s.endswith(suf):
-                return s[: -len(suf)]
-        return s
+        m = cls._SIDECAR_RE.match(s)
+        return f"{m.group('stem')}.mp4" if m else s
 
     def _nightly_wipe(self, user: str, cfg: dict) -> None:
         """Ночная страховка: пройти по СЕГОДНЯШНИМ задачам и снять с них
@@ -803,8 +823,10 @@ class Scheduler:
         candidates.sort(key=lambda x: x[0])  # earliest-starting first
         # ОДНА ссылка Телемоста = ОДНА одновременная запись: без этого на
         # звонок заходили ДВА бота. Но «комната занята» — три разных случая:
-        #  • та же задача (перенос времени породил второй слот) — дубль,
-        #    пропускаем навсегда;
+        #  • та же встреча — дубль, пропускаем навсегда: та же задача
+        #    (перенос времени породил второй слот) или запись началась меньше
+        #    чем за _HANDOFF_MIN_GAP_SEC до этой (бот по ссылке за пару минут
+        #    до начала, две задачи на один звонок) — см. _same_meeting;
         #  • другая задача, её время ещё не пришло — ЖДЁМ: у команды одна
         #    постоянная ссылка на все встречи, и предыдущая почти всегда ещё
         #    пишется за две минуты до следующей (lookahead). Раньше вердикт
@@ -820,8 +842,7 @@ class Scheduler:
         for start, chosen in candidates:
             if chosen.url and room_key(chosen.url) in busy_urls:
                 busy = busy_rooms.get(room_key(chosen.url))
-                same_task = busy is not None and str(busy.task_id) == str(chosen.task_id)
-                self._room_busy(chosen, busy, same_task=same_task,
+                self._room_busy(chosen, busy, same_task=self._same_meeting(busy, chosen),
                                 due=now >= start)
                 continue
             slot = recorder.acquire_slot()
@@ -840,6 +861,20 @@ class Scheduler:
                 continue
             busy_urls.add(room_key(chosen.url))
             threading.Thread(target=self._run, args=(chosen, slot), daemon=True).start()
+
+    @staticmethod
+    def _same_meeting(busy: "MeetingState | None", chosen: MeetingState) -> bool:
+        """Идущая запись — это та же встреча, а не предыдущая в той же комнате:
+        та же задача (перенос времени), неизвестное время или начало ближе
+        `_HANDOFF_MIN_GAP_SEC` (бот по ссылке за пару минут до начала, две
+        задачи на один звонок)."""
+        if busy is None:
+            return True
+        if str(busy.task_id) == str(chosen.task_id):
+            return True
+        if busy.start is None or chosen.start is None:
+            return True
+        return (chosen.start - busy.start).total_seconds() < _HANDOFF_MIN_GAP_SEC
 
     def _room_busy(self, chosen: MeetingState, busy: "MeetingState | None",
                    same_task: bool, due: bool) -> None:
@@ -940,6 +975,10 @@ class Scheduler:
             rec_dir = security.user_dir(user) / "recordings"  # private per-user
             rec_dir.mkdir(parents=True, exist_ok=True)
             out = str(_free_path(rec_dir / fname))
+            # _free_path смотрит только на сам mp4; побочные файлы прежней
+            # записи с тем же именем (видео удалили, а живая расшифровка
+            # осталась) подмешали бы в новую встречу чужие сегменты.
+            store_drop_sidecars(out)
             # Persist the file path BEFORE recording starts: if the process dies
             # mid-meeting, the restart scan (_resume_pending) finds the fMP4 by
             # this path and queues it for processing instead of losing it.
@@ -1109,11 +1148,7 @@ class Scheduler:
                         daemon=True).start()
             elif delivered_elsewhere:
                 # No transcription — nothing else needs the file; drop it now.
-                for p in (out, out + ".ffmpeg.log"):
-                    try:
-                        Path(p).unlink(missing_ok=True)
-                    except OSError:
-                        pass
+                store_drop_sidecars(out, with_media=True)
 
             # The cloud didn't take the video: keep retrying in the background
             # until it does — recordings must not be stored on this server.
@@ -1200,11 +1235,7 @@ class Scheduler:
                     # незавершённые записи всё равно убирает retention.
                     job.delete_audio_when_done = True
                 else:
-                    for p in (out, out + ".ffmpeg.log"):
-                        try:
-                            Path(p).unlink(missing_ok=True)
-                        except OSError:
-                            pass
+                    store_drop_sidecars(out, with_media=True)
             return
 
     def _await_and_upload_protocol(self, st: MeetingState, job_id: str,
@@ -1691,7 +1722,7 @@ class Scheduler:
         interval = max(60, int(cfg.get("live_interval_min", 3)) * 60)
         lang = config.DEFAULT_LANGUAGE
         processed = 0.0
-        ffmpeg = "ffmpeg"
+        spent = 0.0         # время распознавания живых кусков — в учёт задачи
         live_file = self.live_path_for(out)
         kept: list[dict] = []
         try:
@@ -1705,44 +1736,40 @@ class Scheduler:
             return f"{h:d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
         def persist() -> None:
+            # Атомарно: задача может читать файл в ту же секунду, когда тик
+            # его переписывает. Полузаписанный JSON не читается, и встреча
+            # молча распознавалась бы с нуля.
+            tmp = f"{live_file}.tmp"
             try:
-                Path(live_file).write_text(
-                    json.dumps({"until": processed, "segments": kept},
-                               ensure_ascii=False), encoding="utf-8")
+                Path(tmp).write_text(
+                    json.dumps({"until": processed, "sec": round(spent, 1),
+                                "segments": kept}, ensure_ascii=False),
+                    encoding="utf-8")
+                os.replace(tmp, live_file)
             except OSError:
-                pass
+                _LOG.debug("Файл живой расшифровки не записан", exc_info=True)
 
         while not self._stop.is_set() and st.state == "recording":
             if self._stop.wait(interval):
                 return
             if st.state != "recording" or not Path(out).exists():
                 return
-            try:
-                import subprocess
-                probe = subprocess.run(
-                    [ffmpeg.replace("ffmpeg", "ffprobe"), "-v", "error",
-                     "-show_entries", "format=duration", "-of", "csv=p=0", out],
-                    capture_output=True, text=True, timeout=30)
-                dur = float((probe.stdout or "0").strip() or 0)
-            except Exception:
-                continue
+            dur = store_media_duration(out, timeout=30)
             end = dur - 3.0     # don't read the fragment still being written
             if end - processed < 30:
                 continue        # nothing meaningful accrued yet
             wav = f"{out}.live.wav"
             try:
-                cut = subprocess.run(
-                    [ffmpeg, "-y", "-v", "error", "-ss", str(processed),
-                     "-to", str(end), "-i", out, "-vn", "-ac", "1",
-                     "-ar", "16000", wav], capture_output=True, timeout=120)
-                if cut.returncode != 0 or not Path(wav).exists():
+                if not store_cut_wav(out, processed, end, out=wav, timeout=120):
                     continue
                 from ..transcribe import transcribe_file, trim_chunk_edge
+                t0 = time.time()
                 got = transcribe_file(wav, language=lang, nonblocking=True,
                                       initial_prompt=prompt or None,
                                       offset_sec=processed)
                 if got is None:
                     continue    # все слоты модели заняты — пропускаем тик
+                spent += time.time() - t0
                 segs, _meta = got
                 segs, covered = trim_chunk_edge(segs, end)
                 lines = [f"[{fmt(s.start)}] {s.text}" for s in segs]
@@ -1878,6 +1905,9 @@ class Scheduler:
 
 
 # Imported here (not at top) to avoid a heavy import cycle at module load.
-from ..jobs import store, load_live as store_load_live  # noqa: E402
+from ..jobs import (store, load_live as store_load_live,  # noqa: E402
+                    drop_sidecars as store_drop_sidecars,
+                    _media_duration as store_media_duration,
+                    _cut_wav as store_cut_wav)
 
 scheduler = Scheduler()

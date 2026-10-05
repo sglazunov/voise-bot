@@ -176,6 +176,8 @@ class JobStore:
         self._reanalyze_lock = threading.Lock()
         self._last_persist: float = 0.0
         self._lock = threading.Lock()
+        # Разметка, OCR и протокол — по одной задаче, даже при двух воркерах.
+        self._post_lock = threading.Lock()
         self._queue: "queue.Queue[str]" = queue.Queue()
         self._load()
         self._purge_old()
@@ -324,7 +326,10 @@ class JobStore:
         return cb
 
     def list(self, owner: str | None = None) -> list[Job]:
-        jobs = self._jobs.values()
+        # Копия под локом: список читают и потоки планировщика (уборка
+        # записей), а словарь меняют воркеры — «dictionary changed size».
+        with self._lock:
+            jobs = list(self._jobs.values())
         if owner is not None:
             team = _team(owner)
             jobs = [j for j in jobs if j.owner == team]
@@ -935,9 +940,8 @@ class JobStore:
         for p in config.RESULT_DIR.glob(f"{job.id}__*.docx"):  # per-engine docs
             p.unlink(missing_ok=True)
         try:
-            p = Path(job.audio_path)
-            p.unlink(missing_ok=True)
-            p.with_suffix(".16k.wav").unlink(missing_ok=True)  # diarization temp
+            if job.audio_path:
+                drop_sidecars(job.audio_path, with_media=True)
         except Exception:
             log.warning("Не удалось удалить исходник задачи %s", job.id, exc_info=True)
 
@@ -1014,14 +1018,20 @@ class JobStore:
             tail = _cut_wav(job.audio_path, until)
             if tail is None:
                 raise RuntimeError("хвост не вырезан")
+            # on_start задачи сбрасывает прогресс в 1 % — для хвоста не зовём:
+            # полоса уже стоит на покрытой доле и откатывалась бы назад.
             got = transcribe_file(
                 tail, language=job.language, on_segment=on_segment,
-                on_start=on_start, initial_prompt=initial_prompt,
+                on_start=None, initial_prompt=initial_prompt,
                 model_name=job.model or None, offset_sec=until)
             tail_segs, meta = got
             segments = segs + list(tail_segs)
             meta["duration"] = total or meta.get("duration")
             meta["live_reused_sec"] = until
+            # Время распознавания живых кусков — тоже работа над этой
+            # встречей: без него transcribe_sec мерил бы только хвост, и
+            # скорость и себестоимость распознавания занижались бы в десятки раз.
+            meta["live_transcribe_sec"] = float(live.get("sec") or 0.0)
             return segments, meta
         except JobCancelled:
             raise
@@ -1128,11 +1138,23 @@ class JobStore:
         take(list(dict.fromkeys(rights)), "Термины")
         return " ".join(parts).strip()
 
+    def _acquire_post(self, job: Job, ctrl: dict) -> bool:
+        """Очередь на всё, что после распознавания (см. _process)."""
+        if self._post_lock.acquire(blocking=False):
+            return True
+        self._set_stage(job.id, "Расшифровка готова — жду очереди на разметку "
+                                "и протокол (собирается другая встреча)…")
+        while not self._post_lock.acquire(timeout=1.0):
+            if ctrl.get("cancel"):
+                raise JobCancelled()
+        return True
+
     def _process(self, job: Job) -> None:
         self._set(job, status=STATUS_RUNNING, started_at=time.time(), progress=0.0)
         self._partial[job.id] = []
         ctrl = self._control.setdefault(job.id, {})
         ctrl.update({"pause": False, "cancel": ctrl.get("cancel", False)})
+        post_locked = False
         try:
             partial = self._partial[job.id]
             rules = glossary.parse(job.glossary)
@@ -1195,7 +1217,14 @@ class JobStore:
             # нельзя: пересборка протокола сдвигает конец, начало остаётся от
             # первого прогона, и часовая встреча выглядела как семь часов
             # работы — на таких числах о скорости судить невозможно.
-            self._set(job, persist=False, transcribe_sec=time.time() - _t0)
+            self._set(job, persist=False, transcribe_sec=(
+                time.time() - _t0 + float(meta.get("live_transcribe_sec") or 0.0)))
+            # Дальше — разметка по видео, OCR экрана и протокол. Параллельно
+            # идёт только распознавание (ради него второй воркер и заведён):
+            # два протокола сразу — это два потребителя одного ключа модели
+            # (больше 429 и откатов на запасной движок) и два OCR-прохода,
+            # отнимающих ядра у записи следующей встречи.
+            post_locked = self._acquire_post(job, ctrl)
             # Запланированные встречи модель не указывают — она берётся из
             # VTX_MODEL. Раньше поле оставалось пустым, и по завершённым
             # задачам нельзя было понять, чем их считали: сравнить скорость
@@ -1388,6 +1417,8 @@ class JobStore:
                 finished_at=time.time(),
             )
         finally:
+            if post_locked:
+                self._post_lock.release()
             # Исходник удаляем ТОЛЬКО у успешно завершённой задачи. finally
             # срабатывает и на ветке except, а карточка упавшей задачи прямым
             # текстом обещает «Запись цела — нажмите «Повторить»»: без исходника
@@ -1403,14 +1434,7 @@ class JobStore:
     def _delete_source(self, job: Job) -> None:
         """Remove the source media file and its capture sidecars."""
         try:
-            src = Path(job.audio_path)
-            for p in (src, Path(str(src) + ".ffmpeg.log"),
-                      Path(str(src) + ".live.json"), Path(str(src) + ".tail.wav"),
-                      src.with_suffix(".16k.wav"), src.with_suffix(".join-failed.png")):
-                try:
-                    p.unlink(missing_ok=True)
-                except OSError:
-                    log.debug("Временный файл %s не удалён", p, exc_info=True)
+            drop_sidecars(job.audio_path, with_media=True)
         except Exception:
             log.warning("Чистка временных файлов задачи не удалась", exc_info=True)
 
@@ -1524,26 +1548,59 @@ def load_live(path: str) -> dict | None:
     return d
 
 
-def _media_duration(path: str) -> float:
+def media_sidecars(path: str) -> list[Path]:
+    """Все побочные файлы записи — ОДИН список на проект.
+
+    Их пишут разные места и по-разному: «<запись>.mp4.<суффикс>» (лог ffmpeg,
+    живая расшифровка, хвост) и `Path.with_suffix` — «<запись>.<суффикс>»
+    без .mp4 (wav для разметки, скриншот и HTML неудачного входа). Раньше
+    каждое место удаления держало свой неполный перечень, и файл живой
+    расшифровки переживал запись: повторный заход по тому же пути подхватывал
+    чужие сегменты."""
+    src = Path(path)
+    out = [Path(f"{src}{suf}") for suf in
+           (".ffmpeg.log", ".live.json", ".live.json.tmp", ".live.wav", ".tail.wav")]
+    out += [src.with_suffix(suf) for suf in
+            (".16k.wav", ".join-failed.png", ".join-failed.html")]
+    try:
+        out += sorted(src.parent.glob(src.with_suffix("").name + ".join-failed.frame*.html"))
+    except OSError:
+        pass
+    return out
+
+
+def drop_sidecars(path: str, with_media: bool = False) -> None:
+    for p in ([Path(path)] if with_media else []) + media_sidecars(path):
+        try:
+            p.unlink(missing_ok=True)
+        except OSError:
+            log.debug("Временный файл %s не удалён", p, exc_info=True)
+
+
+def _media_duration(path: str, timeout: int = 60) -> float:
+    """Длительность файла по ffprobe; 0 — не удалось."""
     import subprocess
     try:
         probe = subprocess.run(
             ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-             "-of", "csv=p=0", path], capture_output=True, text=True, timeout=60)
+             "-of", "csv=p=0", path], capture_output=True, text=True, timeout=timeout)
         return float((probe.stdout or "0").strip() or 0)
     except Exception:  # noqa: BLE001
         return 0.0
 
 
-def _cut_wav(path: str, start_sec: float) -> str | None:
-    """Хвост записи с `start_sec` до конца — 16 кГц моно wav рядом с файлом."""
+def _cut_wav(path: str, start_sec: float, end_sec: float | None = None,
+             out: str | None = None, timeout: int = 600) -> str | None:
+    """Кусок записи [start_sec, end_sec) — 16 кГц моно wav рядом с файлом.
+    Без `end_sec` — до конца (хвост для задачи); с ним — живой кусок."""
     import subprocess
-    out = f"{path}.tail.wav"
+    out = out or f"{path}.tail.wav"
+    cmd = ["ffmpeg", "-y", "-v", "error", "-ss", f"{start_sec:.3f}"]
+    if end_sec is not None:
+        cmd += ["-to", f"{end_sec:.3f}"]
+    cmd += ["-i", path, "-vn", "-ac", "1", "-ar", "16000", out]
     try:
-        r = subprocess.run(
-            ["ffmpeg", "-y", "-v", "error", "-ss", f"{start_sec:.3f}", "-i", path,
-             "-vn", "-ac", "1", "-ar", "16000", out],
-            capture_output=True, timeout=600)
+        r = subprocess.run(cmd, capture_output=True, timeout=timeout)
     except Exception:  # noqa: BLE001
         return None
     if r.returncode != 0 or not Path(out).exists():
