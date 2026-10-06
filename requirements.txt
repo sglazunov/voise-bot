@@ -19,6 +19,13 @@ jinja2==3.1.*
 faster-whisper==1.2.*
 # CTranslate2 pinned to 4.4.0 for stability with faster-whisper 1.2.x.
 ctranslate2==4.4.0
+# PyAV — транзитивная зависимость faster-whisper (`av>=11` без верхней границы).
+# ⚠️ PyAV 19.0 (29.09.2026) убрал у av.open() параметр metadata_errors, а
+# faster-whisper 1.2.1 (последний) передаёт его в decode_audio. Пересборка
+# 05.10 подтянула av 19, и КАЖДОЕ распознавание падало с «open() got an
+# unexpected keyword argument 'metadata_errors'». Снимать границу только
+# вместе с версией faster-whisper, которая этот параметр больше не передаёт.
+av>=11,<19
 # CTranslate2 4.4.0 imports pkg_resources, which setuptools >= 81 dropped.
 setuptools<80
 # Requires Python 3.12 (3.13/3.14 not yet supported by the native deps).
