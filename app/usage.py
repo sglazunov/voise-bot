@@ -152,7 +152,11 @@ def record(model: str, in_tokens: int, cached: int, out_tokens: int) -> None:
 # Пока цена не задана, считаются ТОЛЬКО токены, а деньги остаются пустыми —
 # так честнее, чем «0 ₽ за встречу».
 _PRICES: dict[str, tuple[float, float]] = {
+    "claude-fable-5": (10.0, 50.0),
+    "claude-opus-5-5": (4.0, 20.0),
     "claude-opus-5": (5.0, 25.0),
+    "claude-sonnet-4-6": (3.0, 15.0),
+    "claude-haiku-5-5": (0.10, 0.50),
     "claude-opus-4": (5.0, 25.0),
     "claude-sonnet-5": (2.0, 10.0),
     "claude-haiku-4-5": (1.0, 5.0),
