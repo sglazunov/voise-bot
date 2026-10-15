@@ -11,7 +11,7 @@ from pathlib import Path
 from fastapi import (Depends, FastAPI, File, Form, HTTPException, Request,
                      Response, UploadFile)
 from fastapi.responses import (HTMLResponse, PlainTextResponse, FileResponse,
-                               JSONResponse, RedirectResponse)
+                               JSONResponse, RedirectResponse, Response)
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 from fastapi.templating import Jinja2Templates
@@ -214,6 +214,7 @@ async def _auth_gate(request: Request, call_next):
 
     HTML routes redirect to /login; API routes get a 401. This is the single
     choke point that makes the whole site private on a public domain."""
+    t0 = time.perf_counter()
     # Сессия читается из базы — в пуле потоков, а не в цикле событий: это
     # middleware, он стоит перед КАЖДЫМ запросом сайта, включая статику, и
     # медленная база здесь останавливала бы все запросы разом.
@@ -245,7 +246,17 @@ async def _auth_gate(request: Request, call_next):
     if _SECURE_COOKIE:  # only meaningful once TLS is in front
         resp.headers.setdefault("Strict-Transport-Security",
                                 "max-age=31536000; includeSubDomains")
+    # Сколько запрос провёл В ПРИЛОЖЕНИИ. Браузерный HAR видит только «сервер
+    # молчал N мс» и не отличает медленный код от очереди в цикле событий,
+    # прокси или сети; Server-Timing ложится в тот же HAR рядом с ответом.
+    ms = (time.perf_counter() - t0) * 1000
+    resp.headers["Server-Timing"] = f"app;dur={ms:.0f}"
+    if ms >= _SLOW_REQUEST_MS and path.startswith("/api/"):
+        log.warning("Медленный запрос %s %s: %.0f мс", request.method, path, ms)
     return resp
+
+
+_SLOW_REQUEST_MS = int(os.getenv("VTX_SLOW_REQUEST_MS", "800"))
 
 
 # Инлайн-скрипты разрешаются ХЭШАМИ, а не 'unsafe-inline'. Хэши считаются
@@ -864,6 +875,14 @@ def profile_delete(body: AccountDelete, request: Request,
 
 
 @app.on_event("startup")
+async def _start_loopwatch() -> None:
+    """Сторож цикла событий: в лог — кто его держит (app/loopwatch.py)."""
+    import asyncio
+    from . import loopwatch
+    loopwatch.start(asyncio.get_running_loop())
+
+
+@app.on_event("startup")
 def _start_scheduler() -> None:
     """Start the meeting-automation scheduler. It self-gates on the `enabled`
     setting, so it's safe to always run — it idles until turned on in the UI."""
@@ -964,10 +983,22 @@ async def create_job(
 
 
 @app.get("/api/jobs")
-def list_jobs(user: str = Depends(current_user)):
+def list_jobs(request: Request, user: str = Depends(current_user)):
     """Список задач команды — лёгкие карточки (Job.to_summary): полную задачу
-    с протоколом отдаёт /api/jobs/{id}."""
-    return [j.to_summary() for j in store.list(owner=user)]
+    с протоколом отдаёт /api/jobs/{id}.
+
+    Опрашивается раз в 4 с, а меняется редко — поэтому с ETag: браузер сам
+    шлёт If-None-Match, и неизменившийся список уходит пустым 304 вместо
+    130 КБ. Кодируем здесь, в потоке обработчика, а не отдаём FastAPI:
+    его jsonable_encoder работает в цикле событий."""
+    import hashlib
+    body = json.dumps([j.to_summary() for j in store.list(owner=user)],
+                      ensure_ascii=False, separators=(",", ":")).encode()
+    etag = '"' + hashlib.blake2b(body, digest_size=12).hexdigest() + '"'
+    headers = {"ETag": etag, "Cache-Control": "private, no-cache"}
+    if etag in (request.headers.get("if-none-match") or ""):
+        return Response(status_code=304, headers=headers)
+    return Response(body, media_type="application/json", headers=headers)
 
 
 @app.get("/api/stats")
