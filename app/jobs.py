@@ -326,10 +326,11 @@ class JobStore:
         return cb
 
     def list(self, owner: str | None = None) -> list[Job]:
-        # Копия под локом: список читают и потоки планировщика (уборка
-        # записей), а словарь меняют воркеры — «dictionary changed size».
-        with self._lock:
-            jobs = list(self._jobs.values())
+        # Копия словаря БЕЗ лока: list(dict.values()) выполняется целиком в C
+        # и под GIL атомарна, «dictionary changed size» здесь не бывает. Лок
+        # (ревью 05.10) заставлял каждый опрос /api/jobs ждать запись задачи
+        # в базу — история встреч после раскатки грузилась очень долго.
+        jobs = list(self._jobs.values())
         if owner is not None:
             team = _team(owner)
             jobs = [j for j in jobs if j.owner == team]

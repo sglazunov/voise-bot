@@ -125,7 +125,9 @@ def test_потолок_max_tokens():
 def test_список_моделей_и_цены_текущего_поколения():
     values = [m["value"] for m in config.PROVIDER_MODELS["anthropic"]]
     assert "claude-opus-5-5" in values and "claude-sonnet-5-5" in values
-    assert "claude-opus-4-8" not in values, "в списке — текущее поколение"
+    # Убрать модель из списка = «сохранённый выбор недоступен» у тех, кто её
+    # выбрал (15.10 так пропал Opus 4.8). Прошлое поколение остаётся.
+    assert "claude-opus-4-8" in values and "claude-sonnet-4-6" in values
     assert usage.price_of("anthropic/claude-opus-5-5") == (4.0, 20.0)
     assert usage.price_of("anthropic/claude-sonnet-5-5") == (2.0, 10.0)
     assert usage.price_of("anthropic/claude-haiku-5-5") == (0.10, 0.50)
