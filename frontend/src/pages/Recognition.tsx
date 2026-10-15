@@ -152,7 +152,21 @@ export default function Recognition() {
     ? jobs.filter((j: any) => dayKey((j.created_at || 0) * 1000) === dayFilter)
     : [...todayJobs, ...olderJobs.slice(0, extra)];
   const moreLeft = dayFilter ? 0 : Math.max(0, olderJobs.length - extra);
-  useEffect(() => { loadJobs(); const t = setInterval(loadJobs, 4000); return () => clearInterval(t); }, []);
+  // Список — раз в 4 с, пока хоть одна задача в работе (прогресс в списке
+  // живой), иначе раз в 30 с: готовым встречам меняться не с чего.
+  const lastList = useRef(0);
+  const anyBusy = useRef(false);
+  anyBusy.current = jobs.some((j: any) => isBusy(j.status));
+  useEffect(() => {
+    const poll = () => {
+      if (!anyBusy.current && Date.now() - lastList.current < 30000) return;
+      lastList.current = Date.now();
+      loadJobs();
+    };
+    poll();
+    const t = setInterval(poll, 4000);
+    return () => clearInterval(t);
+  }, []);
   useEffect(() => { api.get("/api/providers").then((d) => setEngines(d.engines || [])).catch(() => {}); }, []);
 
   // Смена карточки — чистим тексты предыдущей встречи. ОТДЕЛЬНЫМ эффектом и
@@ -168,43 +182,60 @@ export default function Recognition() {
     fetchedFor.current = null;
   }, [sel]);
 
-  // Load selected job detail + transcript, poll while busy.
-  // While it's working we also pull /partial — the LIVE stage of recognition and
-  // protocol building (stage + streamed characters), so the user sees progress.
+  // Карточка выбранной встречи. Полностью (с протоколом, ~80 КБ) — один раз
+  // при выборе и при каждой СМЕНЕ статуса; пока задача в работе, раз в 2 с
+  // спрашивается только /partial: статус, прогресс, этап и НОВЫЕ фрагменты
+  // расшифровки (since — сколько уже есть). Раньше каждые 2 с приходили и
+  // полная карточка, и вся расшифровка с начала: на проверке протокола это
+  // 200 запросов по 80 КБ за семь минут (HAR владельца 15.10).
+  const liveSegs = useRef<any[]>([]);
+  // Статус выбранной встречи сменился «снаружи» (Пересобрать, Повторить,
+  // Отмена — после них список перечитывается сразу) — карточку целиком заново.
+  const [reload, setReload] = useState(0);
+  useEffect(() => {
+    const row = jobs.find((j: any) => j.id === sel);
+    if (row && detail && row.status !== detail.status) setReload((k) => k + 1);
+  }, [jobs]);
   useEffect(() => {
     if (!sel) { setDetail(null); return; }
     let alive = true;
-    const tick = async () => {
-      try {
-        const j = await api.get(`/api/jobs/${sel}`);
-        if (!alive) return;
-        setDetail(j);
-        if (isBusy(j.status)) {
-          try { const p = await api.get(`/api/jobs/${sel}/partial`); if (alive) setLive(p); } catch { /* ignore */ }
-        } else {
-          setLive(null);
-        }
-        // Расшифровка готова уже к началу сборки протокола — показываем её и в
-        // состоянии «analyzing». Качаем ОДИН раз: опрос идёт каждые 2 секунды,
-        // и раньше на каждом тике заново тянулись оба формата целиком (json и
-        // txt) с полной перерисовкой — на часовой встрече это мегабайты в
-        // минуту и подтормаживающий интерфейс.
-        if ((j.status === "done" || j.status === "cancelled" || j.status === "analyzing")
-            && fetchedFor.current !== sel) {
-          fetchedFor.current = sel;
-          api.get(`/api/jobs/${sel}/result?format=json`)
-            .then((d) => { if (alive && d?.segments?.length) setSegments(d.segments); })
-            .catch(() => { if (fetchedFor.current === sel) fetchedFor.current = null; });
-          api.text(`/api/jobs/${sel}/result?format=txt`)
-            .then((t) => alive && setTranscript(t))
-            .catch(() => { if (fetchedFor.current === sel) fetchedFor.current = null; });
-        }
-      } catch { /* gone */ }
+    let status = "";
+    const full = async () => {
+      const j = await api.get(`/api/jobs/${sel}`);
+      if (!alive) return;
+      status = j.status;
+      setDetail(j);
+      if (!isBusy(j.status)) setLive(null);
+      // Расшифровка готова уже к началу сборки протокола — показываем её и в
+      // состоянии «analyzing». Качаем ОДИН раз на задачу.
+      if ((j.status === "done" || j.status === "cancelled" || j.status === "analyzing")
+          && fetchedFor.current !== sel) {
+        fetchedFor.current = sel;
+        api.get(`/api/jobs/${sel}/result?format=json`)
+          .then((d) => { if (alive && d?.segments?.length) setSegments(d.segments); })
+          .catch(() => { if (fetchedFor.current === sel) fetchedFor.current = null; });
+        api.text(`/api/jobs/${sel}/result?format=txt`)
+          .then((t) => alive && setTranscript(t))
+          .catch(() => { if (fetchedFor.current === sel) fetchedFor.current = null; });
+      }
     };
-    tick();
-    const t = setInterval(() => { if (detail && isBusy(detail.status)) tick(); }, 2000);
+    const tick = async () => {
+      if (!isBusy(status)) return;
+      try {
+        const p = await api.get(`/api/jobs/${sel}/partial?since=${liveSegs.current.length}`);
+        if (!alive) return;
+        const got = p.segments || [];
+        liveSegs.current = p.from ? liveSegs.current.concat(got) : got;
+        setLive({ ...p, segments: liveSegs.current });
+        if (p.status !== status) { await full(); return; }
+        setDetail((d: any) => d && d.progress !== p.progress ? { ...d, progress: p.progress } : d);
+      } catch { /* сеть или задача удалена — следующий тик */ }
+    };
+    liveSegs.current = [];
+    full().then(tick).catch(() => { /* gone */ });
+    const t = setInterval(tick, 2000);
     return () => { alive = false; clearInterval(t); };
-  }, [sel, detail?.status]);
+  }, [sel, reload]);
 
   const [uploadError, setUploadError] = useState("");
   // Выбранный, но ещё НЕ отправленный файл. Раньше он улетал в работу сразу при

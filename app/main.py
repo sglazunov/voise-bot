@@ -1552,13 +1552,21 @@ def _control(job_id: str, action: str, user: str):
 
 
 @app.get("/api/jobs/{job_id}/partial")
-def get_partial(job_id: str, user: str = Depends(current_user)):
-    """Live transcript-so-far for the streaming UI."""
+def get_partial(job_id: str, since: int = 0, user: str = Depends(current_user)):
+    """Ход работы для опроса раз в 2 с: статус, прогресс, этап протокола и
+    фрагменты расшифровки НАЧИНАЯ С since — клиент дописывает их к своим, а не
+    скачивает всю расшифровку заново на каждом тике. `from` = с какого номера
+    отдано: 0 значит «замени всё» (since больше, чем есть, — задача начата
+    заново)."""
     job = _require_owned(job_id, user)
+    segs = store.partial(job_id)
+    start = since if 0 < since <= len(segs) else 0
     return {
         "status": job.status,
         "progress": job.progress,
-        "segments": store.partial(job_id),
+        "from": start,
+        "total": len(segs),
+        "segments": segs[start:],
         "analysis": store.analysis_progress(job_id),
     }
 
