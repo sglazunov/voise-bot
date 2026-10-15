@@ -13,6 +13,7 @@ from fastapi import (Depends, FastAPI, File, Form, HTTPException, Request,
 from fastapi.responses import (HTMLResponse, PlainTextResponse, FileResponse,
                                JSONResponse, RedirectResponse)
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -200,7 +201,11 @@ async def _auth_gate(request: Request, call_next):
 
     HTML routes redirect to /login; API routes get a 401. This is the single
     choke point that makes the whole site private on a public domain."""
-    user = security.session_user(request.cookies.get(security.SESSION_COOKIE))
+    # Сессия читается из базы — в пуле потоков, а не в цикле событий: это
+    # middleware, он стоит перед КАЖДЫМ запросом сайта, включая статику, и
+    # медленная база здесь останавливала бы все запросы разом.
+    user = await run_in_threadpool(
+        security.session_user, request.cookies.get(security.SESSION_COOKIE))
     request.state.user = user
     path = request.url.path
     if user and _cross_site_write(request):
@@ -947,8 +952,9 @@ async def create_job(
 
 @app.get("/api/jobs")
 def list_jobs(user: str = Depends(current_user)):
-    """Список задач команды."""
-    return [j.to_public() for j in store.list(owner=user)]
+    """Список задач команды — лёгкие карточки (Job.to_summary): полную задачу
+    с протоколом отдаёт /api/jobs/{id}."""
+    return [j.to_summary() for j in store.list(owner=user)]
 
 
 @app.get("/api/stats")

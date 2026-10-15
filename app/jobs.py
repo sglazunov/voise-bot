@@ -158,6 +158,22 @@ class Job:
         d.pop("audio_path", None)  # don't leak server paths
         return d
 
+    # Поля карточки в СПИСКЕ встреч. Список опрашивается каждые 4 секунды, и
+    # раньше он отдавал to_public() — с протоколом, черновиками Weeek и
+    # настройками каждой встречи: на бою 236 задач = 6 МБ JSON на КАЖДЫЙ
+    # опрос. asdict копировал всё это вглубь, сжатие шло в цикле событий, и
+    # пока оно шло, ждали все запросы сайта — страница грузилась 17 секунд.
+    # Полная задача — по /api/jobs/{id}, её и открывают.
+    _SUMMARY = ("id", "filename", "status", "progress", "created_at",
+                "started_at", "finished_at", "error", "duration", "speakers",
+                "analyze", "preset", "analysis_error", "delivery_error",
+                "protocol_cloud_url", "deliver_weeek_task", "stop_reason")
+
+    def to_summary(self) -> dict:
+        d = {k: getattr(self, k) for k in self._SUMMARY}
+        d["has_analysis"] = bool(self.analysis)
+        return d
+
 
 class JobStore:
     def __init__(self) -> None:
