@@ -173,6 +173,21 @@ _IN_CALL_HANGUP = [
     'button:has-text("Завершить")', 'button:has-text("Покинуть")',
 ]
 _IN_CALL = _IN_CALL_STRONG + _IN_CALL_HANGUP
+# Выход из звонка: сначала «покинуть/выйти», «завершить» — последним (у
+# организатора оно может завершать встречу). Кнопки с «для всех» не
+# нажимаются никогда — бот уходит сам, а не выгоняет людей.
+_LEAVE_BUTTONS = [
+    'button[aria-label*="окинуть"]', 'button[aria-label*="ыйти"]',
+    'button[aria-label*="leave" i]', 'button:has-text("Покинуть")',
+    '[data-testid*="hangup"]', 'button[aria-label*="hang" i]',
+    'button[aria-label*="авершить"]', 'button:has-text("Завершить")',
+]
+# Подтверждение выхода, если Телемост переспросит.
+_LEAVE_CONFIRM = [
+    'button:has-text("Покинуть звонок")', 'button:has-text("Выйти из звонка")',
+    'button:has-text("Покинуть встречу")', 'button:has-text("Покинуть")',
+    'button:has-text("Выйти")', 'button:has-text("Leave")',
+]
 # Оболочка Мессенджера: слева список чатов, встреча — в окне справа. В запись
 # попадал бы список чужих переписок, а плитки участников ужимались; кнопка в
 # левом верхнем углу окна встречи разворачивает его на весь экран (у <html>
@@ -1129,6 +1144,88 @@ class TelemostBot:
                             return True
                 except Exception:  # noqa: BLE001
                     continue
+        return False
+
+    @staticmethod
+    def _for_everyone(el) -> bool:
+        try:
+            txt = f"{el.inner_text() or ''} {el.get_attribute('aria-label') or ''}"
+        except Exception:  # noqa: BLE001
+            return False
+        low = txt.lower()
+        return "для всех" in low or "for all" in low or "everyone" in low
+
+    def _hangup_button(self):
+        """Кнопка выхода из звонка — в окне встречи, не в виджете звонка
+        боковой панели оболочки и не «завершить для всех»."""
+        frames = _frames_of(self._page)
+        if self._shell_present():
+            frames = frames[1:]
+        for sel in _LEAVE_BUTTONS:
+            for fr in frames:
+                try:
+                    els = fr.query_selector_all(sel)
+                except Exception:  # noqa: BLE001
+                    continue
+                for el in els[:8]:
+                    try:
+                        if el.evaluate("e => !!e.closest('[class*=call-widget]')"):
+                            continue
+                    except Exception:  # noqa: BLE001
+                        pass
+                    if not self._for_everyone(el):
+                        return el
+        return None
+
+    def leave_call(self, timeout: float = 6.0) -> bool:
+        """Нажать «Покинуть звонок» и дождаться, что органов звонка больше нет.
+
+        Раньше при остановке записи бот просто закрывал браузер. Телемост
+        держит такого участника в комнате, пока не истечёт таймаут соединения,
+        и люди видели: «стоп» написали, бот ответил «останавливаю запись и
+        выхожу» — и продолжает сидеть на встрече (15.10)."""
+        if self._page is None:
+            return False
+        btn = self._hangup_button()
+        if btn is None:
+            self._on_log("⚠ Кнопку «Покинуть звонок» не нашёл — закрываю браузер; "
+                         "Телемост уберёт бота из комнаты сам, с задержкой.")
+            return False
+        try:
+            btn.click(timeout=3000)
+        except Exception:  # noqa: BLE001
+            try:
+                btn.evaluate("e => e.click()")
+            except Exception:  # noqa: BLE001
+                pass
+        deadline = time.time() + timeout
+        confirmed = False
+        while time.time() < deadline:
+            if not self.is_in_call():
+                self._on_log("Вышел из звонка.")
+                return True
+            if not confirmed:
+                for sel in _LEAVE_CONFIRM:
+                    for fr in _frames_of(self._page):
+                        try:
+                            el = _first_visible(fr, sel)
+                        except Exception:  # noqa: BLE001
+                            el = None
+                        if el is not None and not self._for_everyone(el):
+                            try:
+                                el.click(timeout=3000)
+                                confirmed = True
+                            except Exception:  # noqa: BLE001
+                                pass
+                            break
+                    if confirmed:
+                        break
+            try:
+                self._page.wait_for_timeout(300)
+            except Exception:  # noqa: BLE001
+                time.sleep(0.3)
+        self._on_log("⚠ Нажал «Покинуть звонок», но органы звонка остались — "
+                     "закрываю браузер.")
         return False
 
     def participant_count(self) -> int | None:

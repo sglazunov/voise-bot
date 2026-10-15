@@ -579,3 +579,80 @@ def test_один_в_комнате_только_по_экрану_встреч�
     del page._els[_SHELL_SEL]
     del page.child._els[sel]
     assert bot.alone_screen() is True
+
+
+# ---------------------------------------------------------------------------
+# 15.10.2026: «стоп» сработал («останавливаю запись и выхожу»), а бот остался
+# сидеть на встрече. Бот закрывал браузер, не нажав «Покинуть звонок», и
+# Телемост держал его в комнате до таймаута соединения.
+# ---------------------------------------------------------------------------
+class _CallFrame(_Frame):
+    """Фрейм встречи: органы звонка исчезают после выхода."""
+    def __init__(self, els, leave_sel, confirm=None):
+        super().__init__("https://telemost.yandex.ru/j/1?embedded", els)
+        self._leave_sel, self._confirm = leave_sel, confirm
+        self.left = False
+
+    # После выхода окно встречи пустеет: ни органов звонка, ни кнопок.
+    def query_selector(self, sel):
+        return None if self.left else super().query_selector(sel)
+
+    def query_selector_all(self, sel):
+        return [] if self.left else super().query_selector_all(sel)
+
+
+def _call(leave_btn, leave_sel, extra=None, confirm_needed=False):
+    participants = _Btn("Участники 3")
+    els = {'button:has-text("Участники")': participants, leave_sel: leave_btn}
+    els.update(extra or {})
+    child = _CallFrame(els, leave_sel)
+    page = _FramedPage({}, child)
+    orig_click = leave_btn.click
+
+    def click(**kw):
+        orig_click(**kw)
+        if not confirm_needed:
+            child.left = True
+    leave_btn.click = click
+    return page, child
+
+
+def test_бот_нажимает_покинуть_и_выходит():
+    btn = _Btn("", aria="Покинуть звонок")
+    page, child = _call(btn, 'button[aria-label*="окинуть"]')
+    bot = _bot(page)
+    assert bot.leave_call(timeout=1) is True
+    assert btn.clicks == 1 and "Вышел из звонка." in bot.log
+
+
+def test_завершить_для_всех_не_нажимается():
+    everyone = _Btn("Завершить для всех")
+    page, child = _call(everyone, 'button:has-text("Завершить")')
+    bot = _bot(page)
+    assert bot.leave_call(timeout=0.2) is False
+    assert everyone.clicks == 0
+    assert any("не нашёл" in m for m in bot.log)
+
+
+def test_кнопка_виджета_оболочки_не_считается():
+    widget = _Btn("", aria="Завершить звонок")
+    widget.in_widget = True
+    page, child = _call(widget, 'button[aria-label*="авершить"]')
+    bot = _bot(page)
+    assert bot.leave_call(timeout=0.2) is False and widget.clicks == 0
+
+
+def test_подтверждение_выхода_нажимается():
+    btn = _Btn("", aria="Покинуть звонок")
+    confirm = _Btn("Покинуть звонок")
+    page, child = _call(btn, 'button[aria-label*="окинуть"]', confirm_needed=True,
+                        extra={'button:has-text("Покинуть звонок")': confirm})
+    orig = confirm.click
+
+    def ok(**kw):
+        orig(**kw)
+        child.left = True
+    confirm.click = ok
+    bot = _bot(page)
+    assert bot.leave_call(timeout=2) is True
+    assert btn.clicks == 1 and confirm.clicks == 1
