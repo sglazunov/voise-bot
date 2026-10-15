@@ -302,6 +302,7 @@ PROVIDER_MODELS = {
         {"value": "claude-sonnet-5-5", "label": "Claude Sonnet 5.5 · баланс"},
         {"value": "claude-opus-5-5", "label": "Claude Opus 5.5 · максимум"},
         {"value": "claude-haiku-5-5", "label": "Claude Haiku 5.5 · быстрая/дешёвая"},
+        {"value": "claude-opus-4-8", "label": "Claude Opus 4.8 · прошлое поколение"},
         {"value": "claude-sonnet-4-6", "label": "Claude Sonnet 4.6 · прошлое поколение"},
     ],
 }
