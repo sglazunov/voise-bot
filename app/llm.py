@@ -45,8 +45,30 @@ _LOG = logs.get("vtx.llm")
 
 
 # ---------------------------------------------------------------------------
+# Ответы Ollama на «что установлено / жив ли» — на 30 секунд. Страница
+# «Распознавание» и «Нейросети» зовут /api/providers при каждом открытии, а на
+# бою Ollama не запущена: два зонда ждали таймаутов 3 + 2 с, и ответ шёл 4–5 с.
+# Неудача кэшируется так же, как успех — иначе выигрыша не было бы вовсе.
+_OLLAMA_TTL = float(os.getenv("VTX_OLLAMA_PROBE_TTL_SEC", "30"))
+_ollama_cache: dict = {}
+
+
+def _cached(key: str, fn):
+    hit = _ollama_cache.get(key)
+    now = time.monotonic()
+    if hit and now - hit[0] < _OLLAMA_TTL:
+        return hit[1]
+    val = fn()
+    _ollama_cache[key] = (now, val)
+    return val
+
+
 def list_ollama_models() -> list[str]:
     """Names of models installed in the local Ollama server (empty if down)."""
+    return list(_cached("models", _probe_ollama_models))
+
+
+def _probe_ollama_models() -> list[str]:
     url = config.OLLAMA_URL.rstrip("/") + "/api/tags"
     try:
         with urllib.request.urlopen(url, timeout=3) as resp:
@@ -63,6 +85,10 @@ def ollama_status() -> str:
     'installed' — the CLI exists but the server isn't up yet
     'missing'   — Ollama is not installed
     """
+    return _cached("status", _probe_ollama_status)
+
+
+def _probe_ollama_status() -> str:
     try:
         with urllib.request.urlopen(config.OLLAMA_URL.rstrip("/") + "/api/version",
                                     timeout=2):
