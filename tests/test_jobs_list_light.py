@@ -52,3 +52,36 @@ def test_зонд_ollama_кэшируется(monkeypatch):
     llm.list_ollama_models(); llm.ollama_status(); llm.ollama_status()
     # По одному зонду на вид, неудача тоже кэшируется.
     assert len(calls) == 2
+
+
+def test_partial_отдаёт_только_новые_фрагменты(client):
+    """Опрос раз в 2 с не тянет расшифровку с начала: since — сколько уже есть."""
+    register(client, "alice", phone="+7 999 000-00-01")
+    job = _fat_job("alice")
+    job.status = "running"
+    store._partial[job.id] = [{"start": i, "end": i + 1, "text": f"ф{i}"} for i in range(5)]
+    p = client.get(f"/api/jobs/{job.id}/partial").json()
+    assert p["from"] == 0 and p["total"] == 5 and len(p["segments"]) == 5
+    p = client.get(f"/api/jobs/{job.id}/partial?since=3").json()
+    assert p["from"] == 3 and [s["text"] for s in p["segments"]] == ["ф3", "ф4"]
+    p = client.get(f"/api/jobs/{job.id}/partial?since=5").json()
+    assert p["from"] == 5 and p["segments"] == []
+    # Задачу начали заново — фрагментов меньше, чем у клиента: отдаём всё.
+    store._partial[job.id] = store._partial[job.id][:2]
+    p = client.get(f"/api/jobs/{job.id}/partial?since=5").json()
+    assert p["from"] == 0 and len(p["segments"]) == 2
+    assert "analysis" not in json.dumps(p["segments"])
+
+
+def test_бандлы_spa_кэшируются_навсегда(client):
+    import pytest
+    from app import main
+    files = sorted((main.SPA_DIR / "assets").glob("*.js")) if (main.SPA_DIR / "assets").is_dir() else []
+    if not files:
+        pytest.skip("нет собранного frontend/dist")
+    register(client, "alice", phone="+7 999 000-00-01")
+    r = client.get("/assets/" + files[0].name)
+    assert r.status_code == 200
+    assert "immutable" in r.headers["cache-control"]
+    # Оболочка — наоборот, всегда перепроверяется: в ней ссылки на новые бандлы.
+    assert "no-cache" in client.get("/recognition").headers.get("cache-control", "")
