@@ -1502,7 +1502,8 @@ def check_topics(result: dict, transcript_text: str) -> dict:
     return result
 
 
-_LINES_CACHE: tuple[str, list[str], list[set[str]]] | None = None
+# (текст, строки, основы строк, словарь «основа → строки», память _stem_lines)
+_LINES_CACHE: tuple | None = None
 
 
 def _speech_lines(text: str) -> tuple[list[str], list[set[str]]]:
@@ -1519,7 +1520,11 @@ def _speech_lines(text: str) -> tuple[list[str], list[set[str]]]:
         return cached[1], cached[2]
     lines = [ln for ln in (text or "").splitlines() if ln.strip()]
     stems_by_line = [_stems(_strip_labels(ln)) for ln in lines]
-    _LINES_CACHE = (text, lines, stems_by_line)
+    vocab: dict[str, list[int]] = {}
+    for j, ws in enumerate(stems_by_line):
+        for y in ws:
+            vocab.setdefault(y, []).append(j)
+    _LINES_CACHE = (text, lines, stems_by_line, vocab, {})
     return lines, stems_by_line
 
 
@@ -1541,6 +1546,53 @@ _SUPPORT_MIN = 0.6
 _TIME_HINT_MIN = 0.35
 
 
+def _same_stem(x: str, y: str) -> bool:
+    """Основа считается найденной и по префиксу: «плашк» ≈ «плашечк»,
+    «конструктор» ≈ «конструкторн» — уменьшительные и производные одного
+    слова в речи и в пункте протокола."""
+    if x == y:
+        return True
+    k = 0
+    for cx, cy in zip(x, y):
+        if cx != cy:
+            break
+        k += 1
+    # Общее начало не короче 4 букв и не меньше ¾ короткой основы.
+    return k >= 4 and k >= 0.75 * min(len(x), len(y))
+
+
+def _stem_lines(x: str, text: str) -> frozenset[int]:
+    """Номера строк речи, где есть основа, «та же», что x (`_same_stem`).
+
+    Раньше `_find_support` сравнивал каждую основу пункта с каждой основой
+    КАЖДОГО окна расшифровки: 78 пунктов встречи на 40 минут — 6 секунд
+    чистого Python, и вызывается он дважды (подтверждение и ориентир
+    времени). Всё это время держалась GIL того же процесса, где работает
+    сайт, и любой запрос ждал по секунде (HAR владельца 15.10). Теперь x
+    сравнивается со СЛОВАРЁМ основ текста один раз, результат — в кэше
+    текста. Ответ тот же самый: «в окне есть похожая основа» ⇔ «окно
+    пересекается с этими строками»."""
+    _speech_lines(text)
+    cache = _LINES_CACHE
+    if cache is None or cache[0] != text:          # параллельный вызов сменил кэш
+        lines, stems_by_line = _speech_lines(text)
+        vocab: dict[str, list[int]] = {}
+        for j, ws in enumerate(stems_by_line):
+            for y in ws:
+                vocab.setdefault(y, []).append(j)
+        memo: dict[str, frozenset[int]] = {}
+    else:
+        vocab, memo = cache[3], cache[4]
+    hit = memo.get(x)
+    if hit is None:
+        acc: set[int] = set()
+        for y, js in vocab.items():
+            if _same_stem(x, y):
+                acc.update(js)
+        hit = memo[x] = frozenset(acc)
+    return hit
+
+
 def _find_support(point_text: str, text: str,
                   threshold: float = _SUPPORT_MIN) -> dict | None:
     """Опора для пункта, когда модель цитату не нашла или переврала: окно в три
@@ -1554,44 +1606,38 @@ def _find_support(point_text: str, text: str,
     pw = _stems(point_text)
     if len(pw) < 3:
         return None
-
-    def covered(a: set[str], b: set[str]) -> int:
-        # Основа считается найденной и по префиксу: «плашк» ≈ «плашечк»,
-        # «конструктор» ≈ «конструкторн» — уменьшительные и производные
-        # одного слова в речи и в пункте протокола.
-        def same(x: str, y: str) -> bool:
-            if x == y:
-                return True
-            k = 0
-            for cx, cy in zip(x, y):
-                if cx != cy:
-                    break
-                k += 1
-            # Общее начало не короче 4 букв и не меньше ¾ короткой основы.
-            return k >= 4 and k >= 0.75 * min(len(x), len(y))
-
-        return sum(1 for x in a if any(same(x, y) for y in b))
-
-    lines, stems_by_line = _speech_lines(text)
-    best, best_i = 0.0, -1
+    lines, _ = _speech_lines(text)
+    n = len(lines)
+    hits = {x: _stem_lines(x, text) for x in pw}
     # Окно ±2 реплики вокруг строки: тема часто названа ДО поручения
-    # («мои наставники…» → «сделай пока просто плашечку»).
-    for i in range(len(lines)):
-        ws: set[str] = set()
-        for j in range(max(0, i - 2), min(len(lines), i + 3)):
-            ws |= stems_by_line[j]
-        score = covered(pw, ws) / len(pw)
+    # («мои наставники…» → «сделай пока просто плашечку»). Основа x покрывает
+    # окно i, если она есть хоть в одной строке j ∈ [i-2, i+2].
+    cover = [0] * n
+    for js in hits.values():
+        marked: set[int] = set()
+        for j in js:
+            marked.update(range(max(0, j - 2), min(n, j + 3)))
+        for i in marked:
+            cover[i] += 1
+    best, best_i = 0.0, -1
+    for i in range(n):
+        score = cover[i] / len(pw)
         if score > best:
             best, best_i = score, i
     if best < threshold or best_i < 0:
         return None
-    window = list(range(max(0, best_i - 2), min(len(lines), best_i + 3)))
+    window = list(range(max(0, best_i - 2), min(n, best_i + 3)))
     # Цитата — реплика с самим поручением, а не та, где лишь названа тема:
     # первое слово пункта (глагол «сделать», «обновить») весит втрое, при
     # равенстве берётся более поздняя реплика (поручение идёт после темы).
     first = _stems(point_text.split()[0]) if point_text.split() else set()
-    li = max(window, key=lambda j: (covered(pw, stems_by_line[j])
-                                    + 2 * covered(first, stems_by_line[j]), j))
+    first_hits = [_stem_lines(x, text) for x in first]
+
+    def weight(j: int) -> tuple[int, int]:
+        return (sum(1 for js in hits.values() if j in js)
+                + 2 * sum(1 for js in first_hits if j in js), j)
+
+    li = max(window, key=weight)
     # Время не берётся из метки этой строки: у большинства строк её нет, а
     # наследование метки шапки блока знает только `_TimeIndex`. Опора —
     # только текст, время ставится одной функцией позже (Т11).

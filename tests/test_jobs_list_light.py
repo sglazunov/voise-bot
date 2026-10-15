@@ -71,3 +71,17 @@ def test_partial_отдаёт_только_новые_фрагменты(client)
     p = client.get(f"/api/jobs/{job.id}/partial?since=5").json()
     assert p["from"] == 0 and len(p["segments"]) == 2
     assert "analysis" not in json.dumps(p["segments"])
+
+
+def test_бандлы_spa_кэшируются_навсегда(client):
+    import pytest
+    from app import main
+    files = sorted((main.SPA_DIR / "assets").glob("*.js")) if (main.SPA_DIR / "assets").is_dir() else []
+    if not files:
+        pytest.skip("нет собранного frontend/dist")
+    register(client, "alice", phone="+7 999 000-00-01")
+    r = client.get("/assets/" + files[0].name)
+    assert r.status_code == 200
+    assert "immutable" in r.headers["cache-control"]
+    # Оболочка — наоборот, всегда перепроверяется: в ней ссылки на новые бандлы.
+    assert "no-cache" in client.get("/recognition").headers.get("cache-control", "")
