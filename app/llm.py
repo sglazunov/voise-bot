@@ -225,12 +225,29 @@ class AnthropicProvider:
             | ({"cache_control": {"type": "ephemeral"}} if cached else {})
             for text, cached in cache_parts(prompt)
         ]
-        message = client.messages.create(
-            model=self.model,
-            max_tokens=max_tokens,
-            temperature=0.1,
-            messages=[{"role": "user", "content": content}],
-        )
+        params = {
+            "model": self.model,
+            # У моделей с мышлением рассуждения тратят тот же max_tokens, что
+            # и ответ: без запаса сведение часовой встречи обрывалось бы.
+            "max_tokens": anthropic_max_tokens(self.model, max_tokens),
+            "messages": [{"role": "user", "content": content}],
+        }
+        effort = (os.getenv("VTX_ANTHROPIC_EFFORT") or "").strip()
+        if effort:
+            params["output_config"] = {"effort": effort}
+        if anthropic_accepts_temperature(self.model):
+            params["temperature"] = 0.1
+        try:
+            message = _anthropic_call(client, params)
+        except Exception as e:  # noqa: BLE001
+            # Модель, которой нет в правилах (вышла после этого кода), тоже
+            # может отвергнуть temperature — повторяем без неё и запоминаем.
+            if "temperature" in params and "temperature" in str(e).lower():
+                _NO_TEMPERATURE.add(self.model)
+                params.pop("temperature")
+                message = _anthropic_call(client, params)
+            else:
+                raise
         u = getattr(message, "usage", None)
         if u is not None:
             _log_usage(f"anthropic/{self.model}", {
@@ -239,7 +256,60 @@ class AnthropicProvider:
                 "cachedContentTokenCount": getattr(u, "cache_read_input_tokens", 0),
                 "candidatesTokenCount": getattr(u, "output_tokens", 0),
             })
-        return message.content[0].text.strip()
+        return anthropic_text(message, self.model)
+
+
+# --- Claude: что меняется от поколения к поколению ---------------------------
+# 15.10.2026 протокол «Виртуальный помощник» ушёл запасному движку с ответом
+# Anthropic 400 «`temperature` is deprecated for this model»: провайдер всегда
+# слал temperature=0.1, а у Opus 4.7+, Sonnet 5+, Haiku 5.5, Fable/Mythos
+# параметр убран (у Sonnet 5.5 и Haiku 5.5 — любое значение, кроме умолчания).
+# Те же поколения думают всегда или по умолчанию: первым в ответе идёт блок
+# thinking, и прежнее `content[0].text` упало бы и без ошибки 400.
+_NO_SAMPLING_RE = re.compile(
+    r"claude-(?:fable|mythos)|claude-(?:opus|sonnet|haiku)-(?:[5-9]|4-[7-9])", re.I)
+# Мышление включено без запроса (часть max_tokens уходит на рассуждения).
+_THINKS_RE = re.compile(
+    r"claude-(?:fable|mythos)|claude-(?:opus|sonnet|haiku)-[5-9]", re.I)
+_NO_TEMPERATURE: set[str] = set()
+_THINK_HEADROOM = int(os.getenv("VTX_ANTHROPIC_THINK_TOKENS", "16000") or 16000)
+
+
+def anthropic_accepts_temperature(model: str) -> bool:
+    return not (_NO_SAMPLING_RE.search(model or "") or model in _NO_TEMPERATURE)
+
+
+def anthropic_max_tokens(model: str, requested: int) -> int:
+    if _THINKS_RE.search(model or ""):
+        return min(int(requested) + _THINK_HEADROOM, 128000)
+    return int(requested)
+
+
+def _anthropic_call(client, params: dict):
+    """Потоковый режим: большой max_tokens без потока SDK отвергает (ответ мог
+    бы не уложиться в таймаут HTTP), а шлюзы рвут долгие запросы."""
+    with client.messages.stream(**params) as stream:
+        return stream.get_final_message()
+
+
+def anthropic_text(message, model: str) -> str:
+    """Текст ответа — только из блоков `text`: у думающих моделей первым идёт
+    блок `thinking`. Отказ и пустой ответ — внятная ошибка, чтобы цепочка
+    движков ушла к следующему, а в шапке протокола была причина."""
+    stop = getattr(message, "stop_reason", None)
+    if stop == "refusal":
+        det = getattr(message, "stop_details", None)
+        cat = getattr(det, "category", None) if det is not None else None
+        raise RuntimeError(f"{model} отказался отвечать (stop_reason=refusal"
+                           f"{', ' + str(cat) if cat else ''})")
+    text = "".join(getattr(b, "text", "") or "" for b in (message.content or [])
+                   if getattr(b, "type", "") == "text").strip()
+    if not text:
+        raise RuntimeError(f"{model} вернул пустой ответ (stop_reason={stop}"
+                           + (": лимит токенов ушёл на рассуждения — "
+                              "поднимите VTX_ANTHROPIC_THINK_TOKENS"
+                              if stop == "max_tokens" else "") + ")")
+    return text
 
 
 def _log_usage(name: str, usage_meta: dict | None) -> None:
