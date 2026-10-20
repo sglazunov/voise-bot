@@ -75,15 +75,26 @@ def test_server_timing_в_каждом_ответе(client):
     assert r.headers["server-timing"].startswith("app;dur=")
 
 
+def _done_job(owner, name):
+    """Готовая задача прямо в хранилище, мимо очереди: воркер иначе подхватит
+    её и сменит статус между двумя запросами теста — список честно изменится."""
+    import uuid
+    from app.jobs import Job
+    job = Job(id=uuid.uuid4().hex[:12], filename=name, audio_path="/nonexistent",
+              language="ru", diarize=False, owner=owner, status="done")
+    store._jobs[job.id] = job
+    return job
+
+
 def test_список_с_etag_отдаёт_304_без_изменений(client):
     register(client, "alice", phone="+7 999 000-00-01")
-    store.create("Планёрка.mp4", "/data/uploads/x.mp4", "ru", False, owner="alice")
+    _done_job("alice", "Планёрка.mp4")
     r = client.get("/api/jobs")
     etag = r.headers["etag"]
     n = len(r.json())
     assert r.status_code == 200 and n >= 1
     r2 = client.get("/api/jobs", headers={"If-None-Match": etag})
     assert r2.status_code == 304 and r2.content == b""
-    store.create("Ещё.mp4", "/data/uploads/y.mp4", "ru", False, owner="alice")
+    _done_job("alice", "Ещё.mp4")
     r3 = client.get("/api/jobs", headers={"If-None-Match": etag})
     assert r3.status_code == 200 and len(r3.json()) == n + 1
