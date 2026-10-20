@@ -92,10 +92,10 @@ class TestРегистрИПрокрутка:
     def _bot(self):
         from app.automation.recorder.browser import TelemostBot
         b = TelemostBot.__new__(TelemostBot)
-        b._chat_baseline = None
         b._chat_last_peek = 0.0
         b._chat_last_n = -1
-        b._chat_seen = set()
+        b._chat_scopes = {}
+        b._chat_reads = 0
         b._on_log = lambda *a: None
         return b
 
@@ -164,3 +164,47 @@ class TestИсторияЧатаИВиртуализация:
         b = self._bot()
         assert self._feed(b, ["стоп 12:08"]) is False
         assert self._feed(b, ["стоп 12:08", "стоп 12:30"]) is True
+
+
+class TestРазделСегодняПоявилсяПоХоду:
+    """20.10.2026, «CRM — проектная встреча»: в логе «видно 10 → 0 → 1», бот
+    видит «стоп» и сидит дальше. На первом чтении разделителя «Сегодня» не было
+    (10 команд из истории), потом он появился, и новое «стоп» под ним (1)
+    сравнивалось с теми же 10. Строки без времени («стоп»), поэтому и проверка
+    по тексту не помогала: новое совпадало с историческими дословно."""
+
+    _bot = TestРегистрИПрокрутка._bot
+    _feed = TestРегистрИПрокрутка._feed
+
+    HISTORY = ["21 июля", "Зоя Р.", "стоп", "18 августа", "Иван Р.", "стоп",
+               "8 сентября", "Сергей Глазунов", "стоп", "стоп"]
+
+    def test_стоп_под_появившимся_сегодня_срабатывает(self):
+        b = self._bot()
+        assert self._feed(b, self.HISTORY) is False                  # 4 из истории
+        today = self.HISTORY + ["Сегодня", "Звонок начался"]
+        assert self._feed(b, today) is False                         # «видно 0»
+        assert self._feed(b, today + ["Сергей Глазунов", "стоп"]) is True
+
+    def test_раздел_появился_вместе_с_командой(self):
+        b = self._bot()
+        hist = ["стоп 11:05", "стоп 11:14"]
+        assert self._feed(b, hist) is False
+        assert self._feed(b, hist + ["Сегодня", "стоп 11:42"]) is True
+
+    def test_утренние_команды_под_сегодня_не_срабатывают(self):
+        """Постоянная комната: «стоп» с утренней встречи бот уже видел — когда
+        прокрутка дорисует разделитель над ними, это не новая команда."""
+        b = self._bot()
+        assert self._feed(b, ["стоп 10:58", "Иван Р.", "привет 11:30"]) is False
+        assert self._feed(b, ["Сегодня", "стоп 10:58", "Иван Р.",
+                              "привет 11:30"]) is False
+
+    def test_раздел_то_пропадает_то_появляется(self):
+        b = self._bot()
+        today = self.HISTORY + ["Сегодня", "Звонок начался"]
+        self._feed(b, self.HISTORY)
+        self._feed(b, today)
+        assert self._feed(b, self.HISTORY) is False                  # прокрутили вверх
+        assert self._feed(b, today) is False
+        assert self._feed(b, today + ["стоп"]) is True

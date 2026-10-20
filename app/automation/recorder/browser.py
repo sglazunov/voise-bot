@@ -496,15 +496,16 @@ class TelemostBot:
         self._page = None
         self._temp_profile = None
         # Chat stop-word bookkeeping (see maybe_chat_stop).
-        self._chat_baseline = None    # stop-word lines present at first read
         self._chat_last_peek = 0.0    # last time we read the chat
         self._chat_last_n = -1        # last logged count (for live diagnostics)
-        # Сами строки со стоп-словом, уже виденные. Считать их КОЛИЧЕСТВО
-        # оказалось ненадёжно: чат в комнате общий и не чистится, а Телемост
+        # Что уже лежало в чате — ОТДЕЛЬНО для двух областей счёта: «всё»
+        # (разделителя «Сегодня» нет) и «сегодня» (только строки под ним).
+        # В каждой: максимум счётчика и сами виденные строки. Считать только
+        # КОЛИЧЕСТВО ненадёжно: чат в комнате общий и не чистится, а Телемост
         # держит в DOM только видимую часть — при прокрутке старое сообщение
-        # уходит, новое приходит, и счётчик не растёт. Строка сообщения включает
-        # время («стоп 16:49»), поэтому новое сообщение отличимо от старого.
-        self._chat_seen: set[str] = set()
+        # уходит, новое приходит, и счётчик не растёт.
+        self._chat_scopes: dict[str, dict] = {}
+        self._chat_reads = 0
         self._chat_opened_once = False
 
     # -- lifecycle ----------------------------------------------------------
@@ -1420,7 +1421,9 @@ class TelemostBot:
         text = self._read_all_text()
         if text is None:
             return False
-        lines = self._today_lines(text.splitlines())
+        all_lines = text.splitlines()
+        lines = self._today_lines(all_lines)
+        scope = "today" if len(lines) != len(all_lines) else "all"
         n = sum(1 for ln in lines if self._is_stop_line(ln, word))
         if n != self._chat_last_n:
             # When the word IS on the page but no line qualified as a command,
@@ -1440,12 +1443,36 @@ class TelemostBot:
         # виртуализированного списка количество видимых строк скачет в обе
         # стороны, и рост «нового сообщения» терялся.
         hits = {ln.strip() for ln in lines if self._is_stop_line(ln, word)}
-        if self._chat_baseline is None:
-            self._chat_baseline = n           # ignore whatever was already there
-            self._chat_seen = hits            # всё, что уже лежало в чате
-            return False
-        fresh = hits - self._chat_seen
-        self._chat_seen |= hits
+        # ⚠️ Базовая линия — СВОЯ у каждой области счёта (20.10: «видно 10 →
+        # 0 → 1», бот видит «стоп» и сидит дальше). На первом чтении
+        # разделителя «Сегодня» ещё не было — насчитали 10 из истории; потом
+        # он появился, счёт пошёл только под ним, а сравнивался с теми же 10,
+        # и новое «стоп» (1) не дотягивало. Строка «стоп» при этом дословно
+        # совпадала с историческими, так что и проверка по строкам молчала.
+        scopes = getattr(self, "_chat_scopes", None)
+        if scopes is None:
+            scopes = self._chat_scopes = {}
+        first_read = getattr(self, "_chat_reads", 0) == 0
+        self._chat_reads = getattr(self, "_chat_reads", 0) + 1
+        st = scopes.get(scope)
+        if st is None:
+            if scope == "today" and not first_read:
+                # «Сегодня» появилось ПО ХОДУ записи. Старым под ним считается
+                # только то, что бот уже видел раньше дословно (утренняя
+                # встреча в той же комнате, дорисованная прокруткой), —
+                # остальное новое. Ложная остановка обрезает встречу, поэтому
+                # сомнение решается в пользу «старое».
+                before = set().union(*(v["seen"] for v in scopes.values()))
+                old = [ln.strip() for ln in lines
+                       if self._is_stop_line(ln, word) and ln.strip() in before]
+                st = scopes[scope] = {"baseline": len(old), "seen": set(old)}
+                self._on_log("Чат: появился раздел «Сегодня» — "
+                             f"команду «{word}» жду под ним.")
+            else:
+                scopes[scope] = {"baseline": n, "seen": hits}
+                return False              # всё, что уже лежало в чате
+        fresh = hits - st["seen"]
+        st["seen"] |= hits
         if fresh:
             self._on_log(f"Чат: новое сообщение «{word}» — останавливаю запись.")
             return True
@@ -1454,8 +1481,9 @@ class TelemostBot:
         # ⚠️ Базовая линия НИКОГДА не опускается: список виртуализирован, и
         # 13 → 12 → 13 — это прокрутка, а не новое сообщение (29.09: бот вышел
         # «по стоп-слову», которого никто не писал).
-        if n > self._chat_baseline:
-            self._chat_baseline = n
+        if n > st["baseline"]:
+            st["baseline"] = n
+            self._on_log(f"Чат: сообщений «{word}» стало больше — останавливаю запись.")
             return True
         return False
 
