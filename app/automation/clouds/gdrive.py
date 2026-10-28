@@ -105,7 +105,11 @@ def child_folder(cfg: dict, parent: str | None, name: str) -> str:
          f"and '{parent or 'root'}' in parents")
     status, data = request_json("GET", FILES_URL, headers=auth,
                                 params={"q": q, "fields": "files(id)", "pageSize": "1"})
-    if status == 200 and isinstance(data, dict) and data.get("files"):
+    if status != 200 or not isinstance(data, dict):
+        # Не смогли ПОСМОТРЕТЬ — не создаём: имя у Google не уникально, и каждый
+        # сбой списка плодил бы ещё одну папку серии.
+        raise CloudError(f"Google Drive не показал папки ({status}).")
+    if data.get("files"):
         return data["files"][0]["id"]
     meta = {"name": name, "mimeType": _FOLDER_MIME}
     if parent:
@@ -134,7 +138,10 @@ def move_to_sibling(file_id: str, sub: str, cfg: dict) -> dict:
             return {"ok": False, "retry": True, "error": f"Google Drive не ответил ({st})"}
         st, pm = request_json("GET", f"{FILES_URL}/{old}", headers=auth,
                               params={"fields": "parents"})
-        root = ((pm or {}).get("parents") or [None])[0] if st == 200 else None
+        if st != 200:
+            # Иначе root=None, и папка серии молча появилась бы в корне My Drive.
+            return {"ok": False, "retry": True, "error": f"Google Drive не ответил ({st})"}
+        root = ((pm or {}).get("parents") or [None])[0]
         new = child_folder(cfg, root, sub)
         st, _ = request_json("PATCH", f"{FILES_URL}/{file_id}", headers=auth,
                              params={"addParents": new, "removeParents": old,

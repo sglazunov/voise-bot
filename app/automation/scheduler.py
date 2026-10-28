@@ -171,15 +171,17 @@ _WIPE_MAX_PER_POLL = int(os.getenv("VTX_FIELD_WIPE_MAX_PER_POLL", "20"))
 _ROOM_RE = re.compile(r"/j/([a-z0-9_-]+)", re.I)
 
 
-def _meeting_place(st: "MeetingState", cfg: dict, log=None) -> dict:
-    """Папка встречи в облаке (docs/ТЗ-ПАПКИ-ВСТРЕЧ.md). День — из времени
-    встречи в Weeek, а не из названия: в названии задачи даты нет. Если
-    название только что стало серией — файлы прежних встреч переезжают из
-    «Разовых». Сбой раскладки не мешает выгрузке: тогда кладём как раньше."""
+def _meeting_place(st: "MeetingState", cfg: dict, log=None, out: str = "") -> dict:
+    """Папка встречи в облаке (docs/ТЗ-ПАПКИ-ВСТРЕЧ.md). День — из начала
+    имени файла записи: из него же его берут протокол и память серии, иначе
+    видео и протокол одной встречи получали разные дни (полночь, перезапуск
+    на следующий день). Если название только что стало серией — файлы прежних
+    встреч переезжают из «Разовых». Сбой раскладки не мешает выгрузке."""
     try:
         start = st.start
-        date = (start.astimezone().strftime("%d.%m.%Y") if start
-                else time.strftime("%d.%m.%Y"))
+        date = meeting_series.date_prefix(Path(out).name if out else "") or (
+            start.astimezone().strftime("%d.%m.%Y") if start
+            else time.strftime("%d.%m.%Y"))
         place = cloud_folders.resolve(st.owner, st.title, cfg, date=date)
         if place["sub"]:
             cloud_folders.adopt(st.owner, st.title, place, cfg, log)
@@ -1078,7 +1080,7 @@ class Scheduler:
                 except Exception:
                     _LOG.warning("Запуск следующей встречи после передачи комнаты "
                                  "сорвался — подхватит цикл", exc_info=True)
-            place = _meeting_place(st, cfg, log)
+            place = _meeting_place(st, cfg, log, out)
             up = delivery.upload_with_retry(out, cfg, log, subfolder=place["sub"] or None)
             cloud_folders.placed(st.owner, st.title, place, up, "recording")
             st.cloud_path = up.get("path") or st.cloud_path
@@ -1218,7 +1220,7 @@ class Scheduler:
             time.sleep(300)
             if not Path(out).exists():
                 return  # purged (retention) — nothing left to deliver
-            place = _meeting_place(st, cfg, None)
+            place = _meeting_place(st, cfg, None, out)
             up = delivery.publish_or_upload(out, cfg, st.cloud_path, lambda *_: None,
                                             subfolder=place["sub"] or None)
             cloud_folders.placed(st.owner, st.title, place, up, "recording")
@@ -1540,7 +1542,7 @@ class Scheduler:
 
         log("Запись прервана перезапуском сервиса — файл цел, дообрабатываю.")
         if not st.cloud_url:
-            place = _meeting_place(st, cfg, log)
+            place = _meeting_place(st, cfg, log, out)
             up = delivery.upload_with_retry(out, cfg, log, attempts=1,
                                             subfolder=place["sub"] or None)
             cloud_folders.placed(st.owner, st.title, place, up, "recording")

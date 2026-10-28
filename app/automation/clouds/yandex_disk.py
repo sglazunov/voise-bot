@@ -37,8 +37,12 @@ def readiness(cfg: dict) -> dict:
     return {"ready": True, "detail": f"Папка: {cfg.get('folder') or 'disk:/'}"}
 
 
-def _ensure_folder(folder: str, headers: dict) -> None:
-    """Create the folder (and parents) if missing. 409 = already exists."""
+def _ensure_folder(folder: str, headers: dict, strict: bool = False) -> None:
+    """Create the folder (and parents) if missing. 409 = already exists.
+
+    `strict` — любой другой ответ поднимает ошибку (переезд файлов): иначе
+    несозданная промежуточная папка всплывала потом как 409 «нет родителя» у
+    перемещения и читалась как «файл уже есть» — провал навсегда."""
     parts, acc = folder.replace("disk:/", "").strip("/").split("/"), "disk:/"
     for p in parts:
         if not p:
@@ -52,6 +56,8 @@ def _ensure_folder(folder: str, headers: dict) -> None:
                 raise CloudError(
                     f"Яндекс.Диск отклонил токен ({status}). Нужен scope "
                     "cloud_api:disk.write.")
+            if strict:
+                raise CloudError(f"Яндекс.Диск не создал папку {acc} (HTTP {status}).")
 
 
 # Публикация — отдельный шаг ПОСЛЕ заливки, и падает он отдельно: 17.09 запись
@@ -110,58 +116,102 @@ def publish(remote: str, cfg: dict) -> dict:
     return {"ok": False, "backend": "yandex_disk", "path": remote, "error": note}
 
 
-def _public_url(path: str, cfg: dict) -> tuple[str | None, int]:
+def _public_meta(path: str, cfg: dict) -> tuple[dict, int]:
+    """(public_url и public_key файла, HTTP-статус чтения)."""
     status, meta = request_json("GET", f"{API}/resources", headers=_read_auth(cfg),
-                                params={"path": path, "fields": "public_url"})
-    return ((meta or {}).get("public_url") if status == 200 else None), status
+                                params={"path": path, "fields": "public_url,public_key"})
+    if status != 200 or not isinstance(meta, dict):
+        return {}, status
+    return {"url": meta.get("public_url"), "key": meta.get("public_key")}, status
 
 
-def _move_once(src: str, dst: str, headers: dict) -> tuple[bool, str]:
-    """Переместить файл; асинхронный ответ (202) дождаться до 30 с."""
+_READ_DENIED = ("Чтобы переложить файл, нужен доступ на ЧТЕНИЕ Диска "
+                "(cloud_api:disk.read): впишите «токен чтения» Я.Диска в настройках.")
+
+
+def _move_once(src: str, dst: str, headers: dict) -> tuple[bool, str, bool]:
+    """Переместить файл; асинхронный ответ (202) дождаться до 30 с.
+    (успех, причина, стоит ли повторить)."""
     status, info = request_json("POST", f"{API}/resources/move", headers=headers,
                                 params={"from": src, "path": dst, "overwrite": "false"})
     if status == 201:
-        return True, ""
+        return True, "", False
     if status == 409:
-        return False, "в папке серии уже есть файл с таким именем"
+        # 409 у Диска бывает разный: «уже есть» — навсегда, а «нет
+        # родительской папки» и прочее — повторимо.
+        code = (info or {}).get("error") if isinstance(info, dict) else ""
+        if code == "DiskResourceAlreadyExistsError":
+            return False, "в папке серии уже есть файл с таким именем", False
+        return False, f"Диск отказал в перемещении ({code or 'HTTP 409'})", True
     if status == 202 and isinstance(info, dict) and info.get("href"):
         for _ in range(30):
             st, op = request_json("GET", info["href"], headers=headers)
             state = (op or {}).get("status") if st == 200 else None
             if state == "success":
-                return True, ""
+                return True, "", False
             if state == "failed":
-                return False, "Диск не смог переместить файл"
+                return False, "Диск не смог переместить файл", True
             time.sleep(1)
-        return False, "перемещение не закончилось за 30 с"
-    return False, f"перемещение отклонено (HTTP {status})"
+        return False, "перемещение не закончилось за 30 с", True
+    return False, f"перемещение отклонено (HTTP {status})", status not in (401, 403)
 
 
 def move(src: str, dst: str, cfg: dict) -> dict:
     """Переложить уже опубликованный файл в другую папку (docs/ТЗ-ПАПКИ-ВСТРЕЧ.md).
 
-    ⚠️ Ссылка на файл уже стоит в Weeek. Поэтому ссылку сверяем ДО и ПОСЛЕ:
-    если после переезда она другая или пропала — файл возвращается на место, а
-    переезд считается несостоявшимся. Сохранность ссылки при перемещении на
-    живом Диске не проверена — проверка здесь и есть страховка."""
+    ⚠️ Ссылка на файл уже стоит в Weeek, а официально Яндекс не обещает, что
+    публикация переживает перемещение. Поэтому ссылку (public_key и
+    public_url) сверяем ДО и ПОСЛЕ: если после переезда Диск ОТВЕТИЛ, и ссылка
+    другая или пропала, — файл возвращается на место. Сбой самого чтения
+    ссылки — не повод откатывать: переезд состоялся."""
     try:
         headers = _auth(cfg)
-        before, st = _public_url(src, cfg)
+        before, st = _public_meta(src, cfg)
+        if st in (401, 403):
+            return {"ok": False, "retry": False, "error": _READ_DENIED}
         if st == 404:
+            # Возможно, прошлый асинхронный переезд всё-таки закончился.
+            there, st2 = _public_meta(dst, cfg)
+            if st2 == 200:
+                return {"ok": True, "backend": "yandex_disk", "path": dst,
+                        "url": there.get("url")}
             return {"ok": False, "retry": False, "error": "файла уже нет на Диске"}
         if st != 200:
             return {"ok": False, "retry": True, "error": f"Диск не ответил (HTTP {st})"}
-        _ensure_folder(dst.rsplit("/", 1)[0], headers)
-        ok, why = _move_once(src, dst, headers)
+        _ensure_folder(dst.rsplit("/", 1)[0], headers, strict=True)
+        ok, why, again = _move_once(src, dst, headers)
         if not ok:
-            return {"ok": False, "retry": "уже есть" not in why, "error": why}
-        after, _st = _public_url(dst, cfg)
-        if before and after != before:
-            _move_once(dst, src, headers)
+            return {"ok": False, "retry": again, "error": why}
+        after, st = {}, 0
+        for i in range(3):
+            if i:
+                time.sleep(2)
+            after, st = _public_meta(dst, cfg)
+            if st == 200:
+                break
+        if st != 200:
+            # Переезд состоялся, а ссылку прочитать не удалось — считаем её
+            # прежней (так и бывает в подавляющем большинстве случаев).
+            return {"ok": True, "backend": "yandex_disk", "path": dst,
+                    "url": before.get("url"),
+                    "warning": f"ссылку после переезда проверить не удалось (HTTP {st})"}
+        changed = bool(before.get("url")) and (
+            after.get("url") != before.get("url")
+            or (before.get("key") and after.get("key") != before.get("key")))
+        if changed:
+            back, why_back, _ = _move_once(dst, src, headers)
+            if not back:
+                # Вернуть не вышло — файл остался в папке серии; отдаём новый
+                # путь, иначе следующий заход искал бы его по старому.
+                return {"ok": True, "backend": "yandex_disk", "path": dst,
+                        "url": after.get("url"),
+                        "warning": "после переезда сменилась публичная ссылка, а "
+                                   f"вернуть файл не удалось ({why_back}) — обновите "
+                                   "ссылку в Weeek вручную"}
             return {"ok": False, "retry": False,
                     "error": "после переезда сменилась публичная ссылка — файл "
                              "возвращён на место, чтобы ссылка в Weeek не сломалась"}
-        return {"ok": True, "backend": "yandex_disk", "path": dst, "url": after}
+        return {"ok": True, "backend": "yandex_disk", "path": dst, "url": after.get("url")}
     except CloudError as e:
         return {"ok": False, "retry": True, "error": str(e)}
 
