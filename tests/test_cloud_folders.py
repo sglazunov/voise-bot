@@ -145,11 +145,14 @@ class TestВыгрузкаВПодпапку:
 
 
 class _Disk:
-    """Заглушка Диска для move: ссылка до и после переезда — по сценарию."""
+    """Заглушка Диска для move. Сценарий: ссылка после переезда, статус чтения
+    ссылки после переезда, ответ на перемещение, ответ на откат."""
 
-    def __init__(self, after_url):
-        self.urls = {"src": "https://disk.yandex.ru/d/old"}
-        self.after_url = after_url
+    def __init__(self, after_url, after_status=200, move_resp=(201, None),
+                 back_resp=(201, None), src_status=200, dst_exists=False):
+        self.after_url, self.after_status = after_url, after_status
+        self.move_resp, self.back_resp = move_resp, back_resp
+        self.src_status, self.dst_exists = src_status, dst_exists
         self.moves = []
 
     def request(self, method, url, **kw):
@@ -158,28 +161,94 @@ class _Disk:
     def request_json(self, method, url, headers=None, params=None, **kw):
         if url.endswith("/resources/move"):
             self.moves.append((params["from"], params["path"]))
-            return 201, None
+            return self.move_resp if len(self.moves) == 1 else self.back_resp
         if url.endswith("/resources"):
-            path = params["path"]
-            return 200, {"public_url": "https://disk.yandex.ru/d/old" if path.endswith("src")
-                         else self.after_url}
+            if params["path"].endswith("src"):
+                if self.src_status != 200:
+                    return self.src_status, {}
+                return 200, {"public_url": "https://disk.yandex.ru/d/old", "public_key": "K"}
+            if not self.moves and not self.dst_exists:
+                return 404, {}
+            if self.after_status != 200:
+                return self.after_status, {}
+            return 200, {"public_url": self.after_url,
+                         "public_key": "K" if self.after_url and "old" in self.after_url else "K2"}
         return 200, {}
+
+
+@pytest.fixture
+def disk(monkeypatch):
+    def make(*a, **k):
+        d = _Disk(*a, **k)
+        monkeypatch.setattr(yandex_disk, "request", d.request)
+        monkeypatch.setattr(yandex_disk, "request_json", d.request_json)
+        monkeypatch.setattr(yandex_disk.time, "sleep", lambda *_: None)
+        return d
+    return make
+
+
+SRC, DST = "disk:/A/Разовые/src", "disk:/A/ОО/dst"
 
 
 @pytest.mark.parametrize("after,ok", [("https://disk.yandex.ru/d/old", True),
                                       ("https://disk.yandex.ru/d/NEW", False),
                                       (None, False)])
-def test_яндекс_возвращает_файл_если_ссылка_сменилась(monkeypatch, after, ok):
-    d = _Disk(after)
-    monkeypatch.setattr(yandex_disk, "request", d.request)
-    monkeypatch.setattr(yandex_disk, "request_json", d.request_json)
-    res = yandex_disk.move("disk:/A/Разовые/src", "disk:/A/ОО/dst", {"token": "t"})
+def test_яндекс_возвращает_файл_если_ссылка_сменилась(disk, after, ok):
+    d = disk(after)
+    res = yandex_disk.move(SRC, DST, {"token": "t"})
     assert res["ok"] is ok
     if ok:
-        assert d.moves == [("disk:/A/Разовые/src", "disk:/A/ОО/dst")]
+        assert d.moves == [(SRC, DST)]
     else:
-        assert d.moves[-1] == ("disk:/A/ОО/dst", "disk:/A/Разовые/src"), "файл вернули"
+        assert d.moves[-1] == (DST, SRC), "файл вернули"
         assert res["retry"] is False
+
+
+def test_сбой_чтения_ссылки_после_переезда_не_откатывает(disk):
+    """Переезд прошёл, а Диск на чтение ответил 500 — это не «ссылка
+    сменилась»: раньше файл возвращали назад и больше не пробовали."""
+    d = disk("https://disk.yandex.ru/d/old", after_status=500)
+    res = yandex_disk.move(SRC, DST, {"token": "t"})
+    assert res["ok"] and res["path"] == DST and res["url"] == "https://disk.yandex.ru/d/old"
+    assert d.moves == [(SRC, DST)]
+
+
+def test_откат_не_удался_новый_путь_не_теряется(disk):
+    disk("https://disk.yandex.ru/d/NEW", back_resp=(423, {"error": "DiskResourceLockedError"}))
+    res = yandex_disk.move(SRC, DST, {"token": "t"})
+    assert res["ok"] and res["path"] == DST and "вручную" in res["warning"]
+
+
+@pytest.mark.parametrize("code,retry", [("DiskResourceAlreadyExistsError", False),
+                                        ("DiskPathDoesntExistsError", True)])
+def test_разные_409_при_переезде(disk, code, retry):
+    disk("x", move_resp=(409, {"error": code}))
+    res = yandex_disk.move(SRC, DST, {"token": "t"})
+    assert res["ok"] is False and res["retry"] is retry
+
+
+def test_нет_прав_на_чтение_не_повторять(disk):
+    disk("x", src_status=403)
+    res = yandex_disk.move(SRC, DST, {"token": "t"})
+    assert res == {"ok": False, "retry": False, "error": yandex_disk._READ_DENIED}
+
+
+def test_исходника_нет_но_он_уже_в_папке_серии(disk):
+    """Прошлый асинхронный переезд закончился позже 30 с ожидания."""
+    disk("https://disk.yandex.ru/d/old", src_status=404, dst_exists=True)
+    res = yandex_disk.move(SRC, DST, {"token": "t"})
+    assert res["ok"] and res["path"] == DST
+
+
+def test_google_не_создаёт_папку_если_список_не_прочитан(monkeypatch):
+    from app.automation.clouds import gdrive
+    calls = []
+    monkeypatch.setattr(gdrive, "_access_token", lambda cfg: "tok")
+    monkeypatch.setattr(gdrive, "request_json",
+                        lambda m, url, **kw: calls.append(m) or (500, {}))
+    with pytest.raises(gdrive.CloudError):
+        gdrive.child_folder({}, "P", "ОО")
+    assert calls == ["GET"], "POST на создание не уходил"
 
 
 def test_протокол_ложится_в_папку_встречи(monkeypatch, tmp_path):
