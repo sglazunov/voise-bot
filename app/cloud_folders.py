@@ -19,7 +19,7 @@
 from __future__ import annotations
 
 import re
-import time
+from pathlib import Path
 
 from . import logs, meeting_series
 
@@ -61,6 +61,7 @@ def _other_occurrence(entry: dict, date: str) -> bool:
     серии или файл, уже положенный в «Разовые»)."""
     dates = {str(h.get("date") or "") for h in (entry.get("history") or [])}
     dates |= {str(f.get("date") or "") for f in (entry.get("oneoff_files") or [])}
+    dates |= {str(d) for d in (entry.get("seen_dates") or [])}
     dates.discard("")
     return bool(dates - {date})
 
@@ -71,10 +72,10 @@ def resolve(user: str, title: str | None, cfg: dict | None,
 
     {"sub": имя подпапки ('' — раскладка выключена), "kind": "series" |
     "oneoff" | "flat", "key": ключ серии, "date": день встречи}."""
-    date = date or meeting_series.date_from_title(title) or time.strftime("%d.%m.%Y")
+    date = date or meeting_series.meeting_day(title)
     if not enabled(cfg):
         return {"sub": "", "kind": "flat", "key": "", "date": date}
-    key, entry = meeting_series.find(user, title)
+    key, entry = meeting_series.find_exact(user, title)
     oneoff = {"sub": oneoff_name(cfg), "kind": "oneoff", "key": key, "date": date}
     if not key:
         return oneoff
@@ -97,19 +98,25 @@ def resolve(user: str, title: str | None, cfg: dict | None,
 
 
 def placed(user: str, title: str | None, place: dict, up: dict, kind: str) -> None:
-    """Файл лёг в облако. Если в «Разовые» — запомнить путь: когда у названия
-    появится вторая встреча, файл переедет в папку серии."""
-    # «Загружено, но без ссылки» (uploaded) — файл тоже уже лежит в «Разовых».
-    if (place.get("kind") != "oneoff" or not up.get("path")
-            or not (up.get("ok") or up.get("uploaded"))):
+    """Файл лёг в облако: запомнить день встречи у названия (вторая встреча в
+    другой день делает его серией — и серией оно остаётся, даже когда
+    протоколов нет), а если файл в «Разовых» — и его путь для переезда."""
+    if place.get("kind") not in ("oneoff", "series") or not up.get("path"):
+        return
+    # «Загружено, но без ссылки» (uploaded) — файл тоже уже лежит в облаке.
+    if not (up.get("ok") or up.get("uploaded")):
         return
     try:
-        meeting_series.note_oneoff_file(user, title, {
-            "path": str(up["path"]), "backend": up.get("backend") or "",
-            "date": place.get("date") or "", "kind": kind,
-            "url": up.get("url") or ""})
+        item = None
+        # sub_failed — Google не создал подпапку, файл лёг в саму папку
+        # записей: переезжать «к соседу» оттуда нельзя (ревью 28.10).
+        if place["kind"] == "oneoff" and not up.get("sub_failed"):
+            item = {"path": str(up["path"]), "backend": up.get("backend") or "",
+                    "date": place.get("date") or "", "kind": kind,
+                    "url": up.get("url") or ""}
+        meeting_series.note_placement(user, title, place.get("date") or "", item)
     except Exception:  # noqa: BLE001 — раскладка не должна ронять доставку
-        log.warning("Не запомнил файл разовой встречи «%s»", title, exc_info=True)
+        log.warning("Не запомнил выгрузку встречи «%s»", title, exc_info=True)
 
 
 def adopt(user: str, title: str | None, place: dict, cfg: dict, logf=None) -> int:
@@ -118,22 +125,29 @@ def adopt(user: str, title: str | None, place: dict, cfg: dict, logf=None) -> in
     if place.get("kind") != "series":
         return 0
     try:
-        _key, entry = meeting_series.find(user, title)
+        _key, entry = meeting_series.find_exact(user, title)
         pending = list((entry or {}).get("oneoff_files") or [])
         if not pending:
             return 0
         from .automation import clouds
-        moved, keep = 0, []
+        moved, done, tries = 0, set(), {}
         for f in pending:
             res = clouds.move_to_sibling(f, place["sub"], cfg)
+            pth = f.get("path")
             if res.get("ok"):
                 moved += 1
+                done.add(pth)
+                if res.get("warning"):
+                    # Переехал, но ссылка в Weeek могла сломаться — громко.
+                    log.warning("Файл %s: %s", pth, res["warning"])
+                    if logf:
+                        logf(f"⚠ Облако: {Path(str(pth)).name} — {res['warning']}")
             elif res.get("retry") and int(f.get("tries") or 0) < 2:
-                keep.append(dict(f, tries=int(f.get("tries") or 0) + 1))
+                tries[pth] = int(f.get("tries") or 0) + 1
             else:
-                log.warning("Файл %s остался в «Разовых»: %s", f.get("path"),
-                            res.get("error"))
-        meeting_series.set_oneoff_files(user, title, keep)
+                done.add(pth)
+                log.warning("Файл %s остался в «Разовых»: %s", pth, res.get("error"))
+        meeting_series.update_oneoff_files(user, title, done, tries)
         if moved and logf:
             logf(f"Облако: «{place['sub']}» стала серией — {moved} файл(ов) прежних "
                  "встреч перенесено из разовых в её папку.")

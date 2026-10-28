@@ -672,8 +672,10 @@ class JobStore:
             return
         try:
             title = job.context_hint or job.filename
-            date = meeting_series.date_from_title(title) or time.strftime(
-                "%d.%m.%Y", time.localtime(job.created_at))
+            # День — из начала имени файла записи, тем же правилом, что у
+            # раскладки по папкам: дата посреди названия или номер версии
+            # («Ревью 2.4.15») — не день встречи.
+            date = meeting_series.meeting_day(job.filename, job.created_at)
             # Сначала сверка с прошлой встречей (память ещё о ней), потом запись.
             carried = meeting_series.carry_over(job.owner, title, result, job_id=job.id)
             if carried:
@@ -858,11 +860,18 @@ class JobStore:
                 # рядом с видео той же встречи, в папку серии или «Разовые».
                 from . import cloud_folders
                 title = job.context_hint or job.filename
-                place = cloud_folders.resolve(job.owner, title, cfg, date=(
-                    meeting_series.date_from_title(title)
-                    or time.strftime("%d.%m.%Y", time.localtime(job.created_at))))
+                try:
+                    # День — из начала имени файла записи, как у видео той же
+                    # встречи (_meeting_place) и в памяти серии.
+                    place = cloud_folders.resolve(job.owner, title, cfg, date=(
+                        meeting_series.meeting_day(job.filename, job.created_at)))
+                    if place["sub"]:
+                        cloud_folders.adopt(job.owner, title, place, cfg)
+                except Exception:  # noqa: BLE001 — раскладка не роняет доставку
+                    log.warning("Папка встречи для протокола %s не определена",
+                                job.id, exc_info=True)
+                    place = {"sub": "", "kind": "flat"}
                 if place["sub"]:
-                    cloud_folders.adopt(job.owner, title, place, cfg)
                     up = clouds.upload(str(docx_path), f"{base} - протокол.docx", cfg,
                                        subfolder=place["sub"])
                     cloud_folders.placed(job.owner, title, place, up, "protocol")

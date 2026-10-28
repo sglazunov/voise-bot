@@ -106,6 +106,35 @@ def date_from_title(title: str | None) -> str:
 # --------------------------------------------------------------------------- #
 # Хранение
 # --------------------------------------------------------------------------- #
+_DATE_PREFIX_ONLY_RE = re.compile(r"^\s*(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{4})(?!\d)")
+_ISO_PREFIX_ONLY_RE = re.compile(r"^\s*(\d{4})-(\d{2})-(\d{2})(?!\d)")
+
+
+def date_prefix(name: str | None) -> str:
+    """День встречи из НАЧАЛА имени файла записи («20.10.2026, 11:30. - …»).
+    Только начало: дата посреди названия («Подготовка 05.11.2026») или номер
+    версии («Ревью 2.4.15») — это не день встречи."""
+    s = str(name or "")
+    m = _ISO_PREFIX_ONLY_RE.match(s)
+    if m:
+        y, mo, d = m.groups()
+        return f"{int(d):02d}.{int(mo):02d}.{y}"
+    m = _DATE_PREFIX_ONLY_RE.match(s)
+    if not m:
+        return ""
+    d, mo, y = m.groups()
+    return f"{int(d):02d}.{int(mo):02d}.{y}"
+
+
+def meeting_day(name: str | None, ts: float | None = None) -> str:
+    """День проведения: из начала имени файла записи, иначе по времени `ts`.
+    ОДИН источник для видео, протокола и памяти серии — иначе видео и
+    протокол одной встречи получали разные дни, и встреча становилась
+    «серией» сама для себя (ревью 28.10)."""
+    return date_prefix(name) or time.strftime(
+        "%d.%m.%Y", time.localtime(ts) if ts else time.localtime())
+
+
 def _path(team: str) -> Path:
     return security.user_dir(team) / "meeting_series.json"
 
@@ -124,12 +153,14 @@ def _empty_entry(title: str = "") -> dict:
         "folder_mode": "auto",
         "folder": "",            # своё имя папки ('' = название серии)
         "oneoff_files": [],      # файлы, ждущие переезда из «Разовых» в папку серии
+        "seen_dates": [],        # дни встреч с выгрузкой в облако (раскладка)
         "updated_at": 0.0,
     }
 
 
 FOLDER_MODES = ("auto", "series", "oneoff")
 _MAX_ONEOFF_FILES = 20
+_MAX_SEEN_DATES = 30
 
 
 def _clean_entry(raw: dict, key: str) -> dict:
@@ -151,6 +182,9 @@ def _clean_entry(raw: dict, key: str) -> dict:
     fm = str(raw.get("folder_mode") or "auto").strip()
     e["folder_mode"] = fm if fm in FOLDER_MODES else "auto"
     e["folder"] = str(raw.get("folder") or "").strip()[:80]
+    sd = raw.get("seen_dates")
+    e["seen_dates"] = [str(d) for d in sd if d][-_MAX_SEEN_DATES:] \
+        if isinstance(sd, list) else []
     of = raw.get("oneoff_files")
     e["oneoff_files"] = [f for f in of if isinstance(f, dict) and f.get("path")][
         -_MAX_ONEOFF_FILES:] if isinstance(of, list) else []
@@ -177,7 +211,16 @@ def _read(team: str) -> dict:
 def _write(team: str, data: dict) -> None:
     if len(data) > _MAX_SERIES:
         # Самые старые по updated_at — на выход (серии, которых давно нет).
-        keep = sorted(data.items(), key=lambda kv: kv[1].get("updated_at") or 0.0)
+        # Карточки, настроенные человеком, уходят последними: разовые встречи
+        # теперь тоже заводят запись (раскладка по папкам) и иначе вытесняли
+        # бы редкие, но настроенные серии.
+        def _configured(e: dict) -> bool:
+            return bool((e.get("context") or "").strip() or (e.get("preset") or "")
+                        or (e.get("priority") or "normal") != "normal"
+                        or e.get("weeek_project_id") or (e.get("folder") or "")
+                        or (e.get("folder_mode") or "auto") != "auto")
+        keep = sorted(data.items(), key=lambda kv: (_configured(kv[1]),
+                                                     kv[1].get("updated_at") or 0.0))
         data = dict(keep[-_MAX_SERIES:])
     if db.enabled():
         db.series_save(team, data)
@@ -221,6 +264,14 @@ def find(user: str, title: str | None) -> tuple[str, dict | None]:
     data = load(user)
     hit = _match_key(data, key)
     return (hit or key), (data.get(hit) if hit else None)
+
+
+def find_exact(user: str, title: str | None) -> tuple[str, dict | None]:
+    """Как find, но БЕЗ родственных ключей — для раскладки по папкам. Иначе
+    разовая «Встреча» забирала в свою папку «Встречу с юристом» и все
+    «Встречи по ссылке» (ревью 28.10). Родство остаётся для контекста ИИ."""
+    key = series_key(title)
+    return key, (load(user).get(key) if key else None)
 
 
 def list_for_ui(user: str) -> list[dict]:
@@ -291,36 +342,70 @@ def upsert(user: str, key: str, fields: dict) -> dict:
     return {"key": key, **e}
 
 
-def note_oneoff_file(user: str, title: str | None, item: dict) -> None:
-    """Файл встречи лёг в «Разовые встречи» — запомнить его у серии этого
-    названия (серия заводится, если её ещё нет): когда встреча повторится,
-    файл переедет в её папку. Один путь — одна запись."""
+def note_placement(user: str, title: str | None, date: str,
+                   item: dict | None = None) -> None:
+    """Файл встречи лёг в облако: запомнить ДЕНЬ (по нему вторая встреча
+    делает название серией, и серия не «откатывается» в разовые, когда
+    протоколов нет) и, если файл в «Разовых», — его путь для переезда.
+    Ключ — точный (find_exact); карточка заводится, если её нет."""
     key = series_key(title)
-    if not key or not item.get("path"):
+    if not key:
         return
     team = security.team_of(user)
     with _LOCK:
         data = _read(team)
-        hit = _match_key(data, key) or key
-        e = data.get(hit) or _empty_entry(display_title(title))
-        files = [f for f in (e.get("oneoff_files") or []) if f.get("path") != item["path"]]
-        files.append(dict(item))
-        e["oneoff_files"] = files[-_MAX_ONEOFF_FILES:]
+        e = data.get(key) or _empty_entry(display_title(title))
+        if date and date not in (e.get("seen_dates") or []):
+            e["seen_dates"] = ((e.get("seen_dates") or []) + [date])[-_MAX_SEEN_DATES:]
+        if item and item.get("path"):
+            files = [f for f in (e.get("oneoff_files") or [])
+                     if f.get("path") != item["path"]]
+            files.append(dict(item))
+            e["oneoff_files"] = files[-_MAX_ONEOFF_FILES:]
         e["updated_at"] = time.time()
-        data[hit] = e
+        data[key] = e
         _write(team, data)
 
 
-def set_oneoff_files(user: str, title: str | None, files: list) -> None:
-    """Заменить список ожидающих переезда файлов (после переезда — остаток)."""
+def note_oneoff_file(user: str, title: str | None, item: dict) -> None:
+    """Совместимость: файл в «Разовых» (день берётся из item)."""
+    note_placement(user, title, str(item.get("date") or ""), item)
+
+
+def update_oneoff_files(user: str, title: str | None, done: set,
+                        tries: dict | None = None) -> None:
+    """После переезда: убрать из ТЕКУЩЕГО списка обработанные пути и обновить
+    счётчики попыток. Список не заменяется целиком: пока шли сетевые переезды
+    (до 30 с на файл), мог отметиться новый файл — его терять нельзя."""
     key = series_key(title)
     team = security.team_of(user)
     with _LOCK:
         data = _read(team)
-        hit = _match_key(data, key)
-        if not hit:
+        e = data.get(key)
+        if not e:
             return
-        data[hit]["oneoff_files"] = [f for f in files if isinstance(f, dict)][
+        out = []
+        for f in e.get("oneoff_files") or []:
+            pth = f.get("path")
+            if pth in done:
+                continue
+            if tries and pth in tries:
+                f = dict(f, tries=tries[pth])
+            out.append(f)
+        e["oneoff_files"] = out[-_MAX_ONEOFF_FILES:]
+        _write(team, data)
+
+
+def set_oneoff_files(user: str, title: str | None, files: list) -> None:
+    """Заменить список ожидающих переезда файлов целиком (только для ручного
+    сброса; после переезда — update_oneoff_files)."""
+    key = series_key(title)
+    team = security.team_of(user)
+    with _LOCK:
+        data = _read(team)
+        if key not in data:
+            return
+        data[key]["oneoff_files"] = [f for f in files if isinstance(f, dict)][
             -_MAX_ONEOFF_FILES:]
         _write(team, data)
 

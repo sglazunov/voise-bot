@@ -277,3 +277,104 @@ def test_протокол_ложится_в_папку_встречи(monkeypatc
     assert got == {"name": "28.10.2026, 10:00. - Встреча с ОО - протокол.docx",
                    "folder": None, "subfolder": "Встреча с ОО"}
     assert job.protocol_cloud_url == "https://disk.yandex.ru/d/p"
+
+
+class TestРевью28_10:
+    """Находки ревью раскладки (28.10): каждая — сценарий, который ломал
+    правило «видео и протокол одной встречи — в одной папке»."""
+
+    def test_день_только_из_начала_имени(self):
+        assert meeting_series.meeting_day(
+            "28.10.2026, 10:00. - Подготовка к конференции 05.11.2026.mp4") == "28.10.2026"
+        # номер версии — не дата; нет даты в начале → время задачи
+        ts = 1761638400.0                                     # 28.10.2025 UTC
+        import time as _t
+        assert meeting_series.meeting_day("Ревью релиза 2.4.15.mp4", ts) == \
+            _t.strftime("%d.%m.%Y", _t.localtime(ts))
+
+    def test_дата_в_названии_не_делает_встречу_серией_самой_себе(self):
+        u = _user()
+        name = "28.10.2026, 10:00. - Подготовка к конференции 05.11.2026.mp4"
+        day = meeting_series.meeting_day(name)
+        title = "Подготовка к конференции 05.11.2026"           # context_hint из Weeek
+        p_video = cloud_folders.resolve(u, title, CFG, date=day)
+        cloud_folders.placed(u, title, p_video, {"ok": True, "path": "disk:/R/Разовые встречи/v",
+                                                 "backend": "yandex_disk"}, "recording")
+        meeting_series.remember(u, title, {"summary": "x"}, job_id="j", date=day)
+        p_proto = cloud_folders.resolve(u, title, CFG, date=day)
+        assert p_video["kind"] == p_proto["kind"] == "oneoff"
+
+    def test_серия_без_протоколов_не_откатывается_в_разовые(self, monkeypatch):
+        monkeypatch.setattr(clouds, "move_to_sibling", lambda *a: {"ok": True})
+        u, t = _user(), "Ежедневная запись"
+        for day, want in (("20.10.2026", "oneoff"), ("21.10.2026", "series"),
+                          ("22.10.2026", "series"), ("23.10.2026", "series")):
+            p = cloud_folders.resolve(u, t, CFG, date=day)
+            assert p["kind"] == want, day
+            cloud_folders.adopt(u, t, p, CFG)
+            cloud_folders.placed(u, t, p, {"ok": True, "path": f"disk:/R/{p['sub']}/{day}",
+                                           "backend": "yandex_disk"}, "recording")
+
+    def test_короткое_название_не_забирает_чужие_встречи(self):
+        u = _user()
+        p1 = cloud_folders.resolve(u, "Встреча", CFG, date="20.10.2026")
+        cloud_folders.placed(u, "Встреча", p1, {"ok": True, "path": "disk:/R/Разовые встречи/a",
+                                                "backend": "yandex_disk"}, "recording")
+        p2 = cloud_folders.resolve(u, "Встреча с юристом", CFG, date="27.10.2026")
+        assert p2["kind"] == "oneoff"
+
+    def test_файл_отмеченный_во_время_переезда_не_теряется(self, monkeypatch):
+        u, t = _user(), "ОО"
+        p1 = cloud_folders.resolve(u, t, CFG, date="20.10.2026")
+        cloud_folders.placed(u, t, p1, {"ok": True, "path": "disk:/R/Разовые встречи/a",
+                                        "backend": "yandex_disk"}, "recording")
+
+        def slow_move(item, sub, cfg):
+            # пока «идёт» переезд, доставляется протокол той же встречи
+            meeting_series.note_oneoff_file(u, t, {"path": "disk:/R/Разовые встречи/p",
+                                                   "date": "20.10.2026"})
+            return {"ok": True}
+
+        monkeypatch.setattr(clouds, "move_to_sibling", slow_move)
+        p2 = cloud_folders.resolve(u, t, CFG, date="27.10.2026")
+        cloud_folders.adopt(u, t, p2, CFG)
+        left = [f["path"] for f in meeting_series.find_exact(u, t)[1]["oneoff_files"]]
+        assert left == ["disk:/R/Разовые встречи/p"]
+
+    def test_google_без_подпапки_файл_не_переезжает(self):
+        u = _user()
+        p = cloud_folders.resolve(u, "Разовая", CFG, date="20.10.2026")
+        cloud_folders.placed(u, "Разовая", p, {"ok": True, "path": "id1", "backend": "gdrive",
+                                               "sub_failed": True}, "recording")
+        assert meeting_series.find_exact(u, "Разовая")[1]["oneoff_files"] == []
+
+    def test_предупреждение_переезда_видно_в_логе(self, monkeypatch):
+        u, t = _user(), "Серия"
+        p1 = cloud_folders.resolve(u, t, CFG, date="20.10.2026")
+        cloud_folders.placed(u, t, p1, {"ok": True, "path": "disk:/R/Разовые встречи/a.mp4",
+                                        "backend": "yandex_disk"}, "recording")
+        monkeypatch.setattr(clouds, "move_to_sibling",
+                            lambda *a: {"ok": True, "warning": "обновите ссылку в Weeek вручную"})
+        logged = []
+        cloud_folders.adopt(u, t, cloud_folders.resolve(u, t, CFG, date="27.10.2026"),
+                            CFG, logged.append)
+        assert any("вручную" in m and "a.mp4" in m for m in logged)
+
+
+def test_сбой_раскладки_не_роняет_доставку_протокола(monkeypatch, tmp_path):
+    from app.automation import settings as auto_settings
+    from app.jobs import Job, store
+    monkeypatch.setattr(auto_settings, "load", lambda _u: dict(CFG, protocol_folder="disk:/P"))
+    monkeypatch.setattr(cloud_folders, "resolve",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("база легла")))
+    got = {}
+    monkeypatch.setattr(clouds, "upload", lambda *a, **k: got.update(k) or {
+        "ok": True, "url": "https://disk.yandex.ru/d/p", "path": "disk:/P/p"})
+    job = Job(id=uuid.uuid4().hex[:12], filename="28.10.2026, 10:00. - X.mp4", audio_path="",
+              language="ru", diarize=False, owner=_user(), deliver_protocol_cloud=True,
+              status="done")
+    store._jobs[job.id] = job
+    docx = tmp_path / "p.docx"
+    docx.write_bytes(b"d")
+    store._deliver_protocol(job, docx)
+    assert got.get("folder") == "disk:/P" and job.protocol_cloud_url

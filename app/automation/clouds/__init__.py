@@ -107,6 +107,7 @@ def upload(file_path: str, name: str, settings: dict,
                     bcfg, bcfg.get("folder_id") or None, subfolder)
             except Exception as e:  # noqa: BLE001 — без подпапки, но с файлом
                 res = mod.upload(file_path, name, bcfg)
+                res["sub_failed"] = True       # файл не в подпапке — не переезжает
                 if res.get("ok"):
                     res["public_note"] = (f"Папку «{subfolder}» в Google Drive создать "
                                           f"не удалось ({e}) — файл лёг в общую.")
