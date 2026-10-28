@@ -55,7 +55,7 @@ class TestOrphanResume:
         monkeypatch.setattr(sched_mod.auto_settings, "load", lambda u: self._cfg())
         # cloud upload succeeds instantly; waiter thread is irrelevant here
         monkeypatch.setattr(sched_mod.delivery, "upload_with_retry",
-                            lambda out, cfg, log, attempts=1:
+                            lambda out, cfg, log, attempts=1, **_k:
                             {"ok": True, "url": "https://disk/x"})
         monkeypatch.setattr(Scheduler, "_await_and_upload_protocol",
                             lambda self, *a, **k: None)
@@ -200,7 +200,7 @@ class TestЗаписьДоживаетДоПовтора:
         monkeypatch.setattr(sched_mod.time, "sleep", lambda *_: None)
         monkeypatch.setattr(
             sched_mod.delivery, "upload_with_retry",
-            lambda out, cfg, log, attempts=1:
+            lambda out, cfg, log, attempts=1, **_k:
             {"ok": True, "url": "https://disk/x", "backend": "yadisk"})
         s._late_upload("alice", st, {"weeek_token": "tok"}, str(rec))
 

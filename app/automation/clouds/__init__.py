@@ -58,11 +58,14 @@ def publish(remote_path: str, settings: dict, backend: str | None = None) -> dic
 
 
 def upload(file_path: str, name: str, settings: dict,
-           backend: str | None = None, folder: str | None = None) -> dict:
+           backend: str | None = None, folder: str | None = None,
+           subfolder: str | None = None) -> dict:
     """Upload `file_path` as `name` to the chosen (or selected) cloud.
 
     `folder` overrides the destination folder for this one upload (e.g. put
-    protocols in a different folder than the recordings)."""
+    protocols in a different folder than the recordings). `subfolder` — папка
+    встречи внутри неё (docs/ТЗ-ПАПКИ-ВСТРЕЧ.md): имя серии или «Разовые
+    встречи»; создаётся при первой заливке."""
     key = backend or settings.get("cloud") or "local"
     entry = BACKENDS.get(key)
     if not entry:
@@ -94,4 +97,52 @@ def upload(file_path: str, name: str, settings: dict,
                 bcfg["folder_id"] = folder
         else:  # yandex_disk
             bcfg["folder"] = folder
+    if subfolder:
+        if key == "local":
+            base = (bcfg.get("local_dir") or "").strip() or str(config.DATA_DIR / "recordings")
+            bcfg["local_dir"] = str(Path(base) / subfolder)
+        elif key == "gdrive":
+            try:
+                bcfg["folder_id"] = gdrive.child_folder(
+                    bcfg, bcfg.get("folder_id") or None, subfolder)
+            except Exception as e:  # noqa: BLE001 — без подпапки, но с файлом
+                res = mod.upload(file_path, name, bcfg)
+                if res.get("ok"):
+                    res["public_note"] = (f"Папку «{subfolder}» в Google Drive создать "
+                                          f"не удалось ({e}) — файл лёг в общую.")
+                return res
+        else:  # yandex_disk
+            base = (bcfg.get("folder") or "disk:/Телемост-записи").rstrip("/")
+            bcfg["folder"] = f"{base}/{subfolder}"
     return mod.upload(file_path, name, bcfg)
+
+
+def move_to_sibling(item: dict, subfolder: str, settings: dict) -> dict:
+    """Переложить уже выгруженный файл из его папки (обычно «Разовые встречи»)
+    в соседнюю `subfolder` — папку серии. item: {path, backend}."""
+    key = item.get("backend") or settings.get("cloud") or "local"
+    path = str(item.get("path") or "")
+    if not path:
+        return {"ok": False, "retry": False, "error": "нет пути к файлу"}
+    if key == "yandex_disk":
+        parent, _, fname = path.rpartition("/")
+        root = parent.rpartition("/")[0]
+        if not root or not fname:
+            return {"ok": False, "retry": False, "error": f"непонятный путь {path}"}
+        return yandex_disk.move(path, f"{root}/{subfolder}/{fname}",
+                                _backend_cfg(settings, key))
+    if key == "gdrive":
+        return gdrive.move_to_sibling(path, subfolder, _backend_cfg(settings, key))
+    if key == "local":
+        import os
+        src = Path(path)
+        if not src.exists():
+            return {"ok": False, "retry": False, "error": "файла уже нет"}
+        dst = src.parent.parent / subfolder / src.name
+        if dst.exists():
+            return {"ok": False, "retry": False,
+                    "error": "в папке серии уже есть файл с таким именем"}
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(src, dst)
+        return {"ok": True, "backend": "local", "path": str(dst), "url": dst.as_uri()}
+    return {"ok": False, "retry": False, "error": f"неизвестное облако {key}"}

@@ -14,6 +14,14 @@ type Series = {
   key: string; title: string; context: string; preset: string; priority: string;
   weeek_project_id: string | null; last_date: string; last_summary: string;
   open_tasks: number; meetings: number;
+  folder_mode: string; folder: string; oneoff_files: number;
+};
+// Папка в облаке (docs/ТЗ-ПАПКИ-ВСТРЕЧ.md): видео и протокол серии лежат в
+// одной подпапке с её названием, встречи без серии — в «Разовых встречах».
+const FOLDER_LABELS: Record<string, string> = {
+  auto: "авто — своя папка со второй встречи",
+  series: "своя папка серии сразу",
+  oneoff: "в «Разовые встречи»",
 };
 const PRIORITY_LABELS: Record<string, string> = {
   normal: "обычный", urgent: "срочный протокол", record_only: "только запись, без протокола",
@@ -31,7 +39,8 @@ function SeriesCard({ s, presets, onChanged, onDeleted }:
     setSaving(true);
     try {
       const r = await api.post("/api/series", { key: s.key, title: d.title, context: d.context,
-        preset: d.preset, priority: d.priority, weeek_project_id: d.weeek_project_id ?? "" });
+        preset: d.preset, priority: d.priority, weeek_project_id: d.weeek_project_id ?? "",
+        folder_mode: d.folder_mode || "auto", folder: d.folder ?? "" });
       toast("Карточка серии сохранена"); onChanged(r);
     } catch (e: any) { toast(e.message, true); } finally { setSaving(false); }
   }
@@ -77,6 +86,24 @@ function SeriesCard({ s, presets, onChanged, onDeleted }:
           <label className="lbl" htmlFor={id("wp")}>Проект Weeek для задач (id)</label>
           <input id={id("wp")} className="field" value={d.weeek_project_id || ""} placeholder="как в настройках Weeek"
             onChange={(e) => setD({ ...d, weeek_project_id: e.target.value })} />
+        </div>
+      </div>
+      <div className="grid md:grid-cols-3 gap-3 mt-2">
+        <div>
+          <label className="lbl" htmlFor={id("fmode")}>Папка в облаке (видео и протоколы)</label>
+          <select id={id("fmode")} className="field" value={d.folder_mode || "auto"}
+            onChange={(e) => setD({ ...d, folder_mode: e.target.value })}>
+            {Object.entries(FOLDER_LABELS).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+          </select>
+        </div>
+        <div className="md:col-span-2">
+          <label className="lbl" htmlFor={id("fname")}>Имя папки (пусто — как название серии)</label>
+          <input id={id("fname")} className="field" value={d.folder || ""} placeholder={d.title}
+            disabled={d.folder_mode === "oneoff"} onChange={(e) => setD({ ...d, folder: e.target.value })} />
+          {!!s.oneoff_files && (
+            <div className="text-[11.5px] mt-1" style={{ color: "var(--muted)" }}>
+              В «Разовых встречах» лежит файлов этой серии: {s.oneoff_files} — переедут в её папку
+              при следующей выгрузке.</div>)}
         </div>
       </div>
       {s.last_summary && (
