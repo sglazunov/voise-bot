@@ -12,6 +12,7 @@ data/
 
 # Build / test logs
 build*.log
+logs/
 
 # OS / editor
 .DS_Store

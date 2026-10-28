@@ -16,6 +16,24 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# SSH до сервера рвётся посреди сборки («client_loop: send disconnect:
+# Connection reset», 28.10) — и скрипт умирал вместе с сессией, иногда между
+# остановкой старого контейнера и запуском нового. Поэтому из терминала он
+# перезапускает себя в отдельной сессии (обрыв SSH её не задевает), а на экран
+# выводит журнал. Связь оборвалась — обновление идёт дальше; журнал остаётся в
+# logs/update-*.log, досмотреть: tail -f logs/update-*.log
+if [ -z "${VTX_UPDATE_DETACHED:-}" ] && [ -t 1 ]; then
+  mkdir -p logs
+  LOG="logs/update-$(date +%Y%m%d-%H%M%S).log"
+  VTX_UPDATE_DETACHED=1 setsid -w nohup bash scripts/update.sh "$@" \
+    >"$LOG" 2>&1 </dev/null &
+  PID=$!
+  echo "==> Обновление идёт в фоне и переживёт обрыв SSH. Журнал: $LOG"
+  tail -n +1 --pid="$PID" -f "$LOG" || true
+  rc=0; wait "$PID" || rc=$?
+  exit "$rc"
+fi
+
 FORCE=0
 [ "${1:-}" = "--force" ] && FORCE=1
 
