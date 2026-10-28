@@ -56,10 +56,12 @@ def _has_signals(entry: dict) -> bool:
                 or (entry.get("folder") or "").strip())
 
 
-def _other_occurrence(entry: dict, date: str) -> bool:
+def _other_occurrence(entry: dict, date: str, extra_days=None) -> bool:
     """Была ли у этого названия встреча в ДРУГОЙ день (протокол в истории
-    серии или файл, уже положенный в «Разовые»)."""
-    dates = {str(h.get("date") or "") for h in (entry.get("history") or [])}
+    серии, файл, уже положенный в «Разовые», или — при раскладке архива —
+    другой файл того же названия в облаке)."""
+    dates = {str(d) for d in (extra_days or ())}
+    dates |= {str(h.get("date") or "") for h in (entry.get("history") or [])}
     dates |= {str(f.get("date") or "") for f in (entry.get("oneoff_files") or [])}
     dates |= {str(d) for d in (entry.get("seen_dates") or [])}
     dates.discard("")
@@ -67,7 +69,7 @@ def _other_occurrence(entry: dict, date: str) -> bool:
 
 
 def resolve(user: str, title: str | None, cfg: dict | None,
-            date: str | None = None) -> dict:
+            date: str | None = None, extra_days=None) -> dict:
     """Куда положить файлы встречи `title`.
 
     {"sub": имя подпапки ('' — раскладка выключена), "kind": "series" |
@@ -83,7 +85,7 @@ def resolve(user: str, title: str | None, cfg: dict | None,
     mode = entry.get("folder_mode") or "auto"
     if mode == "oneoff":
         return oneoff
-    if mode == "series" or _has_signals(entry) or _other_occurrence(entry, date):
+    if mode == "series" or _has_signals(entry) or _other_occurrence(entry, date, extra_days):
         # Название карточки — если человек его писал; автоматическое название,
         # совпадающее с ключом (всё строчными), хуже названия самой встречи.
         card_title = entry.get("title") or ""

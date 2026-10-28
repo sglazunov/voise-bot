@@ -113,8 +113,7 @@ def upload(file_path: str, name: str, settings: dict,
                                           f"не удалось ({e}) — файл лёг в общую.")
                 return res
         else:  # yandex_disk
-            base = (bcfg.get("folder") or "disk:/Телемост-записи").rstrip("/")
-            bcfg["folder"] = f"{base}/{subfolder}"
+            bcfg["folder"] = f"{yandex_disk.meetings_root(bcfg)}/{subfolder}"
     return mod.upload(file_path, name, bcfg)
 
 

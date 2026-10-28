@@ -37,6 +37,19 @@ def readiness(cfg: dict) -> dict:
     return {"ready": True, "detail": f"Папка: {cfg.get('folder') or 'disk:/'}"}
 
 
+DEFAULT_FOLDER = "disk:/Телемост-записи"
+
+
+def meetings_root(cfg: dict) -> str:
+    """Папка, ВНУТРИ которой живут папки встреч (docs/ТЗ-ПАПКИ-ВСТРЕЧ.md).
+    Владелец 28.10: «папки не должны быть разбросаны по всему диску» — если в
+    настройке пусто или стоит корень Диска, берётся «Телемост-записи»."""
+    folder = (cfg.get("folder") or "").strip().rstrip("/")
+    if folder in ("", "disk:", "disk:/", "/") or not folder.replace("disk:", "").strip("/"):
+        return DEFAULT_FOLDER
+    return folder
+
+
 def _ensure_folder(folder: str, headers: dict, strict: bool = False) -> None:
     """Create the folder (and parents) if missing. 409 = already exists.
 
@@ -204,16 +217,46 @@ def move(src: str, dst: str, cfg: dict) -> dict:
                 # Вернуть не вышло — файл остался в папке серии; отдаём новый
                 # путь, иначе следующий заход искал бы его по старому.
                 return {"ok": True, "backend": "yandex_disk", "path": dst,
-                        "url": after.get("url"),
+                        "url": after.get("url"), "link_changed": True,
                         "warning": "после переезда сменилась публичная ссылка, а "
                                    f"вернуть файл не удалось ({why_back}) — обновите "
                                    "ссылку в Weeek вручную"}
-            return {"ok": False, "retry": False,
+            return {"ok": False, "retry": False, "link_changed": True,
                     "error": "после переезда сменилась публичная ссылка — файл "
                              "возвращён на место, чтобы ссылка в Weeek не сломалась"}
         return {"ok": True, "backend": "yandex_disk", "path": dst, "url": after.get("url")}
     except CloudError as e:
         return {"ok": False, "retry": True, "error": str(e)}
+
+
+_LIST_PAGE = 500
+
+
+def list_folder(folder: str, cfg: dict) -> list[dict]:
+    """Файлы, лежащие прямо в папке (без вложенных): [{name, path}].
+    Нужен доступ на чтение — как и для ссылки (токен чтения, если основной
+    только на запись). Нет папки — пустой список."""
+    out: list[dict] = []
+    offset = 0
+    while True:
+        status, info = request_json(
+            "GET", f"{API}/resources", headers=_read_auth(cfg),
+            params={"path": folder, "limit": _LIST_PAGE, "offset": offset,
+                    "fields": "_embedded.items.name,_embedded.items.path,"
+                              "_embedded.items.type,_embedded.total"})
+        if status == 404:
+            return out
+        if status in (401, 403):
+            raise CloudError(_READ_DENIED.replace("переложить файл", "прочитать папку"))
+        if status != 200 or not isinstance(info, dict):
+            raise CloudError(f"Яндекс.Диск не отдал список {folder} (HTTP {status}).")
+        emb = info.get("_embedded") or {}
+        items = emb.get("items") or []
+        out += [{"name": i.get("name"), "path": i.get("path")} for i in items
+                if i.get("type") == "file" and i.get("name") and i.get("path")]
+        offset += len(items)
+        if not items or offset >= int(emb.get("total") or 0):
+            return out
 
 
 def upload(file_path: str, name: str, cfg: dict) -> dict:

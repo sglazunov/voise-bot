@@ -68,6 +68,9 @@ def series_key(title: str | None) -> str:
     s = _COPY_SUFFIX_RE.sub("", s)
     s = _DATE_PREFIX_RE.sub("", s)
     s = _PROTOCOL_SUFFIX_RE.sub("", s)
+    # Протокол второй части записи: «… (2) - протокол.docx» — номер стоит
+    # перед суффиксом протокола и до его снятия не виден.
+    s = _COPY_SUFFIX_RE.sub("", s)
     s = s.lower().replace("ё", "е")
     s = re.sub(r"[^\w]+", " ", s, flags=re.UNICODE)
     return re.sub(r"\s+", " ", s).strip()
@@ -80,6 +83,7 @@ def display_title(title: str | None) -> str:
     s = _COPY_SUFFIX_RE.sub("", s)
     s = _DATE_PREFIX_RE.sub("", s)
     s = _PROTOCOL_SUFFIX_RE.sub("", s)
+    s = _COPY_SUFFIX_RE.sub("", s)
     return s.strip(" -–—.") or str(title or "").strip()
 
 
