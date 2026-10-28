@@ -110,6 +110,62 @@ def publish(remote: str, cfg: dict) -> dict:
     return {"ok": False, "backend": "yandex_disk", "path": remote, "error": note}
 
 
+def _public_url(path: str, cfg: dict) -> tuple[str | None, int]:
+    status, meta = request_json("GET", f"{API}/resources", headers=_read_auth(cfg),
+                                params={"path": path, "fields": "public_url"})
+    return ((meta or {}).get("public_url") if status == 200 else None), status
+
+
+def _move_once(src: str, dst: str, headers: dict) -> tuple[bool, str]:
+    """Переместить файл; асинхронный ответ (202) дождаться до 30 с."""
+    status, info = request_json("POST", f"{API}/resources/move", headers=headers,
+                                params={"from": src, "path": dst, "overwrite": "false"})
+    if status == 201:
+        return True, ""
+    if status == 409:
+        return False, "в папке серии уже есть файл с таким именем"
+    if status == 202 and isinstance(info, dict) and info.get("href"):
+        for _ in range(30):
+            st, op = request_json("GET", info["href"], headers=headers)
+            state = (op or {}).get("status") if st == 200 else None
+            if state == "success":
+                return True, ""
+            if state == "failed":
+                return False, "Диск не смог переместить файл"
+            time.sleep(1)
+        return False, "перемещение не закончилось за 30 с"
+    return False, f"перемещение отклонено (HTTP {status})"
+
+
+def move(src: str, dst: str, cfg: dict) -> dict:
+    """Переложить уже опубликованный файл в другую папку (docs/ТЗ-ПАПКИ-ВСТРЕЧ.md).
+
+    ⚠️ Ссылка на файл уже стоит в Weeek. Поэтому ссылку сверяем ДО и ПОСЛЕ:
+    если после переезда она другая или пропала — файл возвращается на место, а
+    переезд считается несостоявшимся. Сохранность ссылки при перемещении на
+    живом Диске не проверена — проверка здесь и есть страховка."""
+    try:
+        headers = _auth(cfg)
+        before, st = _public_url(src, cfg)
+        if st == 404:
+            return {"ok": False, "retry": False, "error": "файла уже нет на Диске"}
+        if st != 200:
+            return {"ok": False, "retry": True, "error": f"Диск не ответил (HTTP {st})"}
+        _ensure_folder(dst.rsplit("/", 1)[0], headers)
+        ok, why = _move_once(src, dst, headers)
+        if not ok:
+            return {"ok": False, "retry": "уже есть" not in why, "error": why}
+        after, _st = _public_url(dst, cfg)
+        if before and after != before:
+            _move_once(dst, src, headers)
+            return {"ok": False, "retry": False,
+                    "error": "после переезда сменилась публичная ссылка — файл "
+                             "возвращён на место, чтобы ссылка в Weeek не сломалась"}
+        return {"ok": True, "backend": "yandex_disk", "path": dst, "url": after}
+    except CloudError as e:
+        return {"ok": False, "retry": True, "error": str(e)}
+
+
 def upload(file_path: str, name: str, cfg: dict) -> dict:
     src = Path(file_path)
     if not src.exists():

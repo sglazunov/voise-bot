@@ -99,7 +99,8 @@ def _needs_link(up: dict) -> bool:
     return bool(up.get("ok")) and up.get("backend") != "local" and not up.get("url")
 
 
-def upload_with_retry(out: str, cfg: dict, log, attempts: int = 3) -> dict:
+def upload_with_retry(out: str, cfg: dict, log, attempts: int = 3,
+                      subfolder: str | None = None) -> dict:
     """Upload the recording, retrying a few times with a pause — one network
     hiccup must not leave a meeting's video stranded on the server.
 
@@ -119,7 +120,7 @@ def upload_with_retry(out: str, cfg: dict, log, attempts: int = 3) -> dict:
                         else dict(last, error="файл загружен в облако, но публичная ссылка "
                                   f"не получена: {res.get('error') or last.get('error')}"))
             else:
-                last = clouds.upload(out, Path(out).name, cfg)
+                last = clouds.upload(out, Path(out).name, cfg, subfolder=subfolder)
         except Exception as e:  # noqa: BLE001 — an uploader bug isn't fatal
             last = {"ok": False, "error": str(e)}
         if _needs_link(last):
@@ -132,7 +133,8 @@ def upload_with_retry(out: str, cfg: dict, log, attempts: int = 3) -> dict:
     return last or {"ok": False, "error": "облако недоступно"}
 
 
-def publish_or_upload(out: str, cfg: dict, cloud_path: str | None, log) -> dict:
+def publish_or_upload(out: str, cfg: dict, cloud_path: str | None, log,
+                      subfolder: str | None = None) -> dict:
     """Поздняя дозагрузка: если файл уже на Диске — только опубликовать
     (секунды), иначе — обычная выгрузка одной попыткой."""
     if cloud_path:
@@ -144,7 +146,7 @@ def publish_or_upload(out: str, cfg: dict, cloud_path: str | None, log) -> dict:
             return {"ok": True, "backend": res.get("backend"), "url": res.get("url"),
                     "path": cloud_path}
         log(f"Облако: повторная публикация не удалась — {res.get('error')}")
-    return upload_with_retry(out, cfg, log, attempts=1)
+    return upload_with_retry(out, cfg, log, attempts=1, subfolder=subfolder)
 
 
 def delivered_elsewhere(up: dict, out: str) -> bool:

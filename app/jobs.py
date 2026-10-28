@@ -854,8 +854,21 @@ class JobStore:
             # A Weeek link needs a public URL, so uploading is required either way.
             if not url:
                 base = Path(job.filename or "protocol").stem
-                up = clouds.upload(str(docx_path), f"{base} - протокол.docx", cfg,
-                                   folder=(cfg.get("protocol_folder") or "").strip() or None)
+                # Папка встречи (docs/ТЗ-ПАПКИ-ВСТРЕЧ.md): протокол ложится
+                # рядом с видео той же встречи, в папку серии или «Разовые».
+                from . import cloud_folders
+                title = job.context_hint or job.filename
+                place = cloud_folders.resolve(job.owner, title, cfg, date=(
+                    meeting_series.date_from_title(title)
+                    or time.strftime("%d.%m.%Y", time.localtime(job.created_at))))
+                if place["sub"]:
+                    cloud_folders.adopt(job.owner, title, place, cfg)
+                    up = clouds.upload(str(docx_path), f"{base} - протокол.docx", cfg,
+                                       subfolder=place["sub"])
+                    cloud_folders.placed(job.owner, title, place, up, "protocol")
+                else:
+                    up = clouds.upload(str(docx_path), f"{base} - протокол.docx", cfg,
+                                       folder=(cfg.get("protocol_folder") or "").strip() or None)
                 if up.get("ok") and not up.get("url") and up.get("path"):
                     # Лёг в облако, но публикация не прошла (17.09): пробуем
                     # опубликовать ещё раз, не заливая файл заново.

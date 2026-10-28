@@ -21,12 +21,15 @@ export default function CloudPage() {
   const yd = s.yandex_disk || {};
   const gd = s.gdrive || {};
   const cloud = s.cloud || "local";
+  const split = s.folders_by_series !== false;
 
   async function onSave() {
     try {
       // Пустая строка = «очистить». null бэкенд трактует как «поле не меняли»,
       // из-за чего папку протоколов нельзя было стереть.
       const patch: any = { cloud, protocol_folder: s.protocol_folder ?? "",
+        folders_by_series: s.folders_by_series !== false,
+        oneoff_folder: s.oneoff_folder ?? "",
         yandex_disk: { folder: yd.folder ?? "" },
         gdrive: { folder_id: gd.folder_id ?? "" } };
       if (ytoken.trim()) patch.yandex_disk.token = ytoken.trim();
@@ -72,10 +75,10 @@ export default function CloudPage() {
             placeholder={yd.token ? "•••••••• сохранён" : "вставьте токен"} />
           <div className="text-[12px] mt-1.5" style={{ color: "var(--muted)" }}>scope: disk.read + disk.write</div>
           <div className="grid md:grid-cols-2 gap-3 mt-3">
-            <div><label className="lbl">Папка для записи</label>
+            <div><label className="lbl">{split ? "Папка встреч (видео и протоколы)" : "Папка для записи"}</label>
               <input className="field" value={yd.folder || ""} onChange={(e) => set("yandex_disk", { ...yd, folder: e.target.value })} placeholder="disk:/Телемост/Записи" /></div>
-            <div><label className="lbl">Папка для протокола</label>
-              <input className="field" value={s.protocol_folder || ""} onChange={(e) => set("protocol_folder", e.target.value)} placeholder="disk:/Телемост/Протоколы" /></div>
+            <div><label className="lbl">Папка для протокола{split ? " — не используется при раскладке по встречам" : ""}</label>
+              <input className="field" value={s.protocol_folder || ""} disabled={split} onChange={(e) => set("protocol_folder", e.target.value)} placeholder="disk:/Телемост/Протоколы" /></div>
           </div>
           <div className="flex gap-2.5 mt-3">
             <button className="btn btn-primary" onClick={onSave} disabled={!ready}>Сохранить</button>
@@ -110,8 +113,8 @@ export default function CloudPage() {
                 placeholder="пусто = корень My Drive" /></div>
           </div>
           <div className="mt-3">
-            <label className="lbl">Папка для протокола</label>
-            <input className="field" value={s.protocol_folder || ""}
+            <label className="lbl">Папка для протокола{split ? " — не используется при раскладке по встречам" : ""}</label>
+            <input className="field" value={s.protocol_folder || ""} disabled={split}
               onChange={(e) => set("protocol_folder", e.target.value)}
               placeholder="ID папки; пусто = туда же, куда запись" />
           </div>
@@ -121,6 +124,21 @@ export default function CloudPage() {
           </div>
         </Card>
       )}
+      <Card>
+        <div className="font-bold text-[15px]">Раскладка по встречам</div>
+        <div className="text-[12px] mb-3" style={{ color: "var(--muted)" }}>
+          Видео и протокол каждой встречи ложатся в папку с её названием внутри папки записей:
+          «ОО», «Виртуальный помощник»… Встреча, которой раньше не было, — в общую папку разовых;
+          когда она повторится, станет серией, и её файлы переедут в свою папку. Свою папку или
+          «разовая» можно задать на карточке серии («Контекст для ИИ» → «Повторяющиеся встречи»).</div>
+        <label className="flex items-center gap-2 text-[13px] mb-3">
+          <input type="checkbox" checked={split} onChange={(e) => set("folders_by_series", e.target.checked)} />
+          Раскладывать по папкам встреч</label>
+        <label className="lbl">Папка для разовых встреч</label>
+        <input className="field" value={s.oneoff_folder ?? "Разовые встречи"} disabled={!split}
+          onChange={(e) => set("oneoff_folder", e.target.value)} placeholder="Разовые встречи" />
+        <div className="flex gap-2.5 mt-3"><button className="btn btn-primary" onClick={onSave} disabled={!ready}>Сохранить</button></div>
+      </Card>
       {cloud !== "yandex_disk" && cloud !== "gdrive" && (
         <Card><div className="flex gap-2.5"><button className="btn btn-primary" onClick={onSave} disabled={!ready}>Сохранить</button></div></Card>
       )}

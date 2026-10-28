@@ -119,8 +119,17 @@ def _empty_entry(title: str = "") -> dict:
         "weeek_project_id": None,  # куда заводить задачи из протокола этой серии
         "last": None,            # память о прошлой встрече (см. remember)
         "history": [],           # [{date, job_id, tasks, decisions}] — последние
+        # Папка в облаке (docs/ТЗ-ПАПКИ-ВСТРЕЧ.md): auto — серией считается
+        # с второй встречи; series — своя папка сразу; oneoff — «Разовые».
+        "folder_mode": "auto",
+        "folder": "",            # своё имя папки ('' = название серии)
+        "oneoff_files": [],      # файлы, ждущие переезда из «Разовых» в папку серии
         "updated_at": 0.0,
     }
+
+
+FOLDER_MODES = ("auto", "series", "oneoff")
+_MAX_ONEOFF_FILES = 20
 
 
 def _clean_entry(raw: dict, key: str) -> dict:
@@ -139,6 +148,12 @@ def _clean_entry(raw: dict, key: str) -> dict:
     hist = raw.get("history")
     e["history"] = [h for h in hist if isinstance(h, dict)][-_MAX_HISTORY:] \
         if isinstance(hist, list) else []
+    fm = str(raw.get("folder_mode") or "auto").strip()
+    e["folder_mode"] = fm if fm in FOLDER_MODES else "auto"
+    e["folder"] = str(raw.get("folder") or "").strip()[:80]
+    of = raw.get("oneoff_files")
+    e["oneoff_files"] = [f for f in of if isinstance(f, dict) and f.get("path")][
+        -_MAX_ONEOFF_FILES:] if isinstance(of, list) else []
     try:
         e["updated_at"] = float(raw.get("updated_at") or 0.0)
     except (TypeError, ValueError):
@@ -227,6 +242,9 @@ def list_for_ui(user: str) -> list[dict]:
             "last_summary": last.get("summary", ""),
             "open_tasks": len(last.get("tasks") or []),
             "meetings": len(e.get("history") or []),
+            "folder_mode": e.get("folder_mode") or "auto",
+            "folder": e.get("folder") or "",
+            "oneoff_files": len(e.get("oneoff_files") or []),
             "updated_at": e.get("updated_at", 0.0),
         })
     out.sort(key=lambda x: -(x["updated_at"] or 0.0))
@@ -239,13 +257,16 @@ def list_for_ui(user: str) -> list[dict]:
 def upsert(user: str, key: str, fields: dict) -> dict:
     """Создать/обновить карточку серии. `key` — ключ серии или любое название
     (нормализуется здесь). Память о прошлой встрече не трогается."""
+    raw_name = key
     key = series_key(key)
     if not key:
         raise ValueError("Пустое название серии.")
     team = security.team_of(user)
     with _LOCK:
         data = _read(team)
-        e = data.get(key) or _empty_entry(key)
+        # Новая карточка берёт название как его написали («Встреча с ОО»), а не
+        # нормализованный ключ: из названия делается имя папки в облаке.
+        e = data.get(key) or _empty_entry(display_title(raw_name) or key)
         f = fields or {}
         if "title" in f:
             e["title"] = str(f.get("title") or "").strip()[:200] or e["title"] or key
@@ -259,10 +280,49 @@ def upsert(user: str, key: str, fields: dict) -> dict:
         if "weeek_project_id" in f:
             wp = f.get("weeek_project_id")
             e["weeek_project_id"] = (str(wp).strip()[:40] or None) if wp not in (None, "") else None
+        if "folder_mode" in f:
+            fm = str(f.get("folder_mode") or "auto").strip()
+            e["folder_mode"] = fm if fm in FOLDER_MODES else "auto"
+        if "folder" in f:
+            e["folder"] = str(f.get("folder") or "").strip()[:80]
         e["updated_at"] = time.time()
         data[key] = e
         _write(team, data)
     return {"key": key, **e}
+
+
+def note_oneoff_file(user: str, title: str | None, item: dict) -> None:
+    """Файл встречи лёг в «Разовые встречи» — запомнить его у серии этого
+    названия (серия заводится, если её ещё нет): когда встреча повторится,
+    файл переедет в её папку. Один путь — одна запись."""
+    key = series_key(title)
+    if not key or not item.get("path"):
+        return
+    team = security.team_of(user)
+    with _LOCK:
+        data = _read(team)
+        hit = _match_key(data, key) or key
+        e = data.get(hit) or _empty_entry(display_title(title))
+        files = [f for f in (e.get("oneoff_files") or []) if f.get("path") != item["path"]]
+        files.append(dict(item))
+        e["oneoff_files"] = files[-_MAX_ONEOFF_FILES:]
+        e["updated_at"] = time.time()
+        data[hit] = e
+        _write(team, data)
+
+
+def set_oneoff_files(user: str, title: str | None, files: list) -> None:
+    """Заменить список ожидающих переезда файлов (после переезда — остаток)."""
+    key = series_key(title)
+    team = security.team_of(user)
+    with _LOCK:
+        data = _read(team)
+        hit = _match_key(data, key)
+        if not hit:
+            return
+        data[hit]["oneoff_files"] = [f for f in files if isinstance(f, dict)][
+            -_MAX_ONEOFF_FILES:]
+        _write(team, data)
 
 
 def delete(user: str, key: str) -> bool:

@@ -634,6 +634,8 @@ class SeriesBody(BaseModel):
     preset: str | None = None
     priority: str | None = None
     weeek_project_id: str | int | None = None
+    folder_mode: str | None = None       # auto | series | oneoff (папка в облаке)
+    folder: str | None = None            # своё имя папки серии
 
 
 @app.post("/api/series")

@@ -91,6 +91,61 @@ def _access_token(cfg: dict) -> str:
     return data["access_token"]
 
 
+_FOLDER_MIME = "application/vnd.google-apps.folder"
+
+
+def child_folder(cfg: dict, parent: str | None, name: str) -> str:
+    """Id подпапки `name` в `parent` (None — корень My Drive); нет — создать.
+    ⚠️ Права drive.file видят только созданное приложением: папку с тем же
+    именем, заведённую руками, бот не найдёт и создаст рядом свою."""
+    token = _access_token(cfg)
+    auth = {"Authorization": f"Bearer {token}"}
+    esc = name.replace("\\", "\\\\").replace("'", "\\'")
+    q = (f"name = '{esc}' and mimeType = '{_FOLDER_MIME}' and trashed = false "
+         f"and '{parent or 'root'}' in parents")
+    status, data = request_json("GET", FILES_URL, headers=auth,
+                                params={"q": q, "fields": "files(id)", "pageSize": "1"})
+    if status == 200 and isinstance(data, dict) and data.get("files"):
+        return data["files"][0]["id"]
+    meta = {"name": name, "mimeType": _FOLDER_MIME}
+    if parent:
+        meta["parents"] = [parent]
+    status, data = request_json(
+        "POST", FILES_URL, params={"fields": "id"},
+        headers={**auth, "Content-Type": "application/json"},
+        data=json.dumps(meta, ensure_ascii=False).encode("utf-8"))
+    if status not in (200, 201) or not isinstance(data, dict) or "id" not in data:
+        raise CloudError(f"Google Drive не создал папку «{name}» ({status}).")
+    return data["id"]
+
+
+def move_to_sibling(file_id: str, sub: str, cfg: dict) -> dict:
+    """Переложить файл из его папки в соседнюю `sub` (той же родительской).
+    Ссылка у Google — id файла, при переезде она не меняется."""
+    try:
+        token = _access_token(cfg)
+        auth = {"Authorization": f"Bearer {token}"}
+        st, meta = request_json("GET", f"{FILES_URL}/{file_id}", headers=auth,
+                                params={"fields": "parents"})
+        if st == 404:
+            return {"ok": False, "retry": False, "error": "файла уже нет"}
+        old = ((meta or {}).get("parents") or [None])[0] if st == 200 else None
+        if not old:
+            return {"ok": False, "retry": True, "error": f"Google Drive не ответил ({st})"}
+        st, pm = request_json("GET", f"{FILES_URL}/{old}", headers=auth,
+                              params={"fields": "parents"})
+        root = ((pm or {}).get("parents") or [None])[0] if st == 200 else None
+        new = child_folder(cfg, root, sub)
+        st, _ = request_json("PATCH", f"{FILES_URL}/{file_id}", headers=auth,
+                             params={"addParents": new, "removeParents": old,
+                                     "fields": "id"})
+        if st != 200:
+            return {"ok": False, "retry": True, "error": f"перемещение отклонено ({st})"}
+        return {"ok": True, "backend": "gdrive", "path": file_id}
+    except CloudError as e:
+        return {"ok": False, "retry": True, "error": str(e)}
+
+
 def upload(file_path: str, name: str, cfg: dict) -> dict:
     src = Path(file_path)
     if not src.exists():

@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .. import config, db, logs, meeting_series, security, stats
+from .. import cloud_folders, config, db, logs, meeting_series, security, stats
 from . import (clouds, delivery, recorder, settings as auto_settings,
                snapshots, weeek)
 
@@ -169,6 +169,27 @@ _WIPE_WINDOW_H = int(os.getenv("VTX_FIELD_WIPE_WINDOW_H", "2"))
 _WIPE_MAX_PER_POLL = int(os.getenv("VTX_FIELD_WIPE_MAX_PER_POLL", "20"))
 
 _ROOM_RE = re.compile(r"/j/([a-z0-9_-]+)", re.I)
+
+
+def _meeting_place(st: "MeetingState", cfg: dict, log=None) -> dict:
+    """Папка встречи в облаке (docs/ТЗ-ПАПКИ-ВСТРЕЧ.md). День — из времени
+    встречи в Weeek, а не из названия: в названии задачи даты нет. Если
+    название только что стало серией — файлы прежних встреч переезжают из
+    «Разовых». Сбой раскладки не мешает выгрузке: тогда кладём как раньше."""
+    try:
+        start = st.start
+        date = (start.astimezone().strftime("%d.%m.%Y") if start
+                else time.strftime("%d.%m.%Y"))
+        place = cloud_folders.resolve(st.owner, st.title, cfg, date=date)
+        if place["sub"]:
+            cloud_folders.adopt(st.owner, st.title, place, cfg, log)
+            if log:
+                log(f"Облако: папка «{place['sub']}»"
+                    + (" (разовая встреча)" if place["kind"] == "oneoff" else "") + ".")
+        return place
+    except Exception:  # noqa: BLE001
+        _LOG.warning("Папка встречи не определена (%s)", st.title, exc_info=True)
+        return {"sub": "", "kind": "flat", "key": "", "date": ""}
 
 
 def _protocol_wanted(cfg: dict, owner: str, title: str, log=None) -> bool:
@@ -1057,7 +1078,9 @@ class Scheduler:
                 except Exception:
                     _LOG.warning("Запуск следующей встречи после передачи комнаты "
                                  "сорвался — подхватит цикл", exc_info=True)
-            up = delivery.upload_with_retry(out, cfg, log)
+            place = _meeting_place(st, cfg, log)
+            up = delivery.upload_with_retry(out, cfg, log, subfolder=place["sub"] or None)
+            cloud_folders.placed(st.owner, st.title, place, up, "recording")
             st.cloud_path = up.get("path") or st.cloud_path
             if up.get("ok"):
                 st.cloud_url = up.get("url")  # public share link (or None)
@@ -1195,7 +1218,10 @@ class Scheduler:
             time.sleep(300)
             if not Path(out).exists():
                 return  # purged (retention) — nothing left to deliver
-            up = delivery.publish_or_upload(out, cfg, st.cloud_path, lambda *_: None)
+            place = _meeting_place(st, cfg, None)
+            up = delivery.publish_or_upload(out, cfg, st.cloud_path, lambda *_: None,
+                                            subfolder=place["sub"] or None)
+            cloud_folders.placed(st.owner, st.title, place, up, "recording")
             st.cloud_path = up.get("path") or st.cloud_path
             if not up.get("ok"):
                 st.upload_error = up.get("error") or "облако недоступно"
@@ -1514,7 +1540,10 @@ class Scheduler:
 
         log("Запись прервана перезапуском сервиса — файл цел, дообрабатываю.")
         if not st.cloud_url:
-            up = delivery.upload_with_retry(out, cfg, log, attempts=1)
+            place = _meeting_place(st, cfg, log)
+            up = delivery.upload_with_retry(out, cfg, log, attempts=1,
+                                            subfolder=place["sub"] or None)
+            cloud_folders.placed(st.owner, st.title, place, up, "recording")
             if up.get("ok"):
                 st.cloud_url = up.get("url")
                 field = (cfg.get("weeek_video_field") or "").strip()

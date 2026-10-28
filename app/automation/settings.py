@@ -121,6 +121,12 @@ _DEFAULTS: dict[str, Any] = {
     # --- after the protocol (.docx) is built: upload it to the cloud ---
     "upload_protocol": True,          # send the generated protocol to the cloud too
     "protocol_folder": "disk:/Телемост-протоколы",  # SEPARATE folder for protocols
+    # Раскладка по встречам (docs/ТЗ-ПАПКИ-ВСТРЕЧ.md): видео и протокол одной
+    # серии — в подпапке с её названием внутри папки ЗАПИСЕЙ; встречи без
+    # серии — в общей «Разовые встречи». При включённой раскладке
+    # protocol_folder не используется. Выключить — плоская раскладка как раньше.
+    "folders_by_series": True,
+    "oneoff_folder": "Разовые встречи",
     "weeek_set_protocol_field": True,  # write its link into a Weeek custom field
     "weeek_protocol_field": "Протокол встречи",  # name of that link custom field
     # Поля Weeek, в которые бот не пишет НИКОГДА. «Встреча» — то самое поле со
