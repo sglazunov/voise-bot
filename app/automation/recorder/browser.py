@@ -506,6 +506,9 @@ class TelemostBot:
         # уходит, новое приходит, и счётчик не растёт.
         self._chat_scopes: dict[str, dict] = {}
         self._chat_reads = 0
+        # Минута суток, когда бот начал следить за чатом: «стоп» под
+        # «Сегодня» со временем ПОЗЖЕ неё написан уже при боте (29.10).
+        self._chat_since_min: int | None = None
         self._chat_opened_once = False
 
     # -- lifecycle ----------------------------------------------------------
@@ -1454,6 +1457,30 @@ class TelemostBot:
             scopes = self._chat_scopes = {}
         first_read = getattr(self, "_chat_reads", 0) == 0
         self._chat_reads = getattr(self, "_chat_reads", 0) + 1
+        if getattr(self, "_chat_since_min", None) is None:
+            lt = time.localtime(now)
+            self._chat_since_min = lt.tm_hour * 60 + lt.tm_min
+        # ⚠️ Время сообщения — главный признак (29.10, «Операционная встреча»:
+        # «стоп 11:54» под «Сегодня», бот сидел дальше). Раздел «Сегодня»
+        # появляется в чате вместе с ПЕРВЫМ сообщением дня — то есть ровно
+        # тогда, когда пишут команду, а строка «стоп» дословно совпадает с
+        # историческими, и правило «виденное раньше — старое» её глушило.
+        # Под «Сегодня» все сообщения сегодняшние, и минута позже начала
+        # слежки однозначно значит «написано при боте». Минута самого входа
+        # не считается: «стоп» прошлой встречи в той же минуте — не команда.
+        if scope == "today":
+            late = [ln for ln, m in self._stop_times(lines, word)
+                    if m is not None and m > self._chat_since_min]
+            if late:
+                st = scopes.setdefault(scope, {"baseline": n, "seen": set()})
+                key = "time:" + late[-1]
+                if key not in st.setdefault("timed", set()):
+                    st["timed"].add(key)
+                    st["seen"] |= hits
+                    st["baseline"] = max(st["baseline"], n)
+                    self._on_log(f"Чат: «{word}» в {late[-1]} — написано во время "
+                                 "записи, останавливаю.")
+                    return True
         st = scopes.get(scope)
         if st is None:
             if scope == "today" and not first_read:
@@ -1488,6 +1515,28 @@ class TelemostBot:
         return False
 
     _TODAY_MARKERS = ("сегодня", "today")
+    _TIME_RE = re.compile(r"(?<!\d)([01]?\d|2[0-3]):([0-5]\d)(?!\d)")
+
+    @classmethod
+    def _stop_times(cls, lines: list[str], word: str) -> list[tuple[str, int | None]]:
+        """Строки-команды и минута суток их сообщения. Время стоит либо в той
+        же строке («стоп 11:54»), либо следующей строкой сразу под текстом
+        пузыря («стоп» / «11:54») — так его отдаёт inner_text в новой вёрстке.
+        Чужое время сюда не попадает: следующая строка берётся, только если в
+        ней нет ничего, кроме времени и значков доставки."""
+        out = []
+        for i, ln in enumerate(lines):
+            if not cls._is_stop_line(ln, word):
+                continue
+            m = cls._TIME_RE.search(ln)
+            if m is None and i + 1 < len(lines):
+                nxt = lines[i + 1].strip()
+                m2 = cls._TIME_RE.search(nxt)
+                if m2 and not re.search(r"[^\W\d_]", nxt):
+                    m = m2
+            out.append((f"{ln.strip()} {m.group(0) if m else ''}".strip(),
+                        int(m.group(1)) * 60 + int(m.group(2)) if m else None))
+        return out
 
     @staticmethod
     def _today_lines(lines: list[str]) -> list[str]:
