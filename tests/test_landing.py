@@ -1,6 +1,6 @@
 """Публичный лендинг на корне сайта (2026-09-15).
 
-Незалогиненному — лендинг с ценами и почтой, залогиненному — SPA, как и
+Незалогиненному — лендинг с почтой, залогиненному — SPA, как и
 раньше. Счётчик Метрики вставляется только при VTX_METRIKA_ID, и только тогда
 CSP лендинга пускает хосты Метрики; остальной сайт CSP не меняет.
 """
@@ -21,9 +21,16 @@ class TestЛендинг:
     def test_незалогиненному_корень_отдаёт_лендинг(self, client):
         r = client.get("/")
         assert r.status_code == 200 and "text/html" in r.headers["content-type"]
-        for s in ("MeetFlow", "200 ₽", "300 ₽", "6 000 ₽", "до 50 встреч", config.CONTACT_EMAIL,
+        for s in ("MeetFlow", "Подключение", config.CONTACT_EMAIL,
                   'rel="canonical"', "application/ld+json", "Телемост"):
             assert s in r.text, s
+
+    def test_на_лендинге_нет_цен(self, client):
+        """Решение владельца 29.10: стоимость на сайте не показываем — ни в
+        тексте, ни в описаниях для поисковиков и мессенджеров."""
+        html = client.get("/").text
+        for s in ("₽", "руб", "priceCurrency", '"Offer"', "тариф"):
+            assert s not in html, s
 
     def test_все_призывы_ведут_на_письмо_а_не_на_регистрацию(self, client):
         html = client.get("/").text

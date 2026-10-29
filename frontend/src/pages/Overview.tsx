@@ -3,7 +3,7 @@ import { Link } from "react-router-dom";
 import {
   CalendarClock, Clock3, ListChecks, Timer, Users2, Gavel, FileText,
   Radio, ShieldCheck, ArrowRight, Info, CheckCircle2, AlertTriangle, Coins,
-  BadgeCheck, Video, CloudOff, BookOpen, Zap, Wallet, ClipboardCopy,
+  BadgeCheck, Video, CloudOff, BookOpen, Zap, ClipboardCopy,
 } from "lucide-react";
 import { Page } from "../components/Layout";
 import { Card, Ellipsis, StatusBadge } from "../components/ui";
@@ -183,81 +183,34 @@ export default function Overview() {
         </Card>
       </div>
 
-      {/* Расход модели: сколько токенов команда потратила за период.
-          Деньги показываем ТОЛЬКО когда цена модели задана (VTX_MODEL_PRICES) —
-          иначе «$0» читалось бы как «бесплатно». */}
+      {/* Расход модели: сколько токенов команда потратила за период. Денежных
+          сумм на «Обзоре» нет — решение владельца 29.10 (сервер их считает,
+          но не показывает). */}
       {!!st?.llm_calls && (
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 mt-3.5">
+        <div className="grid grid-cols-2 lg:grid-cols-3 gap-2.5 mt-3.5">
           <Mini icon={Coins} n={fmtTok(st.tokens_in + st.tokens_out)}
             label={`Токенов за ${st.days} дн.`} />
           <Mini icon={Coins} n={fmtTok(st.tokens_per_meeting)} label="Токенов на встречу" />
           <Mini icon={Coins}
             n={st.tokens_in ? `${Math.round(100 * st.tokens_cached / st.tokens_in)}%` : "—"}
             label="Входа взято из кэша" />
-          <Mini icon={Coins}
-            n={st.usd != null ? `$${st.usd}` : "—"}
-            label={st.usd != null
-              ? (st.usd_meetings < st.meetings
-                  ? `Расход (по ${st.usd_meetings} из ${st.meetings} встреч)`
-                  : "Расход на ИИ")
-              : "Цена модели не задана"} />
         </div>
       )}
 
-      {/* Куда ушли деньги. Общий расход — одно число, и «за что заплатили»
-          остаётся без ответа: проверка цитат на длинной встрече стоит больше
+      {/* Куда ушли токены: проверка цитат на длинной встрече съедает больше
           половины входа, и видно это только в разбивке по стадиям. */}
       {!!st?.by_stage?.length && (
         <div className="glass2 rounded-2xl p-3 mt-2.5 text-[12.5px]">
-          <div className="font-semibold mb-2">Расход по стадиям</div>
+          <div className="font-semibold mb-2">Токены по стадиям</div>
           <div className="grid gap-1.5">
             {st.by_stage.map((x: any) => (
               <div key={x.stage} className="flex justify-between gap-2">
                 <Ellipsis>{x.label}</Ellipsis>
                 <span className="flex-none" style={{ color: "var(--muted)" }}>
-                  {fmtTok(x.in + x.out)} · {x.calls} выз.
-                  {x.usd != null ? ` · $${x.usd}` : ""}</span>
+                  {fmtTok(x.in + x.out)} · {x.calls} выз.</span>
               </div>
             ))}
           </div>
-        </div>
-      )}
-
-      {/* Юнит-экономика (ТЗ-МЕТРИКИ §7). ⚠️ Никаких средних — медиана и 90-й
-          перцентиль: четырёхчасовые записи уже случались, среднее не описывает
-          никого. Компонент считается только при заданной цене; иначе — прочерк
-          и подсказка, какую переменную задать. */}
-      {st && (st.econ_priced_meetings ? (
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 mt-3.5">
-          <Mini icon={Wallet} n={`$${st.econ_cost_median_usd}`}
-            label={`Встреча: медиана (90-й: $${st.econ_cost_p90_usd})`} />
-          <Mini icon={Wallet} n={`$${st.econ_cost_per_hour_usd}`}
-            label="Себестоимость часа встречи" />
-          <Mini icon={Wallet}
-            n={st.econ_cost_to_price != null ? `${Math.round(st.econ_cost_to_price * 100)}%`
-              : "—"}
-            label={st.econ_cost_to_price == null
-              ? "Себестоимость к цене: задайте подписку"
-              : st.econ_cost_to_price > 1 ? "Себестоимость к цене — УБЫТОК"
-              : st.econ_cost_to_price > 0.5 ? "Себестоимость к цене — говорить о тарифе"
-              : st.econ_cost_to_price > 0.3 ? "Себестоимость к цене — наблюдать"
-              : "Себестоимость к цене"} />
-          <Mini icon={Clock3} n={st.econ_breakeven_hours != null ? `${st.econ_breakeven_hours} ч` : "—"}
-            label="Часов встреч в месяц до убытка" />
-        </div>
-      ) : !!st.meetings && (
-        <div className="text-[12px] mt-3.5" style={{ color: "var(--muted)" }}>
-          Себестоимость встреч не считается: не заданы {st.econ_cost_missing?.length
-            ? st.econ_cost_missing.join(", ") : "цены моделей (VTX_MODEL_PRICES)"}.
-        </div>
-      ))}
-      {!!st?.econ_priced_meetings && (
-        <div className="text-[12px] mt-2 flex flex-wrap gap-x-3 gap-y-1" style={{ color: "var(--muted)" }}>
-          <span>Из чего: модель ${st.econ_cost_llm_usd} · распознавание ${st.econ_cost_recog_usd} · запись ${st.econ_cost_record_usd}</span>
-          {st.econ_rerun_cost_share != null && <span>· на пересборки {Math.round(st.econ_rerun_cost_share * 100)}%</span>}
-          {st.econ_long_minutes_share != null && <span>· минут во встречах дольше 2 ч: {Math.round(st.econ_long_minutes_share * 100)}%</span>}
-          {!!st.econ_silent_meetings && <span>· записей с тишиной: {st.econ_silent_meetings}</span>}
-          {!!st.econ_cost_client_key_usd && <span>· на ключах клиента: ${st.econ_cost_client_key_usd}</span>}
         </div>
       )}
 
@@ -445,7 +398,6 @@ export default function Overview() {
               <thead><tr style={{ color: "var(--muted)" }}>
                 <th className="text-left py-1 pr-3">Команда</th><th className="text-right pr-3">Встреч</th>
                 <th className="text-right pr-3">Прочитано</th><th className="text-right pr-3">Пригодилось</th>
-                <th className="text-right pr-3">Себестоимость</th><th className="text-right pr-3">К цене</th>
                 <th className="text-right pr-3">Черновики</th><th className="text-right">Потеряно</th>
               </tr></thead>
               <tbody>{owner.teams.map((t: any) => (
@@ -454,8 +406,6 @@ export default function Overview() {
                   <td className="text-right pr-3">{t.meetings}</td>
                   <td className="text-right pr-3">{t.protocols_read}/{t.protocols_built}</td>
                   <td className="text-right pr-3">{t.protocols_acted}</td>
-                  <td className="text-right pr-3">{t.cost_total_usd != null ? `$${t.cost_total_usd}` : "—"}</td>
-                  <td className="text-right pr-3">{t.cost_to_price != null ? `${Math.round(t.cost_to_price * 100)}%` : "—"}</td>
                   <td className="text-right pr-3">{t.drafts}</td>
                   <td className="text-right">{t.lost}</td>
                 </tr>

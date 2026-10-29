@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>MeetFlow — протоколы встреч в Яндекс Телемосте автоматически</title>
-<meta name="description" content="Бот MeetFlow сам приходит на встречу в Яндекс Телемосте, записывает её, расшифровывает и собирает протокол: решения с цитатами и таймкодами, задачи с исполнителями, ответы на вопросы. Word-протокол в Яндекс Диске, ссылки и задачи в Weeek или любом вашем трекере. От 200 ₽ за встречу.">
+<meta name="description" content="Бот MeetFlow сам приходит на встречу в Яндекс Телемосте, записывает её, расшифровывает и собирает протокол: решения с цитатами и таймкодами, задачи с исполнителями, ответы на вопросы. Word-протокол в Яндекс Диске, ссылки и задачи в Weeek или любом вашем трекере.">
 <meta name="robots" content="index, follow">
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png">
@@ -16,7 +16,7 @@
 <meta property="og:locale" content="ru_RU">
 <meta property="og:site_name" content="MeetFlow">
 <meta property="og:title" content="MeetFlow — протоколы встреч в Яндекс Телемосте автоматически">
-<meta property="og:description" content="Бот записывает встречу в Телемосте, расшифровывает и собирает протокол с решениями, задачами и цитатами. 200 ₽ расшифровка, 300 ₽ с протоколом, 6 000 ₽ в месяц до 50 встреч.">
+<meta property="og:description" content="Бот записывает встречу в Телемосте, расшифровывает и собирает протокол с решениями, задачами и цитатами. Ссылки на запись и протокол — в задаче Weeek.">
 <meta property="og:url" content="{{ site_url }}/">
 <meta property="og:image" content="{{ site_url }}/og-image.png">
 <meta property="og:image:width" content="1200">
@@ -34,12 +34,7 @@
       "operatingSystem": "Web",
       "url": "{{ site_url }}/",
       "description": "Автоматическая запись, расшифровка и протокол встреч в Яндекс Телемосте с публикацией результата в Яндекс Диск и Weeek.",
-      "inLanguage": "ru",
-      "offers": [
-        {"@type": "Offer", "name": "Расшифровка встречи", "price": "200", "priceCurrency": "RUB", "description": "Распознавание одной записи встречи в текст с таймкодами и участниками"},
-        {"@type": "Offer", "name": "Расшифровка и протокол встречи", "price": "300", "priceCurrency": "RUB", "description": "Распознавание одного видео и сборка протокола: решения, задачи, ответы на вопросы, Word-документ"},
-        {"@type": "Offer", "name": "Подписка на месяц", "price": "6000", "priceCurrency": "RUB", "description": "До 50 встреч в месяц с автоматическим приходом бота по расписанию из Weeek"}
-      ]
+      "inLanguage": "ru"
     },
     {
       "@type": "Organization",
@@ -57,7 +52,7 @@
         {"@type": "Question", "name": "Что входит в протокол?", "acceptedAnswer": {"@type": "Answer", "text": "Участники и роли, краткое содержание, решения с основанием — цитатой из разговора и таймкодом, задачи с исполнителями, что спрашивали и что ответили, оговорки о том, что временно или отключено, задачи прошлой встречи серии и их судьба."}},
         {"@type": "Question", "name": "Как быстро готов протокол?", "acceptedAnswer": {"@type": "Answer", "text": "Расшифровка обычно занимает меньше времени, чем длилась встреча, сборка протокола — несколько минут. Ссылка появляется в задаче Weeek, документ — в Яндекс Диске."}},
         {"@type": "Question", "name": "Где хранятся записи?", "acceptedAnswer": {"@type": "Answer", "text": "В вашем Яндекс Диске или Google Drive. На сервере остаются текст и протокол, доступ к ним — только у вашей команды по логину. Ключи и токены зашифрованы."}},
-        {"@type": "Question", "name": "Как оплатить?", "acceptedAnswer": {"@type": "Answer", "text": "Напишите на {{ contact_email }}: подберём тариф, выставим счёт и подключим команду."}}
+        {"@type": "Question", "name": "Как подключиться?", "acceptedAnswer": {"@type": "Answer", "text": "Напишите на {{ contact_email }}: обсудим условия и подключим команду."}}
       ]
     }
   ]
@@ -163,8 +158,6 @@
   .price { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 1.5rem; display: grid; gap: .9rem; align-content: start; }
   .price.best { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
   .price .badge { justify-self: start; font-size: .75rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--accent-ink); background: var(--accent-soft); padding: .2rem .6rem; border-radius: 999px; }
-  .amount { font-family: var(--display); font-size: 2.4rem; font-weight: 800; letter-spacing: -.03em; line-height: 1; font-variant-numeric: tabular-nums; }
-  .amount small { font-size: 1rem; font-weight: 600; color: var(--muted); letter-spacing: 0; margin-left: .3rem; }
   .price ul { margin: 0; padding-left: 1.1rem; color: var(--ink-2); display: grid; gap: .35rem; }
   .price .per { color: var(--muted); font-size: .9rem; }
   .price .btn { justify-self: start; margin-top: auto; }
@@ -222,7 +215,7 @@
       <a href="#how">Как работает</a>
       <a href="#protocol">Что в протоколе</a>
       <a href="#integration">Интеграция</a>
-      <a href="#prices">Цены</a>
+      <a href="#plans">Подключение</a>
       <a href="#faq">Вопросы</a>
     </nav>
     <div class="nav-cta">
@@ -242,7 +235,7 @@
         <a class="btn btn-primary" href="mailto:{{ contact_email }}?subject=MeetFlow%3A%20попробовать%20на%20своей%20встрече">Попробовать на своей встрече</a>
         <a class="btn btn-ghost" href="mailto:{{ contact_email }}?subject=MeetFlow%3A%20интеграция">Обсудить интеграцию</a>
       </div>
-      <p class="cta-note">Расшифровка встречи — 200 ₽, с протоколом — 300 ₽, подписка — 6 000 ₽ в месяц до 50 встреч. По любым вопросам, включая интеграцию с вашим трекером, пишите на <a href="mailto:{{ contact_email }}">{{ contact_email }}</a>.</p>
+      <p class="cta-note">По любым вопросам, включая интеграцию с вашим трекером, пишите на <a href="mailto:{{ contact_email }}">{{ contact_email }}</a>.</p>
     </div>
 
     <aside class="proto" aria-label="Пример протокола">
@@ -332,18 +325,17 @@
     </div>
   </section>
 
-  <section id="prices">
+  <section id="plans">
     <div class="wrap">
       <div class="sec-head">
-        <span class="eyebrow">Цены</span>
-        <h2>Платите за встречи, а не за рабочие места</h2>
-        <p class="lede">Все тарифы без ограничений по числу участников команды. Оплата по счёту.</p>
+        <span class="eyebrow">Подключение</span>
+        <h2>Разовая встреча или вся команда</h2>
+        <p class="lede">Без ограничений по числу участников команды. Условия — по письму.</p>
       </div>
       <div class="prices">
         <div class="price">
           <span class="badge">Разово</span>
           <h3>Расшифровка встречи</h3>
-          <div class="amount">200 ₽<small>за встречу</small></div>
           <p class="per">Распознавание одной записи в текст</p>
           <ul>
             <li>Текст с таймкодами и говорящими</li>
@@ -355,7 +347,6 @@
         <div class="price">
           <span class="badge">Разово</span>
           <h3>Расшифровка и протокол</h3>
-          <div class="amount">300 ₽<small>за встречу</small></div>
           <p class="per">Распознавание одного видео и сборка протокола</p>
           <ul>
             <li>Всё из расшифровки</li>
@@ -366,9 +357,8 @@
         </div>
         <div class="price best">
           <span class="badge">Для команды</span>
-          <h3>Подписка на месяц</h3>
-          <div class="amount">6 000 ₽<small>в месяц</small></div>
-          <p class="per">До 50 встреч в месяц — 120 ₽ за встречу</p>
+          <h3>Команда на месяц</h3>
+          <p class="per">Все встречи команды по расписанию</p>
           <ul>
             <li>Бот приходит сам по расписанию из вашего трекера</li>
             <li>Протоколы в Яндекс Диске, ссылки в задачах</li>
@@ -409,7 +399,7 @@
         <details><summary>Что входит в протокол?</summary><p>Участники и роли, краткое содержание, решения с основанием — цитатой из разговора и таймкодом, задачи с исполнителями, что спрашивали и что ответили, оговорки о том, что временно или отключено, задачи прошлой встречи серии и их судьба.</p></details>
         <details><summary>Как быстро готов протокол?</summary><p>Расшифровка обычно занимает меньше времени, чем длилась встреча, сборка протокола — несколько минут. Ссылка появляется в задаче Weeek, документ — в Яндекс Диске.</p></details>
         <details><summary>Где хранятся записи?</summary><p>В вашем Яндекс Диске или Google Drive. На сервере остаются текст и протокол, доступ к ним — только у вашей команды по логину. Ключи и токены зашифрованы.</p></details>
-        <details><summary>Как оплатить?</summary><p>Напишите на <a href="mailto:{{ contact_email }}">{{ contact_email }}</a>: подберём тариф, выставим счёт и подключим команду.</p></details>
+        <details><summary>Как подключиться?</summary><p>Напишите на <a href="mailto:{{ contact_email }}">{{ contact_email }}</a>: обсудим условия и подключим команду.</p></details>
       </div>
     </div>
   </section>
