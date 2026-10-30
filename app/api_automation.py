@@ -98,12 +98,11 @@ def automation_save(body: AutomationSettings, team: str = "",
     # None отбрасываем — так фронт помечает «поле не трогали». Пустая строка
     # при этом ЗНАЧИМА: ею очищают поле (проект Weeek, фильтры, папка).
     values = {k: v for k, v in body.known().items() if v is not None}
-    locked = auto_settings.locked_keys(user, auto_settings.load(target))
-    dropped = sorted(k for k in values if k in locked)
+    keep, dropped = auto_settings.writable(user, auto_settings.load(target), values)
     if dropped:
         log.info("Настройки команды %s: %s не может менять %s — оставляю как есть",
                  target, user, ", ".join(dropped))
-    auto_settings.save(target, {k: v for k, v in values.items() if k not in locked})
+    auto_settings.save(target, keep)
     return _settings_view(user, target)
 
 
@@ -152,6 +151,22 @@ def _guard_task(user: str, cfg: dict, token: str, task_id: str) -> None:
         raise HTTPException(403, "Эта задача не на доске вашей команды.")
 
 
+def guard_delivery_task(user: str, raw: str) -> None:
+    """Задача Weeek, куда доставить протокол (`POST /api/jobs`, пересборка), —
+    та же проверка, что у `/meetings/links`. Без неё клиент под замком писал
+    протокол комментарием и полем в задачу ДРУГОГО клиента общего воркспейса."""
+    from .automation import settings as auto_settings
+    if not (raw or "").strip():
+        return
+    cfg = auto_settings.load(security.team_of(user))
+    if not _managed_guard(user, cfg):
+        return
+    task_id = _clean_task_id(raw)
+    if not task_id:
+        raise HTTPException(400, "Не указана задача Weeek (нужен номер или ссылка).")
+    _guard_task(user, cfg, cfg.get("weeek_token"), task_id)
+
+
 @router.get("/meetings")
 def automation_meetings(team: str = "", user: str = Depends(current_user)):
     """Upcoming meeting tasks from Weeek that carry a Telemost link."""
@@ -167,9 +182,7 @@ def automation_meetings(team: str = "", user: str = Depends(current_user)):
     except Exception:
         tz = timezone.utc
     try:
-        meetings = weeek.upcoming_meetings(
-            token, cfg.get("weeek_project_id"),
-            board_id=cfg.get("weeek_board_id"), local_tz=tz)
+        meetings = weeek.team_meetings(cfg, local_tz=tz)
     except weeek.WeeekError as e:
         raise HTTPException(502, str(e))
     # Show upcoming meetings + only the single most recent past one (older past
@@ -204,20 +217,22 @@ def automation_meeting_decision(task_id: str, body: MeetingDecision,
 
 
 @router.get("/clouds/status")
-def automation_clouds_status(user: str = Depends(current_user)):
+def automation_clouds_status(team: str = "", user: str = Depends(current_user)):
     """Per-backend cloud readiness + which one is selected (for the UI)."""
     from .automation import settings as auto_settings, clouds
-    return clouds.readiness(auto_settings.load(user))
+    return clouds.readiness(auto_settings.load(_team_for(user, team)))
 
 
 @router.post("/clouds/test")
-def automation_clouds_test(backend: str | None = None,
+def automation_clouds_test(backend: str | None = None, team: str = "",
                            user: str = Depends(current_user)):
-    """Upload a tiny test file to the selected (or given) cloud to verify creds."""
+    """Upload a tiny test file to the selected (or given) cloud to verify creds.
+    `team` — облако клиентской команды (только основателю сервера)."""
     import tempfile
     from datetime import datetime, timezone
     from .automation import settings as auto_settings, clouds
-    cfg = auto_settings.load(user)
+    target = _team_for(user, team)
+    cfg = auto_settings.load(target)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
                                      encoding="utf-8") as f:
@@ -225,7 +240,7 @@ def automation_clouds_test(backend: str | None = None,
         tmp = f.name
     try:
         res = clouds.upload(tmp, f"vtx-test-{stamp}.txt", cfg, backend=backend,
-                            owner=security.team_of(user))
+                            owner=target)
     finally:
         try:
             os.unlink(tmp)
@@ -587,11 +602,13 @@ def automation_weeek_projects(team: str = "", user: str = Depends(current_user))
 
 
 @router.get("/weeek/members")
-def automation_weeek_members(refresh: int = 0, user: str = Depends(current_user)):
+def automation_weeek_members(refresh: int = 0, team: str = "",
+                             user: str = Depends(current_user)):
     """Участники воркспейса Weeek (кэш на сутки в настройках команды) — для
     выбора исполнителя задачи из протокола."""
     from .automation import settings as auto_settings, weeek
-    cfg = auto_settings.load(user)
+    target = _team_for(user, team)
+    cfg = auto_settings.load(target)
     token = cfg.get("weeek_token")
     if not token:
         raise HTTPException(400, "Сначала подключите Weeek.")
@@ -605,7 +622,7 @@ def automation_weeek_members(refresh: int = 0, user: str = Depends(current_user)
         if cache.get("members"):
             return {"members": cache["members"], "cached": True, "error": str(e)}
         raise HTTPException(502, str(e))
-    auto_settings.save(user, {"weeek_members_cache": {"at": time.time(), "members": members}})
+    auto_settings.save(target, {"weeek_members_cache": {"at": time.time(), "members": members}})
     return {"members": members, "cached": False}
 
 
@@ -659,27 +676,31 @@ class UserMapBody(BaseModel):
 
 
 @router.post("/weeek/user-map")
-def automation_weeek_user_map(body: UserMapBody, user: str = Depends(current_user)):
+def automation_weeek_user_map(body: UserMapBody, team: str = "",
+                              user: str = Depends(current_user)):
     """Запомнить «имя в протоколе → участник Weeek» для всей команды."""
     from .automation import settings as auto_settings
+    target = _team_for(user, team)
     name = (body.name or "").strip()[:120]
     if not name:
         raise HTTPException(400, "Пустое имя.")
-    cfg = auto_settings.load(user)
+    cfg = auto_settings.load(target)
     m = dict(cfg.get("weeek_user_map") or {})
     if body.user_id.strip():
         m[name] = body.user_id.strip()[:80]
     else:
         m.pop(name, None)
-    auto_settings.save(user, {"weeek_user_map": m})
+    auto_settings.save(target, {"weeek_user_map": m})
     return {"weeek_user_map": m}
 
 
 @router.get("/weeek/probe")
-def automation_weeek_probe(task_id: str, user: str = Depends(current_user)):
-    """Return the raw JSON of one Weeek task — used to pin date/link field names."""
+def automation_weeek_probe(task_id: str, team: str = "",
+                           user: str = Depends(current_user)):
+    """Return the raw JSON of one Weeek task — used to pin date/link field names.
+    `team` — «Диагностика задачи» клиента его токеном (основателю сервера)."""
     from .automation import settings as auto_settings, weeek
-    cfg = auto_settings.load(user)
+    cfg = auto_settings.load(_team_for(user, team))
     token = cfg.get("weeek_token")
     if not token:
         raise HTTPException(400, "Сначала задайте токен Weeek в настройках.")

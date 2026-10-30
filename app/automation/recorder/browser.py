@@ -366,11 +366,14 @@ def readiness(cfg: dict) -> dict:
     return {"ready": True, "mode": mode, "detail": "Режим: гость (по ссылке)."}
 
 
-def _login_busy() -> bool:
-    """Открыто ли сейчас окно входа. Chromium не даёт двум процессам держать
-    один каталог профиля, поэтому проверять вход, пока окно живо, бессмысленно:
-    запуск просто падает."""
-    return any(ses.alive() for ses in list(login_sessions.values()))
+def _login_busy(cfg: dict | None = None) -> bool:
+    """Открыто ли сейчас окно входа НА ЭТОМ профиле. Chromium не даёт двум
+    процессам держать один каталог профиля, поэтому проверять вход, пока окно
+    живо, бессмысленно: запуск просто падает. Окно другой команды (свой
+    профиль) проверке не мешает."""
+    prof = _profile_dir(cfg) if cfg is not None else None
+    return any(ses.alive() and (prof is None or ses.profile == prof)
+               for ses in list(login_sessions.values()))
 
 
 def login_status(cfg: dict) -> dict:
@@ -393,7 +396,7 @@ def login_status(cfg: dict) -> dict:
             " Но сейчас сохранён режим «Гость» — чтобы бот заходил под этим "
             "аккаунтом, выберите «Авторизованный» и нажмите «Сохранить "
             "настройки бота».")
-    if _login_busy():
+    if _login_busy(cfg):
         return {"logged_in": None,
                 "detail": "Окно входа ещё открыто — закройте его кнопкой "
                           "«Готово», потом проверяйте."}
@@ -433,17 +436,46 @@ def _profile_dir(cfg: dict) -> Path:
     (`users/<команда>/browser-profile`); команда основателя сервера остаётся
     на прежнем пути — иначе на бою пропал бы уже сделанный вход.
     `cfg["_team"]` ставит `settings.load`; без него (cfg, собранный руками) —
-    прежнее общее умолчание."""
+    прежнее общее умолчание.
+
+    Свой путь (`browser_profile_dir`) у клиентской команды не может вести в
+    общий профиль или в каталог другой команды: такое значение могло остаться
+    с тех пор, когда ключ менял админ команды, а теперь он серверный — клиент
+    его даже очистить не может. Такой путь пропускается (миграция без записи в
+    настройки: значение остаётся видно основателю)."""
     raw = (cfg.get("browser_profile_dir") or "").strip()
     team = cfg.get("_team") or ""
+    own = (security.user_dir(team) / "browser-profile"
+           if team and not _founder_team(team) else None)
+    if raw and own is not None and _foreign_profile(Path(raw), team):
+        log.warning("Команда %s: browser_profile_dir=%s ведёт в общий профиль или "
+                    "в каталог другой команды — беру свой профиль команды", team, raw)
+        raw = ""
     if raw:
         base = Path(raw)
-    elif team and not _founder_team(team):
-        base = security.user_dir(team) / "browser-profile"
+    elif own is not None:
+        base = own
     else:
         base = config.DATA_DIR / "browser-profile"
     base.mkdir(parents=True, exist_ok=True)
     return base
+
+
+def _foreign_profile(path: Path, team: str) -> bool:
+    """Путь — общий профиль сервера или внутри каталога ДРУГОЙ команды."""
+    def norm(p: Path) -> Path:
+        try:
+            return p.expanduser().resolve()
+        except OSError:
+            return p.expanduser().absolute()
+    p = norm(path)
+    shared = norm(config.DATA_DIR / "browser-profile")
+    users = norm(config.DATA_DIR / "users")
+    mine = norm(security.user_dir(team))
+    if p == shared or shared in p.parents:
+        return True
+    inside_users = p == users or users in p.parents
+    return inside_users and not (p == mine or mine in p.parents)
 
 
 def _founder_team(team: str) -> bool:
@@ -2164,13 +2196,24 @@ def login(cfg: dict, on_log=None) -> None:
 # Пароль вводить не обязательно и не рекомендуется: на странице Яндекса есть
 # вход по QR-коду, тогда пароль остаётся на телефоне и через сервер не идёт.
 _LOGIN_URL = "https://passport.yandex.ru/auth"
+# Окно входа без тайм-аута жило вечно: брошенная вкладка любой команды
+# держала Chromium (и, пока окно было одно на сервер, — вход ВСЕХ команд).
+# Простой — с последнего запроса экрана или действия; потолок — от открытия,
+# потому что открытая вкладка интерфейса опрашивает экран сама.
+LOGIN_IDLE_SEC = float(os.getenv("VTX_LOGIN_IDLE_SEC", "180"))
+LOGIN_MAX_SEC = float(os.getenv("VTX_LOGIN_MAX_SEC", "900"))
+# Окна разных команд работают параллельно (профили разные), но не без счёта:
+# каждое — свой Chromium.
+LOGIN_MAX_WINDOWS = int(os.getenv("VTX_LOGIN_MAX_WINDOWS", "3"))
 
 
 class _LoginSession:
-    """Одна живая сессия входа. Экземпляр — один на процесс (см. `login_session`)."""
+    """Одна живая сессия входа команды (см. `login_sessions`)."""
 
     def __init__(self, cfg: dict) -> None:
         self.cfg = cfg
+        self.profile = _profile_dir(cfg)
+        self._opened = self._touched = time.time()
         # Окно почти во весь экран: страница входа Яндекса раскладывается
         # по-десктопному, а в интерфейсе картинка растягивается на всю модалку —
         # мелкий кадр там неудобно кликать.
@@ -2206,6 +2249,20 @@ class _LoginSession:
     def alive(self) -> bool:
         return bool(self._thread and self._thread.is_alive())
 
+    def touch(self) -> None:
+        """Окном пользуются: запрос экрана или действие. Зовёт `login_get` —
+        через неё идёт каждый запрос интерфейса к окну."""
+        self._touched = time.time()
+
+    def expired(self, now: float | None = None) -> str:
+        """Причина закрыть окно по времени или ''."""
+        now = time.time() if now is None else now
+        if now - self._opened > LOGIN_MAX_SEC:
+            return f"открыто дольше {LOGIN_MAX_SEC:.0f} с"
+        if now - self._touched > LOGIN_IDLE_SEC:
+            return f"никто не смотрел {LOGIN_IDLE_SEC:.0f} с"
+        return ""
+
     def screenshot(self) -> bytes | None:
         return self._shot
 
@@ -2240,13 +2297,17 @@ class _LoginSession:
         try:
             with sync_playwright() as pw:
                 ctx = pw.chromium.launch_persistent_context(
-                    str(_profile_dir(self.cfg)), headless=True,
+                    str(self.profile), headless=True,
                     viewport={"width": w, "height": h}, args=_LAUNCH_ARGS)
                 page = ctx.pages[0] if ctx.pages else ctx.new_page()
                 page.goto(_LOGIN_URL, wait_until="domcontentloaded", timeout=45000)
                 self._note(f"окно открыто {w}x{h}, страница {_LOGIN_URL}")
                 last_shot = 0.0
                 while not self._stop.is_set():
+                    why = self.expired()
+                    if why:
+                        self._note(f"закрываю окно: {why}")
+                        break
                     # Разгребаем ВСЮ очередь: за круг могло накопиться несколько
                     # кликов, а по одному за итерацию каждый ждал бы своей
                     # съёмки экрана — до секунды задержки на клик.
@@ -2329,25 +2390,45 @@ login_sessions: dict[str, _LoginSession] = {}
 _login_lock = threading.Lock()
 
 
+def _live(ses: "_LoginSession | None") -> bool:
+    """Сессия жива и не просрочена. Просроченную поток закроет сам на
+    следующем круге; здесь она уже не считается — ни своей команде, ни
+    как занятость для других."""
+    return ses is not None and ses.alive() and not ses.expired()
+
+
 def login_get(team: str) -> "_LoginSession | None":
-    """Живая сессия входа ЭТОЙ команды или None."""
+    """Живая сессия входа ЭТОЙ команды или None. Каждый запрос интерфейса к
+    окну идёт через неё — это и есть «окно смотрят»."""
     ses = login_sessions.get(team)
-    return ses if (ses is not None and ses.alive()) else None
+    if not _live(ses):
+        return None
+    ses.touch()
+    return ses
 
 
 def login_open(cfg: dict, team: str = "") -> "_LoginSession":
-    """Запустить (или вернуть уже идущую) сессию входа команды `team`."""
+    """Запустить (или вернуть уже идущую) сессию входа команды `team`.
+
+    Окна разных команд не мешают друг другу: у каждой свой профиль. Раньше
+    окно было одно на сервер, и любая команда, не закрыв его, держала вход
+    всех, включая основателя. Конфликт остаётся только на ОДНОМ каталоге
+    профиля (два Chromium на одном профиле не запускаются)."""
     with _login_lock:
         ses = login_sessions.get(team)
-        if ses is None or not ses.alive():
-            # Окно входа — одно на сервер: профили у команд теперь разные, но
-            # проверка входа (`_login_busy`) смотрит на любое открытое окно.
-            other = next((s for t, s in login_sessions.items()
-                          if t != team and s.alive()), None)
-            if other is not None:
-                raise RuntimeError("Окно входа сейчас занято другой командой. "
-                                   "Попробуйте через несколько минут.")
-            ses = _LoginSession(cfg)
-            ses.start()
-            login_sessions[team] = ses
-        return ses
+        if _live(ses):
+            ses.touch()
+            return ses
+        if ses is not None:
+            ses.close(wait=5)
+        new = _LoginSession(cfg)
+        others = [s for t, s in login_sessions.items() if t != team and _live(s)]
+        if any(s.profile == new.profile for s in others):
+            raise RuntimeError("Окно входа на этом профиле браузера уже открыто "
+                               "другой командой. Попробуйте через несколько минут.")
+        if len(others) >= LOGIN_MAX_WINDOWS:
+            raise RuntimeError("Сейчас открыто слишком много окон входа. "
+                               "Попробуйте через несколько минут.")
+        new.start()
+        login_sessions[team] = new
+        return new

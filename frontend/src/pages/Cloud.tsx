@@ -1,9 +1,9 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { HardDrive, Cloud as CloudIcon, FolderInput, UploadCloud } from "lucide-react";
 import { Page } from "../components/Layout";
 import { Card, useToast } from "../components/ui";
 import { TeamPicker } from "../components/TeamPicker";
-import { useManagedTeam, useSettings } from "../lib/useSettings";
+import { teamQuery, useManagedTeam, useSettings } from "../lib/useSettings";
 import { api } from "../lib/api";
 
 const DEST = [
@@ -14,13 +14,16 @@ const DEST = [
 
 export default function CloudPage() {
   const [team, setTeam] = useManagedTeam();
-  const { s, set, save, ready, reload, locked } = useSettings(team);
+  const { s, set, save, ready, reload, locked } = useSettings(team, () => setTeam(""));
   // Облако и папки клиентской команды под замком задаёт основатель сервера.
   const lock = locked("cloud");
   const [ytoken, setYtoken] = useState("");
   // Учётка Google: сервер отдаёт эти три поля как «есть/нет», а не значением,
   // поэтому вводим их отдельным состоянием и шлём только заполненные.
   const [gsec, setGsec] = useState({ client_id: "", client_secret: "", refresh_token: "" });
+  // Введённые, но не сохранённые секреты принадлежат ТОЙ команде, для которой
+  // их вводили: после переключения «Сохранить» отправило бы их в другую.
+  useEffect(() => { setYtoken(""); setGsec({ client_id: "", client_secret: "", refresh_token: "" }); }, [team]);
   const toast = useToast();
   const yd = s.yandex_disk || {};
   const gd = s.gdrive || {};
@@ -49,7 +52,7 @@ export default function CloudPage() {
     catch (e: any) { toast(e.message, true); }
   }
   async function test() {
-    try { const r = await api.post("/api/automation/clouds/test"); toast(r.url ? "✓ Загрузка удалась" : "Готово"); }
+    try { const r = await api.post(`/api/automation/clouds/test${teamQuery(team)}`); toast(r.url ? "✓ Загрузка удалась" : "Готово"); }
     catch (e: any) { toast(e.message, true); }
   }
 
@@ -91,7 +94,7 @@ export default function CloudPage() {
           </div>
           <div className="flex gap-2.5 mt-3">
             <button className="btn btn-primary" onClick={onSave} disabled={!ready || lock}>Сохранить</button>
-            <button className="btn btn-ghost" onClick={test} disabled={!!team} title={team ? "Тест загрузки — только для своей команды" : undefined}><UploadCloud size={15} /> Тест загрузки</button>
+            <button className="btn btn-ghost" onClick={test}><UploadCloud size={15} /> Тест загрузки</button>
           </div>
         </Card>
       )}
@@ -129,7 +132,7 @@ export default function CloudPage() {
           </div>
           <div className="flex gap-2.5 mt-3">
             <button className="btn btn-primary" onClick={onSave} disabled={!ready || lock}>Сохранить</button>
-            <button className="btn btn-ghost" onClick={test} disabled={!!team} title={team ? "Тест загрузки — только для своей команды" : undefined}><UploadCloud size={15} /> Тест загрузки</button>
+            <button className="btn btn-ghost" onClick={test}><UploadCloud size={15} /> Тест загрузки</button>
           </div>
         </Card>
       )}

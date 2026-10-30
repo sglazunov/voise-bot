@@ -24,9 +24,17 @@ async function handle(r: Response) {
     if (!location.pathname.startsWith("/login")) location.href = "/login";
     throw new Error("Сессия истекла — войдите заново.");
   }
-  if (!r.ok) throw new Error(message(data, r.status));
+  if (!r.ok) {
+    // Код ответа нужен вызывающему: 403/404 на чужую команду — не «сбой сети».
+    const err = new Error(message(data, r.status)) as Error & { status?: number };
+    err.status = r.status;
+    throw err;
+  }
   return data;
 }
+
+// Команда, выбранная основателем на «Weeek»/«Облако» (sessionStorage вкладки).
+export const MANAGED_TEAM_KEY = "vtx.manage-team";
 
 export const api = {
   get: (p: string) => fetch(p).then(handle),
@@ -56,5 +64,8 @@ export const api = {
 
 export async function logout() {
   await fetch("/api/auth/logout", { method: "POST" });
+  // Выбор команды основателя живёт во вкладке: без сброса следующий вошедший
+  // в той же вкладке получал 403 и навсегда неактивные «Weeek» и «Облако».
+  try { sessionStorage.removeItem(MANAGED_TEAM_KEY); } catch { /* приватный режим */ }
   window.location.href = "/login";
 }

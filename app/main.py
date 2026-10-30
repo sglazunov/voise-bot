@@ -1002,6 +1002,10 @@ async def create_job(
     ext = Path(file.filename or "").suffix.lower()
     if ext not in ALLOWED_EXT:
         raise HTTPException(400, f"Неподдерживаемый формат: {ext or '?'}")
+    # Задача Weeek для доставки — только на доске команды (под замком). До
+    # приёма файла: отказ не должен стоить загрузки гигабайта.
+    from .api_automation import guard_delivery_task
+    await run_in_threadpool(guard_delivery_task, user, deliver_weeek_task)
 
     # Unique per upload: two users uploading files with the same name must not
     # overwrite each other's source (job.filename keeps the original for display).
@@ -1430,6 +1434,8 @@ class ReanalyzeBody(BaseModel):
 def reanalyze_job(job_id: str, body: ReanalyzeBody, user: str = Depends(current_user)):
     """Пересобрать протокол по той же расшифровке — без повторного распознавания."""
     _require_owned(job_id, user)
+    from .api_automation import guard_delivery_task
+    guard_delivery_task(user, body.deliver_weeek_task or "")
     try:
         job = store.reanalyze(job_id, provider=body.provider,
                               instructions=body.instructions,
