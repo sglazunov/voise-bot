@@ -580,7 +580,11 @@ class TestМутантыДозаливки:
         assert st.upload_error, "вторая часть «доставлена» ссылкой первой"
         assert env.fields == [], "поле «Видео» перезаписано ссылкой первой части"
         assert env.comments and "https://disk/p1" in env.comments[0][2]
-        assert st.parts == [] and snapshots.load("team")[KEY]["parts"] == []
+        # Запись части остаётся (в ней задача и номер части — второй раунд
+        # ревью), но уже со ссылкой и без ошибки: дозаливать её больше нечего.
+        part = snapshots.load("team")[KEY]["parts"][0]
+        assert part["cloud_url"] == "https://disk/p1" and not part["upload_error"]
+        assert st.parts[0]["cloud_url"] == "https://disk/p1"
         assert p2.exists() and not p1.exists()
 
 

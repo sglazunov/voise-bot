@@ -61,7 +61,8 @@ def publish(remote_path: str, settings: dict, backend: str | None = None) -> dic
 
 def upload(file_path: str, name: str, settings: dict,
            backend: str | None = None, folder: str | None = None,
-           subfolder: str | None = None, owner: str | None = None) -> dict:
+           subfolder: str | None = None, owner: str | None = None,
+           overwrite: bool = True) -> dict:
     """Upload `file_path` as `name` to the chosen (or selected) cloud.
 
     `owner` — команда-владелец файла. Удалённым облакам он не нужен (у каждой
@@ -71,13 +72,18 @@ def upload(file_path: str, name: str, settings: dict,
     `folder` overrides the destination folder for this one upload (e.g. put
     protocols in a different folder than the recordings). `subfolder` — папка
     встречи внутри неё (docs/ТЗ-ПАПКИ-ВСТРЕЧ.md): имя серии или «Разовые
-    встречи»; создаётся при первой заливке."""
+    встречи»; создаётся при первой заливке.
+
+    `overwrite=False` — записи встреч: одноимённый ДРУГОЙ файл в облаке не
+    затирается, новый ложится рядом (второй раунд ревью 30.10: вторая часть
+    встречи затирала первую вместе с её ссылкой в Weeek)."""
     key = backend or settings.get("cloud") or "local"
     entry = BACKENDS.get(key)
     if not entry:
         return {"ok": False, "backend": key, "error": f"Неизвестное облако: {key}"}
     mod = entry[0]
     bcfg = _backend_cfg(settings, key, owner)
+    extra = {} if overwrite else {"overwrite": False}
     if folder:
         if key == "local":
             # Папка протоколов задана в форме Яндекс.Диска («disk:/…») — для
@@ -114,7 +120,7 @@ def upload(file_path: str, name: str, settings: dict,
                 bcfg["folder_id"] = gdrive.child_folder(
                     bcfg, bcfg.get("folder_id") or None, subfolder)
             except Exception as e:  # noqa: BLE001 — без подпапки, но с файлом
-                res = mod.upload(file_path, name, bcfg)
+                res = mod.upload(file_path, name, bcfg, **extra)
                 res["sub_failed"] = True       # файл не в подпапке — не переезжает
                 if res.get("ok"):
                     res["public_note"] = (f"Папку «{subfolder}» в Google Drive создать "
@@ -122,7 +128,7 @@ def upload(file_path: str, name: str, settings: dict,
                 return res
         else:  # yandex_disk
             bcfg["folder"] = f"{yandex_disk.meetings_root(bcfg)}/{subfolder}"
-    return mod.upload(file_path, name, bcfg)
+    return mod.upload(file_path, name, bcfg, **extra)
 
 
 def move_to_sibling(item: dict, subfolder: str, settings: dict) -> dict:

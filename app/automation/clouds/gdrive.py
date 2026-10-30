@@ -153,7 +153,9 @@ def move_to_sibling(file_id: str, sub: str, cfg: dict) -> dict:
         return {"ok": False, "retry": True, "error": str(e)}
 
 
-def upload(file_path: str, name: str, cfg: dict) -> dict:
+def upload(file_path: str, name: str, cfg: dict, overwrite: bool = True) -> dict:
+    # `overwrite` не нужен: Google Drive одноимённый файл не затирает, а кладёт
+    # рядом второй (имя у Google не уникально).
     src = Path(file_path)
     if not src.exists():
         return {"ok": False, "backend": "gdrive", "error": "Файл не найден."}

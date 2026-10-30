@@ -7,6 +7,7 @@ PUT the file → publish to get a shareable link.
 """
 from __future__ import annotations
 
+import hashlib
 import time
 from pathlib import Path
 
@@ -309,7 +310,70 @@ def download(remote: str, cfg: dict, dest: str | Path, timeout: int = 600) -> Pa
     return dest
 
 
-def upload(file_path: str, name: str, cfg: dict) -> dict:
+def _upload_href(remote: str, headers: dict, overwrite: bool) -> str | None:
+    """Ссылка на заливку `remote`. None — без `overwrite` файл там уже есть."""
+    status, info = request_json(
+        "GET", f"{API}/resources/upload", headers=headers,
+        params={"path": remote, "overwrite": "true" if overwrite else "false"})
+    if status == 401:
+        raise CloudError("Яндекс.Диск: неверный или просроченный токен (401).")
+    if status == 409 and not overwrite:
+        return None
+    href = (info or {}).get("href") if isinstance(info, dict) else None
+    if not href:
+        raise CloudError(f"Яндекс.Диск не дал ссылку на загрузку: {info}")
+    return href
+
+
+def _md5(src: Path) -> str:
+    h = hashlib.md5()  # noqa: S324 — сверка с md5, который отдаёт сам Диск
+    with src.open("rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _same_remote(remote: str, src: Path, cfg: dict) -> bool:
+    """На Диске под этим именем лежит ЭТОТ ЖЕ файл (прошлая попытка залила, а
+    ответ потерялся): размер и md5 совпадают. Не прочитать — считаем, что
+    другой: лишняя копия лучше затёртой записи."""
+    try:
+        status, meta = request_json("GET", f"{API}/resources", headers=_read_auth(cfg),
+                                    params={"path": remote, "fields": "size,md5"})
+    except CloudError:
+        return False
+    if status != 200 or not isinstance(meta, dict):
+        return False
+    if meta.get("size") != src.stat().st_size:
+        return False
+    return not meta.get("md5") or meta["md5"] == _md5(src)
+
+
+def _free_remote(folder: str, name: str, src: Path, cfg: dict,
+                 headers: dict) -> tuple[str, str | None]:
+    """(путь на Диске, ссылка на заливку) без затирания ДРУГОГО файла: то же
+    имя, если оно свободно; если там этот же файл — ссылка None (заливать не
+    надо); иначе «имя (2)…». Вторая часть встречи с тем же именем раньше
+    уходила с overwrite=true и затирала первую — вместе с её публичной ссылкой
+    в Weeek (второй раунд ревью 30.10)."""
+    stem, dot, ext = name.rpartition(".")
+    if not dot:
+        stem, ext = name, ""
+    for n in range(1, 100):
+        cand = name if n == 1 else (f"{stem} ({n}).{ext}" if ext else f"{stem} ({n})")
+        remote = f"{folder}/{cand}"
+        href = _upload_href(remote, headers, overwrite=False)
+        if href:
+            return remote, href
+        if _same_remote(remote, src, cfg):
+            return remote, None
+    raise CloudError(f"На Диске слишком много файлов с именем {name}.")
+
+
+def upload(file_path: str, name: str, cfg: dict, overwrite: bool = True) -> dict:
+    """`overwrite=False` — записи встреч: одноимённый ДРУГОЙ файл на Диске не
+    затирается, новый ложится рядом под «имя (2)…» (путь — в ответе).
+    Протокол при «Пересобрать» заменяет прежний — ему `overwrite` нужен."""
     src = Path(file_path)
     if not src.exists():
         return {"ok": False, "backend": "yandex_disk", "error": "Файл не найден."}
@@ -318,15 +382,14 @@ def upload(file_path: str, name: str, cfg: dict) -> dict:
         folder = (cfg.get("folder") or "disk:/Телемост-записи").rstrip("/")
         _ensure_folder(folder, headers)
         remote = f"{folder}/{name}"
-
-        status, info = request_json(
-            "GET", f"{API}/resources/upload",
-            headers=headers, params={"path": remote, "overwrite": "true"})
-        if status == 401:
-            raise CloudError("Яндекс.Диск: неверный или просроченный токен (401).")
-        href = (info or {}).get("href")
-        if not href:
-            raise CloudError(f"Яндекс.Диск не дал ссылку на загрузку: {info}")
+        if overwrite:
+            href = _upload_href(remote, headers, overwrite=True)
+        else:
+            remote, href = _free_remote(folder, name, src, cfg, headers)
+            if href is None:
+                url, note = _publish(remote, cfg, headers)
+                return {"ok": True, "backend": "yandex_disk", "published": bool(url),
+                        "url": url, "path": remote, "public_note": note}
 
         # Big recordings take a while — stream from disk (an hour of video is
         # hundreds of MB; read_bytes() would hold it all in RAM) with a
