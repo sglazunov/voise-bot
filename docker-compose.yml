@@ -61,7 +61,12 @@ services:
     shm_size: "2gb"
 
   db:
-    image: postgres:16-alpine
+    # pgvector поверх официального Postgres 16: нужен векторному поиску по
+    # памяти встреч (VTX_EMBED_PROVIDER). Том pgdata, созданный образом
+    # postgres:16-alpine, совместим — это та же мажорная версия 16, формат
+    # данных не менялся; расширение подключается само (CREATE EXTENSION IF
+    # NOT EXISTS vector) при первом включении эмбеддингов, без миграций.
+    image: pgvector/pgvector:pg16
     container_name: linux-voise-db
     restart: unless-stopped
     environment:
