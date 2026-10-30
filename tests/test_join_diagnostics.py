@@ -792,3 +792,39 @@ def test_покинуть_раньше_любого_выйти():
     bot = _bot(_closable(page))
     assert bot.leave_call(timeout=1) is True
     assert other.clicks == 0 and leave.clicks == 1
+
+
+# ---------------------------------------------------------------------------
+# Второй раунд ревью 30.10 (§5): «весь экран» и фильтр в `_hangup_button`.
+# ---------------------------------------------------------------------------
+def test_выйти_из_режима_во_весь_экран_не_кнопка_выхода():
+    """`_not_leave` знал «полноэкранный», но не «весь экран» — слова, которыми
+    Телемост подписывает тот же переключатель (`_FULLSCREEN_TOGGLE`)."""
+    fullscreen = _Btn("", aria="Выйти из режима «Во весь экран»")
+    leave = _Btn("", aria="Завершить звонок")
+    page, child = _call(leave, 'button[aria-label*="авершить"]',
+                        extra={'button[aria-label*="ыйти"]': fullscreen})
+    bot = _bot(_closable(page))
+    assert bot.leave_call(timeout=1) is True
+    assert fullscreen.clicks == 0 and leave.clicks == 1
+
+
+def test_hangup_button_отсеивает_полноэкранный_не_только_для_всех():
+    """`_hangup_button` фильтрует через `_not_leave`: «Выйти из
+    полноэкранного режима» стоит раньше «Завершить» и «для всех» не содержит."""
+    fullscreen = _Btn("", aria="Выйти из полноэкранного режима")
+    leave = _Btn("", aria="Завершить звонок")
+    page, child = _call(leave, 'button[aria-label*="авершить"]',
+                        extra={'button[aria-label*="ыйти"]': fullscreen})
+    bot = _bot(_closable(page))
+    assert bot._hangup_button() is leave
+
+
+def test_not_leave_словарь_переключателя_экрана():
+    T = TelemostBot
+    for label in ("Выйти из режима «Во весь экран»", "Развернуть на весь экран",
+                  "Exit full screen", "Exit fullscreen", "Свернуть панель чатов",
+                  "Выйти из полноэкранного режима"):
+        assert T._not_leave(_Btn("", aria=label)) is True, label
+    for label in ("Покинуть звонок", "Выйти из звонка", "Завершить звонок", "Leave call"):
+        assert T._not_leave(_Btn("", aria=label)) is False, label

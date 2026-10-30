@@ -11,6 +11,7 @@ Playwright is imported lazily so the rest of the app runs without it.
 """
 from __future__ import annotations
 
+import difflib
 import os
 from datetime import datetime
 import queue
@@ -211,6 +212,13 @@ _FULLSCREEN_TOGGLE = [
     'button[aria-label*="collapse" i]',
 ]
 _FULLSCREEN_CLASS = "yamb-windowed-meeting-fullscreen"
+# Тот же словарь — для выхода из звонка: кнопка с такими словами в подписи
+# переключает экран, а не выводит из звонка («Выйти из режима «Во весь
+# экран»» ловится `aria-label*="ыйти"`). Второй раунд ревью 30.10: список
+# знал «полноэкранный», но не «весь экран».
+_FULLSCREEN_WORDS = tuple(sorted(
+    {m.lower() for m in re.findall(r'aria-label\*="([^"]+)"', " ".join(_FULLSCREEN_TOGGLE))}
+    | {"полноэкран", "full screen", "fullscreen"}))
 # Схемы, переход по которым — обычная навигация, а не «открыть приложение».
 _WEB_SCHEMES = {"http", "https", "ws", "wss", "data", "blob", "about", "chrome",
                 "chrome-error", "chrome-extension", "file", "javascript"}
@@ -1234,11 +1242,13 @@ class TelemostBot:
     def _not_leave(cls, el) -> bool:
         """Кнопка, которую нельзя жать при выходе: «для всех» или «Выйти из
         полноэкранного режима» — её ловил `aria-label*="ыйти"`, и вместо выхода
-        бот возвращал в запись боковую панель с чужими чатами (ревью 30.10)."""
+        бот возвращал в запись боковую панель с чужими чатами (ревью 30.10).
+        Словарь — `_FULLSCREEN_WORDS` (подписи переключателя экрана, в т.ч.
+        «Во весь экран», «свернуть панель»)."""
         if cls._for_everyone(el):
             return True
         low = cls._label(el) or ""
-        return any(w in low for w in ("полноэкран", "fullscreen", "full screen"))
+        return any(w in low for w in _FULLSCREEN_WORDS)
 
     def _hangup_button(self):
         """Кнопка выхода из звонка — в окне встречи, не в виджете звонка
@@ -1507,9 +1517,16 @@ class TelemostBot:
     # (проверено в Chromium): обычная проверка «scrollTop у scrollHeight»
     # у такого списка ложна всегда. Присваивание scrollHeight годится для обоих
     # видов: позиция зажимается в допустимый диапазон, у `column-reverse` — к 0.
+    # ⚠️ `flex-direction` действует только на flex-контейнер: без
+    # `display: flex`/`inline-flex` вычисленное значение всё равно
+    # «column-reverse», но список обычный — его верх (0) считался низом
+    # (второй раунд ревью 30.10).
     _PIN_JS = """(word) => {
       const w = String(word || "").toLowerCase();
-      const rev = el => /column-reverse/.test(getComputedStyle(el).flexDirection);
+      const rev = el => {
+        const s = getComputedStyle(el);
+        return /flex/.test(s.display) && /column-reverse/.test(s.flexDirection);
+      };
       const atBottom = el => rev(el)
         ? Math.abs(el.scrollTop) <= 20
         : el.scrollTop >= el.scrollHeight - el.clientHeight - 20;
@@ -1612,42 +1629,117 @@ class TelemostBot:
         return None
 
     @classmethod
-    def _time_after_text(cls, lines: list[str]) -> bool:
+    def _continuation(cls, line: str, word: str = "") -> bool:
+        """Строка ПРОДОЛЖАЕТ сообщение, а не начинает новое: «в 11 созвон»,
+        «(изменено)», «👍 2», «— …». Второй раунд ревью 30.10: строка-дата с
+        таким продолжением под ней — текст сообщения в ЛЮБОЙ раскладке, а не
+        разделитель дня (под разделителем идёт имя автора с заглавной или
+        время). Одно слово со строчной («успеем?», «стоп») продолжением не
+        считается — это бывает и коротким сообщением; команда — никогда.
+        ⚠️ Эвристика по тексту: живой DOM чата Телемоста не сверен."""
+        s = line.strip()
+        if not s or cls._bare_time(s) or cls._is_day_header(s):
+            return False
+        if word and cls._is_stop_line(s, word):
+            return False
+        c = s[0]
+        if c.isdigit():
+            return False
+        if not c.isalpha():
+            return True
+        return c.islower() and len(s.split()) >= 2
+
+    @classmethod
+    def _header_shapes(cls, lines: list[str], word: str = ""):
+        """Кандидаты в разделители дня: [(индекс, строка выше, строка ниже)]
+        (пустые строки пропускаются; нет соседа — None). Строка-дата, под
+        которой продолжение сообщения (`_continuation`), не кандидат."""
+        out = []
+        n = len(lines)
+        for i, ln in enumerate(lines):
+            if not cls._is_day_header(ln):
+                continue
+            j = i + 1
+            while j < n and not lines[j].strip():
+                j += 1
+            k = i - 1
+            while k >= 0 and not lines[k].strip():
+                k -= 1
+            nxt = lines[j] if j < n else None
+            prv = lines[k] if k >= 0 else None
+            if nxt is not None and cls._continuation(nxt, word):
+                continue
+            out.append((i, prv, nxt))
+        return out
+
+    @classmethod
+    def _time_after_text(cls, lines: list[str], word: str = "") -> bool:
         """Раскладка чата: время ПОСЛЕ текста (True) или ПЕРЕД ним (False).
 
         Голосуют разделители дат: в раскладке «после» последний элемент дня —
         время, и строка прямо над разделителем — время; в раскладке «перед» —
         текст. Первый разделитель не голосует: над ним может быть что угодно
         (интерфейс, обрезанное сообщение). Голосов нет — «после»: так верстает
-        Телемост по живым логам 20.10 и 29.10."""
-        after = before = 0
+        Телемост по живым логам 20.10 и 29.10.
+
+        Строка-дата с голым временем СРАЗУ под ней в раскладке «после» —
+        однострочное сообщение, в раскладке «время, автор, текст» — настоящий
+        разделитель (второй раунд ревью 30.10). Сами по себе они не голосуют;
+        но если других голосов нет, а таких строк не меньше двух и над каждой
+        — текст, перед которым НЕ время (у сообщения над строкой — автор, а над
+        ним время прошлого сообщения), — раскладка «время первым»."""
+        after = before = tfirst = 0
         headers = 0
-        for i, ln in enumerate(lines):
-            if not cls._is_day_header(ln):
-                continue
-            if i + 1 < len(lines) and cls._bare_time(lines[i + 1]):
+        for i, prv, nxt in cls._header_shapes(lines, word):
+            if nxt is not None and cls._bare_time(nxt):
+                k = i - 1
+                while k >= 0 and not lines[k].strip():
+                    k -= 1
+                kk = k - 1
+                while kk >= 0 and not lines[kk].strip():
+                    kk -= 1
+                if prv is None or (not cls._bare_time(prv) and not cls._is_day_header(prv)
+                                   and not prv.startswith(cls._FRAME_SEP)
+                                   and (kk < 0 or not cls._bare_time(lines[kk]))):
+                    tfirst += 1
                 continue                 # «Сегодня» со своим временем — сообщение
             headers += 1
-            if headers == 1 or i == 0:
+            if headers == 1 or i == 0 or prv is None:
                 continue
-            prev = lines[i - 1]
-            if cls._is_day_header(prev) or not prev.strip() or prev.startswith(cls._FRAME_SEP):
+            if cls._is_day_header(prv) or prv.startswith(cls._FRAME_SEP):
                 continue
-            if cls._bare_time(prev):
+            if cls._bare_time(prv):
                 after += 1
-            else:
+            elif cls._time_above(lines, i):
+                # Голос «перед» — только если выше текста, что над строкой,
+                # ближайшее — время его сообщения. Строка-дата под именем
+                # автора сразу после разделителя («Сегодня⏎Иван Р.⏎Дедлайн:⏎
+                # 1 ноября») — текст сообщения, а не голос (второй раунд ревью).
                 before += 1
+        if after == 0 and before == 0 and tfirst >= 2:
+            return False
         return after >= before
 
     @classmethod
-    def _stop_events(cls, lines: list[str], word: str,
-                     time_after: bool | None = None) -> list[tuple[str, str | None]]:
-        """Строки-команды с временем сообщения: «стоп 11:26» — в той же
-        строке; иначе — соседняя строка С ОДНОЙ стороны, по раскладке чата
-        (`_time_after_text`). Смотреть в обе стороны нельзя: с другой стороны
-        стоит время СОСЕДНЕГО сообщения (ревью 30.10). Нет времени — None."""
+    def _time_above(cls, lines: list[str], i: int) -> bool:
+        """Ближайшая к строке `i` сверху строка-структура (голое время или
+        строка-дата), не считая самой соседней, — голое время."""
+        k = i - 1
+        while k >= 0 and not lines[k].strip():
+            k -= 1
+        for x in reversed(lines[:max(k, 0)]):
+            if cls._bare_time(x):
+                return True
+            if cls._is_day_header(x):
+                return False
+        return False
+
+    @classmethod
+    def _stop_events_at(cls, lines: list[str], word: str,
+                        time_after: bool | None = None) -> list[tuple[int, str, str | None]]:
+        """Как `_stop_events`, но с индексом строки: [(i, текст, время)]."""
         if time_after is None:
-            time_after = cls._time_after_text(lines)
+            time_after = cls._time_after_text(lines, word)
         j_off = 1 if time_after else -1
         out = []
         n = len(lines)
@@ -1660,8 +1752,17 @@ class TelemostBot:
                 t = m.group(0)
             elif 0 <= i + j_off < n:
                 t = cls._bare_time(lines[i + j_off])
-            out.append((ln.strip(), t))
+            out.append((i, ln.strip(), t))
         return out
+
+    @classmethod
+    def _stop_events(cls, lines: list[str], word: str,
+                     time_after: bool | None = None) -> list[tuple[str, str | None]]:
+        """Строки-команды с временем сообщения: «стоп 11:26» — в той же
+        строке; иначе — соседняя строка С ОДНОЙ стороны, по раскладке чата
+        (`_time_after_text`). Смотреть в обе стороны нельзя: с другой стороны
+        стоит время СОСЕДНЕГО сообщения (ревью 30.10). Нет времени — None."""
+        return [(txt, t) for _, txt, t in cls._stop_events_at(lines, word, time_after)]
 
     @staticmethod
     def _msg_after(t: str | None, since_min: int, cur_min: int) -> bool:
@@ -1702,19 +1803,37 @@ class TelemostBot:
             return False
         return len(tokens) <= BROWSER_STOP_MAX_TOKENS
 
+    def _watch_minutes(self, wall: float | None = None) -> tuple[int, int]:
+        """(минута начала слежки, минута «сейчас») — минуты суток. Начало —
+        `_chat_since_min` (тесты) либо `_chat_since`, момент входа в звонок
+        (у Chromium и Python один TZ контейнера)."""
+        if wall is None:
+            wall = (getattr(self, "_clock", None) or time.time)()
+        since_min = getattr(self, "_chat_since_min", None)
+        if since_min is None:
+            since = getattr(self, "_chat_since", None)
+            if since is None:
+                since = self._chat_since = wall
+            lt = time.localtime(since)
+            since_min = lt.tm_hour * 60 + lt.tm_min
+        lt = time.localtime(wall)
+        return since_min, lt.tm_hour * 60 + lt.tm_min
+
     def maybe_chat_stop(self, word: str) -> bool:
         """True when a NEW stop-word message appeared in the chat.
 
         Never clicks anything — the panel was opened once by open_chat(). Reads
-        all frames' text every ~5 s, counts standalone stop-word lines, and fires
-        when the count grows above the first-seen baseline. The live count is
-        logged whenever it changes, so a miss is diagnosable from the log.
+        all frames' text every ~5 s and decides per frame (`_frame_chat_stop`).
+        The live count is logged whenever it changes, so a miss is diagnosable
+        from the log.
 
         ⚠️ 30.10: в постоянной комнате вся история — одни «стоп», текст нового
         сообщения дословно равен старым, а счётчик при виртуализации списка не
         растёт («одно пришло — одно ушло»). Поэтому под разделом ТЕКУЩЕГО ДНЯ
-        новизну даёт ВРЕМЯ сообщения: «стоп» со временем не раньше входа бота —
-        команда, даже если такой текст уже видели."""
+        новизну даёт ВРЕМЯ сообщения: «стоп» со временем позже входа бота —
+        команда, даже если такой текст уже видели. Без времени новым считается
+        только то, что ДОПИСАНО ниже прежнего окна (`_appended`, второй раунд
+        ревью 30.10) — не «новый текст» и не «счётчик вырос»."""
         word = (word or "").strip().lower()
         if not word:
             return False
@@ -1724,18 +1843,7 @@ class TelemostBot:
             return False
         self._chat_last_peek = now
         wall = clock()
-        # Начало слежки — МИНУТА суток (у Chromium и Python один TZ контейнера).
-        # `_chat_since_min` задаётся явно (тесты) либо берётся из `_chat_since`
-        # — момента, когда бот оказался в звонке (wait_until_end).
-        since_min = getattr(self, "_chat_since_min", None)
-        if since_min is None:
-            since = getattr(self, "_chat_since", None)
-            if since is None:
-                since = self._chat_since = wall
-            lt = time.localtime(since)
-            since_min = lt.tm_hour * 60 + lt.tm_min
-        lt = time.localtime(wall)
-        cur_min = lt.tm_hour * 60 + lt.tm_min
+        since_min, cur_min = self._watch_minutes(wall)
 
         pinned = bool(self._pin_chat_bottom(word))
         text = self._read_all_text()
@@ -1750,20 +1858,25 @@ class TelemostBot:
         # фрейма: список чатов оболочки перевешивал голосами чат встречи, и
         # команда получала время соседнего сообщения (адверсариальное ревью).
         frames = self._split_frames(all_lines)
+        # Второй раунд ревью 30.10: при оболочке Мессенджера главный документ —
+        # список чатов с превью («Олег: стоп»). Когда фрейм встречи есть, сам
+        # он остановить запись не может: чат встречи — во фрейме.
+        if len(frames) > 1 and self._shell_present():
+            frames = [f for f in frames if f[0] != "main"]
         plan = []
         n_total = 0
         for fkey, flines in frames:
-            time_after = self._time_after_text(flines)
+            time_after = self._time_after_text(flines, word)
             scope, lines = self._frame_scope(fkey, flines, wall, pinned,
                                              time_after, word)
             n = sum(1 for ln in lines if self._is_stop_line(ln, word))
             n_total += n
-            plan.append((fkey, scope, lines, n, time_after))
+            plan.append((fkey, scope, lines, n, time_after, flines))
         if n_total != self._chat_last_n:
             # When the word IS on the page but no line qualified as a command,
             # show a sample — so a layout change is diagnosable from the card log
             # («вижу слово, но строка не похожа на команду» vs «слова нет вовсе»).
-            seen_lines = [ln for _, _, lines, _, _ in plan for ln in lines]
+            seen_lines = [ln for p in plan for ln in p[2]]
             if n_total == 0 and any(word in ln.lower().replace("ё", "е") for ln in seen_lines):
                 sample = next(ln.strip() for ln in seen_lines
                               if word in ln.lower().replace("ё", "е"))[:80]
@@ -1774,9 +1887,9 @@ class TelemostBot:
                 self._on_log(f"Чат: сообщений «{word}» видно {n_total}.")
             self._chat_last_n = n_total
         fired = False
-        for fkey, scope, lines, _, time_after in plan:
+        for fkey, scope, lines, _, time_after, flines in plan:
             if self._frame_chat_stop(fkey, scope, lines, word, time_after,
-                                     since_min, cur_min):
+                                     since_min, cur_min, flines=flines):
                 fired = True
         self._chat_reads = getattr(self, "_chat_reads", 0) + 1
         return fired
@@ -1802,7 +1915,7 @@ class TelemostBot:
                      word: str = "") -> tuple[str, list[str]]:
         """Область счёта фрейма: «today» — строки под разделителем текущего дня
         В ЭТОМ фрейме; иначе «all» — все строки фрейма."""
-        lines = self._today_lines(flines, wall, time_after)
+        lines = self._today_lines(flines, wall, time_after, word)
         seen = getattr(self, "_today_seen_frames", None)
         if seen is None:
             seen = self._today_seen_frames = set()
@@ -1811,7 +1924,7 @@ class TelemostBot:
             self._remember_anchors(fkey, lines, word)
             return "today", lines
         if fkey in seen:
-            headers = self._day_headers(flines, time_after)
+            headers = self._day_headers(flines, time_after, word)
             if pinned and not headers:
                 # Ревью 30.10: заголовок «Сегодня» ушёл из DOM виртуализированного
                 # списка. Достраиваем раздел дня, только когда это ДОКАЗАНО: раздел
@@ -1836,12 +1949,27 @@ class TelemostBot:
         """Тройки соседних строк (автор, текст, время) — отпечаток сообщения.
         Строки команды в отпечаток не идут: «Сергей Беск / стоп / 10:40»
         одинаково во все недели, по нему место в ленте не узнать. (Дат в
-        строках раздела дня не бывает: он кончается последним разделителем.)"""
+        строках раздела дня не бывает: он кончается последним разделителем.)
+
+        ⚠️ Второй раунд ревью 30.10 (коллизия якорей): тройка БЕЗ времени
+        (превью ссылки на комнату, шаблон повестки) одинакова во все недели —
+        прошлонедельный «стоп» под ней считался сегодняшним. Якорь обязан
+        нести время, и это время — ПОСЛЕ входа бота: сообщение написано при
+        нём, в эту встречу. Совпасть с прошлой неделей может только сообщение
+        того же автора, с тем же текстом и в ту же минуту — эвристика,
+        которую должен подтвердить живой DOM чата."""
+        since_min, cur_min = self._watch_minutes()
         out = []
         for i in range(len(lines) - 2):
             tri = tuple(ln.strip() for ln in lines[i:i + 3])
-            if all(tri) and not (word and any(self._is_stop_line(x, word) for x in tri)):
-                out.append((i, tri))
+            if not all(tri):
+                continue
+            if word and any(self._is_stop_line(x, word) for x in tri):
+                continue
+            times = [m.group(0) for m in (self._TIME_RE.search(x) for x in tri) if m]
+            if not any(self._msg_after(t, since_min, cur_min) for t in times):
+                continue
+            out.append((i, tri))
         return out
 
     def _remember_anchors(self, fkey: str, lines: list[str], word: str) -> None:
@@ -1862,105 +1990,119 @@ class TelemostBot:
                 cut = i + 3
         return cut
 
+    @staticmethod
+    def _norm_line(line: str) -> str:
+        return line.strip().lower().replace("ё", "е")
+
+    @classmethod
+    def _appended(cls, prev: list[str] | None, cur: list[str],
+                  word: str) -> set[int] | None:
+        """Индексы строк `cur`, ДОПИСАННЫХ НИЖЕ всего, что показывало прежнее
+        окно `prev`. None — сравнивать не с чем.
+
+        Новое сообщение встаёт под последним сообщением списка; прокрутка и
+        перерисовка виртуализированного списка показывают старые строки НАД
+        ним (или меняют само окно). Поэтому новым считается только вставленное
+        после последней строки-сообщения прежнего окна (строка со временем или
+        команда; если таких нет — после последней строки вообще), и только
+        если эта строка в новом окне на месте. Подписи интерфейса под списком
+        не мешают: вставка встаёт между ними и последним сообщением."""
+        if not prev:
+            return None
+        p = [cls._norm_line(x) for x in prev]
+        c = [cls._norm_line(x) for x in cur]
+        msg = [i for i, x in enumerate(p) if x and (cls._TIME_RE.search(x)
+                                                    or (word and cls._is_stop_line(x, word)))]
+        if msg:
+            last = msg[-1]
+        else:
+            filled = [i for i, x in enumerate(p) if x]
+            if not filled:
+                return None
+            last = filled[-1]
+        sm = difflib.SequenceMatcher(None, p, c, autojunk=False)
+        anchored = False
+        out: set[int] = set()
+        for tag, i1, i2, j1, j2 in sm.get_opcodes():
+            if tag == "equal":
+                if i1 <= last < i2:
+                    anchored = True
+            elif tag in ("insert", "replace") and anchored:
+                out.update(range(j1, j2))
+        return out
+
     def _frame_chat_stop(self, fkey: str, scope: str, lines: list[str],
                          word: str, time_after: bool, since_min: int,
-                         cur_min: int) -> bool:
-        """Новая команда в одном фрейме (логика 20.10–30.10, область — своя)."""
-        # Сами строки: сообщение несёт время («стоп 16:49»), поэтому новое
-        # отличимо от старого. Это надёжнее счётчика — при прокрутке
-        # виртуализированного списка количество видимых строк скачет в обе
-        # стороны, и рост «нового сообщения» терялся.
-        # Текст сравнивается без регистра: «Стоп 11:12» и «стоп 11:12» —
-        # одно и то же для команды, а «новым» текстом становилась любая
-        # заглавная из истории (адверсариальное ревью 30.10).
-        events = [(txt.lower().replace("ё", "е"), t)
-                  for txt, t in self._stop_events(lines, word, time_after=time_after)]
-        if scope == "all" and self._day_headers(lines, time_after):
-            # Адверсариальное ревью 30.10: в окне есть дата, и это не сегодня —
-            # значит, всё видимое не новее этой прошлой даты (строки над ней
-            # ещё старше). Командой тут быть нечему, сколько бы новых строк
-            # ни показала прокрутка: «Стоп» 9 октября после сдвига окна
-            # останавливал запись. Виденным текст при этом считается.
-            cand = []
-        elif scope == "today":
-            # Под разделом дня время, если оно есть, решает всё — и для
-            # новизны, и для счётчика: утреннее «стоп 10:20», подгруженное
-            # прокруткой, — история той же комнаты, а не рост (ревью 30.10).
-            cand = [(txt, t) for txt, t in events
-                    if t is None or self._msg_after(t, since_min, cur_min)]
-        else:
-            cand = events
-        n = len(cand)
-        hits = {txt for txt, _ in cand}
-        timed = set(events)                      # (текст, время) — точнее текста
-        # ⚠️ Базовая линия — СВОЯ у каждой области счёта (20.10: «видно 10 →
-        # 0 → 1», бот видит «стоп» и сидит дальше). На первом чтении
-        # разделителя «Сегодня» ещё не было — насчитали 10 из истории; потом
-        # он появился, счёт пошёл только под ним, а сравнивался с теми же 10,
-        # и новое «стоп» (1) не дотягивало. Строка «стоп» при этом дословно
-        # совпадала с историческими, так что и проверка по строкам молчала.
+                         cur_min: int, flines: list[str] | None = None) -> bool:
+        """Новая команда в одном фрейме. `lines` — область счёта (`scope`),
+        `flines` — весь текст фрейма (область «today» — его хвост).
+
+        Признаки новизны (второй раунд ревью 30.10 — «новый текст» и
+        «счётчик вырос» убраны: прокрутка виртуализированного списка
+        показывает старые «стоп!» и добавляет строк, и то и другое давало
+        ложную остановку):
+        - под разделом текущего дня у строки команды есть время — решает
+          ТОЛЬКО оно: позже входа бота = команда (`_msg_after`);
+        - иначе (строка без времени, область «all» без видимой даты) — строка
+          ДОПИСАНА НИЖЕ прежнего окна того же фрейма (`_appended`), и прошлое
+          чтение было в той же области: смена области (заголовок дня
+          появился или ушёл) — это другое окно, сравнивать не с чем;
+        - область «all» с видимой датой (не сегодня) — команды нет вовсе."""
+        if flines is None:
+            flines = lines
+        off = len(flines) - len(lines)
+        prevs = getattr(self, "_chat_prev", None)
+        if prevs is None:
+            prevs = self._chat_prev = {}
+        prev, prev_scope = prevs.get(fkey, (None, None))
+        prevs[fkey] = (list(flines), scope)
+
+        events = [(i, txt.lower().replace("ё", "е"), t)
+                  for i, txt, t in self._stop_events_at(lines, word, time_after=time_after)]
+        # ⚠️ Состояние — СВОЁ у каждой области счёта (20.10: «видно 10 → 0 →
+        # 1»): здесь — какие (текст, время) под разделом дня уже видели.
         scopes = getattr(self, "_chat_scopes", None)
         if scopes is None:
             scopes = self._chat_scopes = {}
         prefix = f"{fkey}|"
-        mine = {k: v for k, v in scopes.items() if k.startswith(prefix)}
-        first_read = not mine
+        known_frame = any(k.startswith(prefix) for k in scopes)
         skey = prefix + scope
         st = scopes.get(skey)
         if st is None:
-            if scope == "today" and not first_read:
+            st = scopes[skey] = {"timed": set()}
+            if scope == "today" and known_frame:
                 # Раздел текущего дня появился ПО ХОДУ записи (30.10: в комнате
                 # одни «стоп», и раздел появляется вместе с командой).
-                # Старое под разделом решает ВРЕМЯ, когда оно известно: всё,
-                # написанное не позже входа, — утро той же комнаты, которое
-                # прокрутка показала заново. Совпадение с историей не в счёт:
-                # «стоп 11:18» 23.10 и «стоп 11:18» сегодня — разные сообщения
-                # (ревью 30.10). Без времени — как раньше, по тексту.
-                seen_txt = set().union(*(v["seen"] for v in mine.values()))
-                old = [(txt, t) for txt, t in events
-                       if (t is not None and not self._msg_after(t, since_min, cur_min))
-                       or (t is None and txt in seen_txt)]
-                # Счётчик считает только строки без времени (с временем решает
-                # время) — в базовую линию идут старые из них.
-                st = scopes[skey] = {"baseline": sum(1 for _, t in old if t is None),
-                                     "seen": {txt for txt, _ in old},
-                                     "timed": set(old)}
                 self._on_log("Чат: появился раздел текущего дня — "
                              f"команду «{word}» жду под ним.")
-            elif scope == "today":
-                # Первое чтение под разделом дня: всё, что уже лежит, — старое
-                # по ТЕКСТУ, но «стоп» со временем позже начала слежки —
-                # команда и здесь (29.10: чат мог открыться не сразу).
-                st = scopes[skey] = {"baseline": n, "seen": {txt for txt, _ in events},
-                                     "timed": set()}
-            else:
-                scopes[skey] = {"baseline": n, "seen": {txt for txt, _ in events},
-                                "timed": timed}
-                return False              # всё, что уже лежало в чате
-        fresh = hits - st["seen"]
-        st["seen"] |= {txt for txt, _ in events}
-        recent = []
+        if scope == "all" and self._day_headers(lines, time_after, word):
+            # Адверсариальное ревью 30.10: в окне есть дата, и это не сегодня —
+            # значит, всё видимое не новее этой прошлой даты (строки над ней
+            # ещё старше). Командой тут быть нечему.
+            return False
         if scope == "today":
-            recent = [(txt, t) for txt, t in cand
-                      if (txt, t) not in st["timed"]
+            # Под разделом дня время, если оно есть, решает всё: утреннее
+            # «стоп 10:20», подгруженное прокруткой, — история той же комнаты;
+            # «стоп 11:18» сегодня после входа — команда, даже если 23.10 было
+            # такое же (ревью 30.10).
+            recent = [(txt, t) for _, txt, t in events
+                      if t is not None and (txt, t) not in st["timed"]
                       and self._msg_after(t, since_min, cur_min)]
-        st["timed"] |= timed
-        if fresh or recent:
+            st["timed"] |= {(txt, t) for _, txt, t in events if t is not None}
             if recent:
                 when = f"{since_min // 60:02d}:{since_min % 60:02d}"
                 self._on_log(f"Чат: новое сообщение «{word}» в {recent[0][1]} "
                              f"(слежу с {when}) — останавливаю запись.")
-            else:
-                self._on_log(f"Чат: новое сообщение «{word}» — останавливаю запись.")
-            return True
-        # Запасной признак на случай, когда две команды совпали дословно
-        # (одна минута, одно слово): тогда множество не растёт, а счётчик да.
-        # ⚠️ Базовая линия НИКОГДА не опускается: список виртуализирован, и
-        # 13 → 12 → 13 — это прокрутка, а не новое сообщение (29.09: бот вышел
-        # «по стоп-слову», которого никто не писал).
-        if n > st["baseline"]:
-            st["baseline"] = n
-            self._on_log(f"Чат: сообщений «{word}» стало больше — останавливаю запись.")
+                return True
+            untimed = [i for i, _, t in events if t is None]
+        else:
+            # Без раздела дня время не говорит, какой это день.
+            untimed = [i for i, _, _ in events]
+        if not untimed or prev_scope != scope:
+            return False
+        app = self._appended(prev, flines, word)
+        if app and any(i + off in app for i in untimed):
+            self._on_log(f"Чат: новое сообщение «{word}» — останавливаю запись.")
             return True
         return False
 
@@ -2001,31 +2143,55 @@ class TelemostBot:
         }
 
     @classmethod
-    def _day_headers(cls, lines: list[str], time_after: bool = True) -> list[int]:
+    def _day_headers(cls, lines: list[str], time_after: bool = True,
+                     word: str = "") -> list[int]:
         """Индексы НАСТОЯЩИХ разделителей дня в строках одного фрейма.
 
         «Сегодня» или «30 октября» бывает и ТЕКСТОМ сообщения — и тогда старый
         «стоп» под ним со временем после входа (еженедельная встреча в тот же
         час) останавливал запись на первом же чтении (адверсариальное ревью
-        30.10). Отличает соседство со временем: у сообщения время стоит рядом
-        со стороны раскладки, у разделителя — нет. Строка, за которой сразу
-        идёт голое время, — сообщение в любой раскладке (в «время перед
-        текстом» за разделителем идёт автор)."""
-        out = []
-        n = len(lines)
+        30.10). Разделитель — отдельная строка МЕЖДУ сообщениями:
+        - под ним не продолжение сообщения (`_continuation`: «в 11 созвон»,
+          «(изменено)», строка реакций) — в любой раскладке;
+        - раскладка «время после текста»: голое время сразу под строкой —
+          однострочное сообщение; над строкой — время прошлого сообщения (или
+          другой разделитель). Строка под именем автора, когда выше в окне
+          уже есть сообщения (разделитель или два голых времени), — текст
+          сообщения (второй раунд ревью 30.10: многострочное «Сегодня⏎в 11
+          созвон», «Понедельник⏎в 10:00» в сегодняшнем сообщении выключали
+          раздел дня). В чате без голых времён (время в строке или нет вовсе)
+          сравнивать не с чем — это правило не действует;
+        - раскладка «время перед текстом»: голое время НАД строкой — её время,
+          это сообщение; голое время ПОД строкой — время следующего сообщения
+          в вёрстке «время, автор, текст», разделителю оно не мешает (второй
+          раунд ревью: такой разделитель отвергался).
+        ⚠️ Всё это — эвристика по тексту, живой DOM чата не сверен."""
+        shapes = {i: (prv, nxt) for i, prv, nxt in cls._header_shapes(lines, word)}
+        timed = any(cls._bare_time(x) for x in lines)
+        out: list[int] = []
+        times_above = 0
         for i, ln in enumerate(lines):
-            if not cls._is_day_header(ln):
+            if i not in shapes:
+                if cls._bare_time(ln):
+                    times_above += 1
                 continue
-            if i + 1 < n and cls._bare_time(lines[i + 1]):
-                continue
-            if not time_after and i > 0 and cls._bare_time(lines[i - 1]):
+            prv, nxt = shapes[i]
+            if time_after:
+                if nxt is not None and cls._bare_time(nxt):
+                    continue
+                struct = bool(out) or times_above >= 2
+                if (timed and struct and prv is not None
+                        and not cls._TIME_RE.search(prv)
+                        and not cls._is_day_header(prv)):
+                    continue
+            elif prv is not None and cls._bare_time(prv):
                 continue
             out.append(i)
         return out
 
     @classmethod
     def _today_lines(cls, lines: list[str], now: float | None = None,
-                     time_after: bool | None = None) -> list[str]:
+                     time_after: bool | None = None, word: str = "") -> list[str]:
         """Строки ОДНОГО фрейма после разделителя текущего дня. Чат комнаты
         общий и не чистится: в нём «стоп» с прошлых встреч за месяцы, а список
         виртуализирован — при прокрутке старые строки то появляются, то
@@ -2034,9 +2200,9 @@ class TelemostBot:
         Раздел текущего дня — последний в ленте: если ниже «Сегодня» стоит
         другая дата, это «Сегодня» — не разделитель."""
         if time_after is None:
-            time_after = cls._time_after_text(lines)
+            time_after = cls._time_after_text(lines, word)
         markers = cls._today_markers(now)
-        headers = cls._day_headers(lines, time_after)
+        headers = cls._day_headers(lines, time_after, word)
         if headers and lines[headers[-1]].strip().lower() in markers:
             return lines[headers[-1] + 1:]
         return lines

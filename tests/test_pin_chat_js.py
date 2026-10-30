@@ -203,3 +203,71 @@ def test_js_список_не_у_низа_даёт_false(pin_result):
 @needs_chromium
 def test_js_слова_нет_списков_нет(pin_result):
     assert pin_result["r3"] == {"found": 0, "bottom": True}
+
+
+# --- второй раунд ревью 30.10 (§5) -------------------------------------------
+# Отдельная страница: на общей `_PAGE` выше прежние тесты считают списки.
+_PAGE2 = """<!doctype html><html><head><meta charset="utf-8"><style>
+.box { height: 100px; overflow-y: auto; }
+.tall { height: 1000px; flex-shrink: 0; }
+</style></head><body>
+<div id="blockrev" class="box" style="display:block;flex-direction:column-reverse">
+  <div class="tall">стоп</div></div>
+<div id="revnear" class="box" style="display:flex;flex-direction:column-reverse">
+  <div class="tall">стоп</div></div>
+<div id="revfar" class="box" style="display:flex;flex-direction:column-reverse">
+  <div class="tall">стоп</div></div>
+<div id="inline" class="box" style="display:inline-flex;flex-direction:column-reverse;width:100px">
+  <div class="tall">стоп</div></div>
+<pre id="out"></pre>
+<script>
+const PIN = __PIN__;
+const $ = id => document.getElementById(id);
+$("revnear").scrollTop = -10;
+$("revfar").scrollTop = -30;
+$("inline").scrollTop = -300;
+const before = {revnear: $("revnear").scrollTop, revfar: $("revfar").scrollTop};
+const r1 = PIN("стоп");
+const pos = {};
+for (const id of ["blockrev", "revnear", "revfar", "inline"]) {
+  pos[id] = {top: $(id).scrollTop, max: $(id).scrollHeight - $(id).clientHeight};
+}
+$("out").textContent = JSON.stringify({before, r1, pos});
+</script></body></html>"""
+
+
+@pytest.fixture(scope="module")
+def pin_result2(tmp_path_factory):
+    page = tmp_path_factory.mktemp("pin2") / "pin2.html"
+    page.write_text(_PAGE2.replace("__PIN__", TelemostBot._PIN_JS), encoding="utf-8")
+    out = subprocess.run(
+        [_CHROME, "--headless", "--no-sandbox", "--disable-gpu", "--dump-dom",
+         page.resolve().as_uri()],
+        capture_output=True, timeout=60)
+    dom = out.stdout.decode("utf-8", "replace")
+    m = re.search(r'<pre id="out">(.*?)</pre>', dom, re.S)
+    assert m and m.group(1), f"скрипт не отработал: {dom[-500:]} {out.stderr[-500:]!r}"
+    return json.loads(m.group(1))
+
+
+@needs_chromium
+def test_js_column_reverse_без_flex_обычный_список(pin_result2):
+    """`flex-direction: column-reverse` без `display:flex` ничего не
+    переворачивает: верх такого списка (scrollTop 0) — это верх, а не низ."""
+    p = pin_result2["pos"]["blockrev"]
+    assert p["max"] > 0 and p["top"] == p["max"]
+    assert pin_result2["r1"]["bottom"] is True
+
+
+@needs_chromium
+def test_js_column_reverse_допуск_у_низа(pin_result2):
+    """В пределах 20 px от низа список не дёргается; дальше — к низу (0)."""
+    assert pin_result2["before"] == {"revnear": -10, "revfar": -30}
+    assert pin_result2["pos"]["revnear"]["top"] == -10
+    assert pin_result2["pos"]["revfar"]["top"] == 0
+
+
+@needs_chromium
+def test_js_inline_flex_column_reverse_тоже_перевёрнут(pin_result2):
+    assert pin_result2["pos"]["inline"]["top"] == 0
+    assert pin_result2["r1"] == {"found": 4, "bottom": True}

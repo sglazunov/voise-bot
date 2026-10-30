@@ -155,3 +155,21 @@ def test_сбой_выхода_после_сбоя_записи_не_теряе�
                                   {"chat_stop_word": "", "auth_mode": "profile"},
                                   on_log=lambda *_: None, slot=slot)
     assert res["ok"] is True and res["reason"] == "error"
+
+
+def test_сбой_входа_не_жмёт_выход(_armed, tmp_path, monkeypatch):
+    """Второй раунд ревью 30.10 (выживший мутант): исключение ещё на входе —
+    бота в звонке нет, `leave_call` звать неоткуда и незачем."""
+    calls = []
+
+    def boom(self, *a, **kw):
+        raise RuntimeError("Target page, context or browser has been closed")
+    monkeypatch.setattr(_Bot, "join", boom)
+    monkeypatch.setattr(_Bot, "leave_call", lambda self, *a, **kw: calls.append("leave"))
+    out = tmp_path / "x.mp4"
+    slot = recorder.Slot(0, ":99", "meet0", "meet0.monitor")
+    res = recorder.record_meeting("https://telemost.yandex.ru/j/abc", str(out),
+                                  {"chat_stop_word": "стоп", "auth_mode": "profile"},
+                                  on_log=lambda *_: None, slot=slot)
+    assert res["ok"] is False
+    assert calls == []
