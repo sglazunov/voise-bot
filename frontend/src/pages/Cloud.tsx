@@ -14,7 +14,7 @@ const DEST = [
 
 export default function CloudPage() {
   const [team, setTeam] = useManagedTeam();
-  const { s, set, save, ready, reload, locked } = useSettings(team, () => setTeam(""));
+  const { s, set, save, ready, reload, locked, canManage } = useSettings(team, () => setTeam(""));
   // Облако и папки клиентской команды под замком задаёт основатель сервера.
   const lock = locked("cloud");
   const [ytoken, setYtoken] = useState("");
@@ -58,7 +58,7 @@ export default function CloudPage() {
 
   return (
     <Page title="Облако" subtitle="Куда выгружать готовые записи">
-      <TeamPicker s={s} team={team} setTeam={setTeam} onManaged={setManaged} />
+      <TeamPicker s={s} canManage={canManage} team={team} setTeam={setTeam} onManaged={setManaged} />
       <Card className="mb-3.5">
         <div className="font-bold text-[15px]">Куда сохранять запись</div>
         <div className="text-[12px] mb-3" style={{ color: "var(--muted)" }}>Готовый mp4 выгружается в облако. Секреты хранятся локально на сервере.</div>

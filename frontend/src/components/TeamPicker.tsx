@@ -5,21 +5,25 @@ import { api } from "../lib/api";
 
 // Выбор команды для основателя сервера + замок «управляется сервером».
 // Остальным — только пояснение, если часть настроек их команды под замком.
-export function TeamPicker({ s, team, setTeam, onManaged }: {
-  s: Record<string, any>; team: string; setTeam: (t: string) => void;
+//
+// `canManage` — признак основателя, переживающий смену команды: пока грузятся
+// настройки новой команды, `s` пуст, и без него выбор команды пропадал.
+export function TeamPicker({ s, canManage, team, setTeam, onManaged }: {
+  s: Record<string, any>; canManage?: boolean; team: string; setTeam: (t: string) => void;
   onManaged: (on: boolean) => Promise<void>;
 }) {
   const [teams, setTeams] = useState<any[] | null>(null);
+  const manage = !!(canManage ?? s.can_manage_teams);
   useEffect(() => {
-    if (!s.can_manage_teams || teams) return;
+    if (!manage || teams) return;
     api.get("/api/automation/teams").then((d) => setTeams(d.teams || [])).catch(() => setTeams([]));
-  }, [s.can_manage_teams, teams]);
+  }, [manage, teams]);
   // Серверные ключи (флаг замка, пути на диске сервера, экономика) закрыты у
   // ЛЮБОЙ команды — пояснение про замок нужно только команде под замком.
   const anyLocked = !!s.managed_by_server && (s.locked_keys || []).length > 0;
   return (
     <>
-      {s.can_manage_teams && (
+      {manage && (
         <Card className="mb-3.5">
           <div className="flex items-center gap-2 mb-2"><Users size={17} color="var(--accent)" />
             <div className="font-bold text-[15px]">Команда</div>
