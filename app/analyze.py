@@ -375,7 +375,7 @@ def _with_extra(prompt: str, extra: str) -> str:
 # So the gate measures ONLY the speech, with those blocks stripped out.
 _INJECTED_BLOCK_RE = re.compile(
     r"\n*===\s*(УЧАСТНИКИ ЗВОНКА|ПОСТОЯННЫЙ КОНТЕКСТ|ТЕКСТ С ЭКРАНА"
-    r"|КОНТЕКСТ СЕРИИ ВСТРЕЧ|ПРОШЛАЯ ВСТРЕЧА ЭТОЙ СЕРИИ)"
+    r"|КОНТЕКСТ СЕРИИ ВСТРЕЧ|ПРОШЛАЯ ВСТРЕЧА ЭТОЙ СЕРИИ|РАНЬШЕ В ЭТОЙ СЕРИИ)"
     r"[\s\S]*?(?=\n\s*===|\Z)", re.IGNORECASE)
 
 
