@@ -8,9 +8,19 @@ from __future__ import annotations
 
 import uuid
 
+import sys
+
+import pytest
+
 from app import meeting_series
 from app.automation.clouds import yandex_disk
 from scripts import sort_cloud_archive as sca
+
+# Имена записей содержат двоеточие («10:00») — на NTFS это альтернативный поток
+# данных, а не часть имени, и локальное «облако» на Windows работает с другими
+# файлами. Прод и CI — Linux; на машине разработчика набор пропускается.
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32", reason="двоеточие в именах файлов недопустимо на NTFS")
 
 
 def _user():

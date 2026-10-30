@@ -202,3 +202,85 @@ class TestДозаливкаПослеРестарта:
                                  str(rec), first_delay=0)
         assert st.cloud_url == "https://disk/x"
         assert wrote == []
+
+
+
+# --------------------------------------------------------------------------- #
+# Проверка правок 30.10: гонка удаления, название в снапшоте, IPv6 loopback
+# --------------------------------------------------------------------------- #
+class TestУдалениеВоВремяЗаписи:
+    def test_снапшот_забытой_карточки_не_пишется(self):
+        s = Scheduler()
+        st = MeetingState(key="alice:9:2026-10-30T10:00:00+00:00", task_id="9",
+                          title="t", url="", start=None, owner="alice",
+                          state="recording")
+        s._states[st.key] = st
+        s.forget_team("alice")
+        snapshots.save(st)                         # поток записи пишет дальше
+        assert st.key not in snapshots.load("alice")
+
+    def test_запись_удалённой_команды_не_становится_задачей(self, monkeypatch, tmp_path):
+        """Аккаунт удалили во время записи: поток _run после остановки создавал
+        задачу и заливал видео — под командой, которой больше нет."""
+        from tests.test_meeting_outcomes import TestSchedulerReadsReason, _Slot, _state
+        s = Scheduler()
+        st = _state()
+        s._states[st.key] = st
+        written = []
+
+        def recording(url, out, cfg, **kw):
+            Path(out).parent.mkdir(parents=True, exist_ok=True)
+            Path(out).write_bytes(b"x")            # рекордер пишет СВОЙ файл
+            written.append(Path(out))
+            s.forget_team("team")                  # удаление посреди записи
+            return {"ok": True, "path": out, "reason": "stopped", "size": 1}
+
+        created = TestSchedulerReadsReason()._prepare(monkeypatch, tmp_path, {})
+        monkeypatch.setattr(sched_mod.recorder, "record_meeting", recording)
+        uploads = []
+        monkeypatch.setattr(sched_mod.delivery, "upload_with_retry",
+                            lambda *a, **k: uploads.append(1) or {"ok": True, "url": "u"})
+        s._run(st, _Slot())
+        assert created == {}, "задача для удалённой команды создана"
+        assert uploads == [], "видео удалённой команды уехало в облако"
+        assert written and not written[0].exists(), "запись удалённой команды осталась на диске"
+
+
+class TestНазваниеВСнапшоте:
+    def test_название_сохраняется(self):
+        st = MeetingState(key="alice:5:2026-10-30T10:00:00+00:00", task_id="5",
+                          title="Планёрка", url="", start=None, owner="alice")
+        assert snapshots.of_state(st)["title"] == "Планёрка"
+
+    def test_дозаливка_берёт_название_встречи_а_не_имя_файла(self, tmp_path, monkeypatch):
+        titles = []
+        done = threading.Event()
+
+        def fake_late(self, user, st, cfg_, out, first_delay=300):
+            titles.append(st.title)
+            done.set()
+
+        monkeypatch.setattr(Scheduler, "_late_upload", fake_late)
+        monkeypatch.setattr(sched_mod.security, "list_teams", lambda: ["alice"])
+        monkeypatch.setattr(sched_mod.auto_settings, "load",
+                            lambda u: {"weeek_token": "tok"})
+        rec = tmp_path / "30.10.2026, 10-00. - Планёрка.mp4"
+        rec.write_bytes(b"x" * 10)
+        job = store.create(rec.name, str(rec), "ru", False, owner="alice")
+        snapshots.save(MeetingState(
+            key="alice:6:2026-10-30T10:00:00+00:00", task_id="6", title="Планёрка",
+            url="", start=None, owner="alice", state="done", out_path=str(rec),
+            job_id=job.id, upload_error="облако недоступно"))
+        Scheduler()._resume_pending()
+        assert done.wait(2)
+        assert titles == ["Планёрка"]
+
+
+class TestЛокальныйСерверПоIPv6:
+    def test_loopback_ipv6_не_служебный(self):
+        """`::1` — loopback, как 127.0.0.1 (Ollama на этой же машине). Python
+        считает его ещё и «зарезервированным», и проверка запрещала его как
+        адрес метаданных облака; на Windows так отвергался даже localhost."""
+        from app import llm_custom
+        assert llm_custom.check_url("http://[::1]:11434/v1") == ""
+        assert llm_custom.check_url("http://169.254.169.254/latest") != ""
