@@ -230,6 +230,22 @@ def is_adhoc(task_id) -> bool:
     return str(task_id or "").startswith(_ADHOC_PREFIX)
 
 
+def _weeek_writable(cfg: dict, task_id) -> bool:
+    """Можно ли планировщику писать в эту задачу Weeek (поле «Видео встречи»,
+    комментарии). Встреча по ссылке и команда без токена — некуда. Под замком —
+    только в задачу на доске команды: её могли перенести к другому клиенту,
+    пока шла запись или висела дозаливка (второй раунд ревью 30.10; доставка
+    протокола проверяет то же в `jobs._deliver_protocol`)."""
+    if is_adhoc(task_id) or not cfg.get("weeek_token"):
+        return False
+    try:
+        return bool(weeek.task_on_team_board(cfg, task_id))
+    except Exception:  # noqa: BLE001 — непроверенная задача под замком хуже паузы
+        _LOG.warning("Доска задачи %s не проверена — в Weeek не пишу", task_id,
+                     exc_info=True)
+        return False
+
+
 _TELEMOST_HOSTS = ("telemost.yandex.ru", "telemost.yandex.com")
 
 
@@ -1228,10 +1244,14 @@ class Scheduler:
 
             # Write the recording link into the task's «Видео встречи» custom field.
             field = (cfg.get("weeek_video_field") or "").strip()
+            can_write = bool(st.cloud_url) and _weeek_writable(cfg, st.task_id)
             if is_adhoc(st.task_id):
                 if st.cloud_url:
                     log(f"Облако: {st.cloud_url} (встреча по ссылке — в Weeek "
                         "записывать некуда).")
+            elif st.cloud_url and not can_write and cfg.get("weeek_token"):
+                log("⚠ Задача Weeek не на доске вашей команды — ссылка на запись "
+                    "в неё не записана.")
             elif cfg.get("weeek_set_video_field", True) and st.cloud_url and field:
                 delivery.write_weeek_field(
                     cfg.get("weeek_token"), st.task_id, field, st.cloud_url, log,
@@ -1318,7 +1338,7 @@ class Scheduler:
                 self._start_late_upload(user, st, cfg, out)
 
             # Post the cloud link back to Weeek (protocol is produced later).
-            if cfg.get("post_back_to_weeek") and st.cloud_url:
+            if cfg.get("post_back_to_weeek") and st.cloud_url and can_write:
                 tail = (f"\nРаспознавание/протокол: job {job.id}." if job
                         else "\nРаспознавание отключено — только запись.")
                 ok = weeek.add_comment(
@@ -1415,7 +1435,7 @@ class Scheduler:
                 continue
             token = cfg.get("weeek_token")
             field = (cfg.get("weeek_video_field") or "").strip()
-            weeek_ok = bool(token) and not is_adhoc(st.task_id)  # по ссылке — некуда
+            weeek_ok = _weeek_writable(cfg, st.task_id)  # по ссылке и чужая доска — некуда
             if (current and weeek_ok and cfg.get("weeek_set_video_field", True)
                     and url and field):
                 delivery.write_weeek_field(
@@ -1470,7 +1490,8 @@ class Scheduler:
             """Log + (best-effort) leave a comment in the task, so the user sees
             why the protocol didn't attach."""
             log(msg)
-            if token and cfg.get("post_back_to_weeek", True):
+            if (token and cfg.get("post_back_to_weeek", True)
+                    and _weeek_writable(cfg, task_id)):
                 try:
                     weeek.add_comment(token, task_id, msg)
                 except Exception:
@@ -1932,7 +1953,7 @@ class Scheduler:
                 st.upload_error = None
                 field = (cfg.get("weeek_video_field") or "").strip()
                 if (cfg.get("weeek_set_video_field", True) and st.cloud_url and field
-                        and cfg.get("weeek_token") and not is_adhoc(st.task_id)):
+                        and _weeek_writable(cfg, st.task_id)):
                     delivery.write_weeek_field(
                         cfg.get("weeek_token"), st.task_id, field, st.cloud_url,
                         log, protected=cfg.get("weeek_protected_fields"))
