@@ -1617,6 +1617,46 @@ def ask_meeting_api(job_id: str, body: AskBody, user: str = Depends(current_user
     return {"ok": True, "answer": answer}
 
 
+@app.post("/api/ask")
+def ask_meetings_api(body: AskBody, user: str = Depends(current_user)):
+    """Вопрос по ВСЕМ встречам команды — по памяти встреч (meeting_chunks),
+    которая переживает ретеншн. Ответ со ссылками на встречу, дату, таймкод."""
+    from . import meeting_index, usage
+    q = (body.question or "").strip()
+    if len(q) < 3:
+        raise HTTPException(400, "Сформулируйте вопрос.")
+    team = security.team_of(user)
+    if not meeting_index.enabled():
+        raise HTTPException(409, "Память встреч работает только с базой Postgres.")
+    # Вопрос по встречам — тоже вызов модели и деньги команды: расход уходит
+    # в журнал событий как у задач (задачи у такого вызова нет).
+    with usage.collect() as acc:
+        try:
+            res = analyze.ask_meetings(team, q, keys=user_creds.load(team))
+        except ValueError as e:
+            raise HTTPException(409, str(e))
+        finally:
+            calls_log = list((acc or {}).get("log") or [])
+            if calls_log:
+                events.record_many(calls_log, user=user, kind=events.LLM_CALL)
+    events.record(events.ASKED, user=user, once_a_day=False)
+    return {"ok": True, **res}
+
+
+@app.get("/api/ask/status")
+def ask_meetings_status(user: str = Depends(current_user)):
+    """Сколько встреч в памяти команды — чтобы интерфейс знал, есть ли по чему
+    спрашивать (и подсказал про индексацию архива, если пусто)."""
+    from . import meeting_index
+    if not meeting_index.enabled():
+        return {"enabled": False, "docs": 0, "chunks": 0}
+    try:
+        return {"enabled": True, **db.chunks_count(security.team_of(user))}
+    except Exception:  # noqa: BLE001
+        log.warning("Сводка памяти встреч не прочиталась", exc_info=True)
+        return {"enabled": True, "docs": 0, "chunks": 0}
+
+
 @app.post("/api/jobs/{job_id}/redeliver")
 def redeliver_job(job_id: str, user: str = Depends(current_user)):
     """Re-attempt the protocol DELIVERY only (cloud upload + Weeek link) — for

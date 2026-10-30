@@ -81,6 +81,8 @@ EXPECTED = {
     "POST /api/context",
     "POST /api/jobs",
     "POST /api/jobs/{job_id}/ask",
+    "POST /api/ask",
+    "GET /api/ask/status",
     "POST /api/jobs/{job_id}/cancel",
     "POST /api/jobs/{job_id}/notes",
     "POST /api/jobs/{job_id}/opened",

@@ -32,6 +32,7 @@ const isBusy = (st: string) => ["queued", "running", "paused", "analyzing"].incl
 import { HistoryCalendar, dayKey, fmtDayLabel } from "./recognition/HistoryCalendar";
 import { LiveTranscript, SegmentView } from "./recognition/Transcript";
 import { Protocol, ProtocolEditor, AskBlock } from "./recognition/Protocol";
+import { AskAll } from "./recognition/AskAll";
 
 export default function Recognition() {
   const [jobs, setJobs] = useState<any[]>([]);
@@ -582,6 +583,11 @@ export default function Recognition() {
               <input className="field" placeholder="Поиск по всем встречам…"
                 value={searchQ} onChange={(e) => setSearchQ(e.target.value)} />
             </div>
+            {/* Вопрос по памяти встреч (переживает ретеншн): тот же текст, что в поиске. */}
+            {searchQ.trim().length >= 3 && (
+              <AskAll question={searchQ} knownJobIds={new Set(jobs.map((j: any) => j.id))}
+                onPick={(id) => { setSel(id); setTab("protocol"); markOpened(id); }} />
+            )}
             {showCal && (
               <HistoryCalendar jobs={jobs} value={dayFilter}
                 onPick={(k) => { setDayFilter(k); setSearchQ(""); setExtra(0); }} />

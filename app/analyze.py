@@ -2246,3 +2246,119 @@ def ask_meeting(transcript_text: str, question: str,
     with usage.stage(usage.ASK):
         return _stream_complete(backend, prompt, 1500, None, "Ищу ответ…",
                                 force_json=False).strip()
+
+
+# --------------------------------------------------------------------------- #
+# Вопрос по ВСЕМ встречам команды (память встреч, app/meeting_index.py)
+# --------------------------------------------------------------------------- #
+_ASK_ALL_LIMIT = 24          # кусков из базы на один вопрос
+_ASK_ALL_MAX_DOCS = 8        # встреч в ответе — больше модель не свяжет
+
+
+def _fts_queries(question: str) -> list[str]:
+    """Запросы к полнотекстовому индексу по убыванию строгости: сначала
+    вопрос как есть (все слова вместе), потом значимые слова через «or» —
+    «что решили по бюджету сайта в октябре?» редко встречается дословно."""
+    out = [question.strip()]
+    stems, whole, _generic = _ask_terms(question)
+    words = [w for w in _norm_for_match(question).split()
+             if w not in _ASK_STOPWORDS and w not in _ASK_GENERIC and len(w) >= 2]
+    if len(words) > 1:
+        out.append(" or ".join(dict.fromkeys(words)))
+    return out
+
+
+def _dedup_chunks(rows: list[dict]) -> list[dict]:
+    """Соседние окна расшифровки перекрываются наполовину — второе из пары
+    не несёт нового; документов — не больше _ASK_ALL_MAX_DOCS."""
+    picked: list[dict] = []
+    seen: set[tuple] = set()
+    docs: list[str] = []
+    for r in rows:
+        key = (r.get("doc_id"), r.get("kind"), int(r.get("idx") or 0))
+        if r.get("kind") == "transcript" and (
+                (key[0], key[1], key[2] - 1) in seen or (key[0], key[1], key[2] + 1) in seen):
+            continue
+        if r.get("doc_id") not in docs:
+            if len(docs) >= _ASK_ALL_MAX_DOCS:
+                continue
+            docs.append(r.get("doc_id"))
+        seen.add(key)
+        picked.append(r)
+    return picked
+
+
+def retrieve_meetings(team: str, question: str, limit: int = _ASK_ALL_LIMIT) -> list[dict]:
+    """Куски встреч команды под вопрос (без модели)."""
+    from . import db
+    for q in _fts_queries(question):
+        try:
+            rows = db.chunks_search(team, q, limit=limit)
+        except Exception:  # noqa: BLE001 — кривой запрос к tsquery не роняет ответ
+            logs.get("vtx.analyze").warning("Поиск по встречам не удался: %r", q,
+                                             exc_info=True)
+            rows = []
+        if rows:
+            return _dedup_chunks(rows)
+    return []
+
+
+def _chunk_label(r: dict) -> str:
+    bits = [str(r.get("title") or "встреча")]
+    if r.get("meeting_date"):
+        bits.append(str(r["meeting_date"]))
+    if r.get("ts"):
+        bits.append(f"[{r['ts']}]")
+    if r.get("is_draft"):
+        bits.append("черновик протокола")
+    return " — ".join(bits)
+
+
+def ask_meetings(team: str, question: str, provider: str | None = None,
+                 keys: dict | None = None) -> dict:
+    """Вопрос по всем встречам команды: находим куски в памяти встреч,
+    просим модель ответить со ссылками на встречу, дату и таймкод.
+    Возвращает {answer, sources[{doc_id, title, meeting_date, ts, kind,
+    is_draft}], found}. Ничего не нашлось — честный ответ без вызова модели."""
+    from . import meeting_index
+    if not meeting_index.enabled():
+        raise ValueError("Память встреч работает только с базой Postgres.")
+    q = (question or "").strip()
+    stems, whole, generic = _ask_terms(q)
+    if not stems and not whole and not generic:
+        return {"answer": "Уточните вопрос: по каким словам искать по встречам? "
+                          "Например: «что решили по оплате?» или «когда обсуждали "
+                          "бюджет сайта?».", "sources": [], "found": 0}
+    rows = retrieve_meetings(team, q)
+    if not rows:
+        return {"answer": "По словам вопроса в памяти встреч ничего не нашлось. "
+                          "Попробуйте другие слова — название проекта, фамилию, "
+                          "термин, который звучал на встрече.",
+                "sources": [], "found": 0}
+    backend = llm.get_provider_chain(provider, keys)
+    budget_chars = max(int(0.6 * _ctx_budget(backend)) * 3, 8000)
+    parts, used, sources = [], 0, []
+    for r in rows:
+        block = f"=== {_chunk_label(r)} ===\n{r.get('text') or ''}"
+        if used + len(block) > budget_chars and parts:
+            break
+        parts.append(block)
+        used += len(block)
+        sources.append({"doc_id": r.get("doc_id"), "title": r.get("title"),
+                        "meeting_date": r.get("meeting_date"), "ts": r.get("ts"),
+                        "kind": r.get("kind"), "is_draft": bool(r.get("is_draft"))})
+    prompt = (
+        "Ниже — фрагменты расшифровок и протоколов НЕСКОЛЬКИХ рабочих встреч "
+        "одной команды. У каждого фрагмента заголовок: название встречи, дата и "
+        "таймкод [мм:сс] начала фрагмента. Ответь по-русски конкретно и коротко "
+        "(3-10 предложений), опираясь ТОЛЬКО на фрагменты. К каждому утверждению "
+        "ОБЯЗАТЕЛЬНО укажи, откуда оно: название встречи и дату (и таймкод, если "
+        "есть). Если речь о нескольких встречах — излагай по порядку дат и "
+        "отмечай, что менялось. Фрагменты с пометкой «черновик протокола» "
+        "цитируй осторожно. Если ответа во фрагментах нет — прямо скажи «в "
+        "найденных встречах это не обсуждалось» и ничего не выдумывай.\n\n"
+        + "\n\n".join(parts) + f"\n\nВопрос: {q}")
+    with usage.stage(usage.ASK):
+        answer = _stream_complete(backend, prompt, 2000, None, "Ищу по встречам…",
+                                  force_json=False).strip()
+    return {"answer": answer, "sources": sources, "found": len(rows)}
