@@ -14,7 +14,7 @@ jobs:
     # Образ тот же, что в docker-compose.yml.
     services:
       postgres:
-        image: postgres:16-alpine
+        image: pgvector/pgvector:pg16
         env:
           POSTGRES_USER: voise
           POSTGRES_PASSWORD: ci-only-password
@@ -38,7 +38,9 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           grep -vE '^(faster-whisper|ctranslate2|setuptools<80)' requirements.txt > /tmp/req.txt
-          pip install -r /tmp/req.txt httpx numpy
+          # Тот же lock, что в образе (Dockerfile): тесты идут на тех версиях,
+          # которые поедут на бой.
+          pip install -r /tmp/req.txt httpx numpy -c requirements.lock.txt
       - name: Tests
         env:
           # Не DATABASE_URL: его conftest гасит. Без этой переменной в Actions
@@ -46,25 +48,58 @@ jobs:
           VTX_TEST_DATABASE_URL: postgresql://voise:ci-only-password@localhost:5432/voise
         run: python -m pytest tests/ -q
 
-  # `docker compose config -q` на .env из .env.example — как при чистой
-  # установке по README. Плюс сверка, что DATABASE_URL у app ведёт в сервис db
-  # с его паролем: валидный для compose конфиг, в котором приложение не входит
-  # в свою базу, и был ошибкой P0-1 ревью 30.10.
+  # Конфиг compose на НЕСКОЛЬКИХ вариантах .env, а не только на умолчаниях
+  # .env.example (ревью 30.10, §7: зашитый пользователь в DATABASE_URL,
+  # сломанный путь Caddyfile и перевёрнутый `test -n` у caddy проходили).
+  # scripts/check_compose_config.py разбирает адрес как libpq, сверяет его с
+  # сервисом db, а при профиле https проверяет Caddyfile и прогоняет команду
+  # caddy через sh с заглушкой. Его тесты и тесты update.sh (шимы docker/git)
+  # идут в job backend вместе со всем набором.
   compose:
-    name: docker compose config
+    name: docker compose config + update.sh
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: .env из .env.example
+      - name: bash -n scripts/update.sh
+        run: bash -n scripts/update.sh
+      - name: compose config на вариантах .env
         run: |
-          cp .env.example .env
-          sed -i 's/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=ci-only-password/' .env
-      - name: compose config (без HTTPS)
-        run: docker compose config -q
-      - name: compose config (профиль https)
-        run: DOMAIN=ci.example.com COMPOSE_PROFILES=https docker compose config -q
-      - name: DATABASE_URL ведёт в сервис db
-        run: docker compose config --format json | python3 scripts/check_compose_config.py
+          set -euo pipefail
+          fresh_env() {   # .env как по README, с паролем $1
+            cp .env.example .env
+            sed -i "s/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=$1/" .env
+          }
+          check() {       # $1 — название варианта, дальше — флаги проверки
+            local name="$1"; shift
+            echo "::group::$name"
+            docker compose config -q
+            docker compose config --format json | python3 scripts/check_compose_config.py "$@"
+            echo "::endgroup::"
+          }
+
+          fresh_env ci-only-password
+          check "чистая установка" --fresh
+
+          # Прод: том pgdata создан с паролем voise, в .env осталась строка
+          # DATABASE_URL — это рабочая конфигурация (предупреждение, не ошибка),
+          # а на чистой установке (--fresh) та же строка — ошибка.
+          fresh_env 0123456789abcdef
+          echo 'DATABASE_URL=postgresql://voise:voise@db:5432/voise' >> .env
+          check "прод со старой строкой DATABASE_URL"
+          if docker compose config --format json | python3 scripts/check_compose_config.py --fresh; then
+            echo "--fresh обязан отвергать старую строку DATABASE_URL"; exit 1
+          fi
+
+          # Пароль с символами, ломающими URL, свой пользователь и база.
+          fresh_env x
+          sed -i "s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD='p@ss#w/rd%x?y'|; s/^POSTGRES_USER=.*/POSTGRES_USER=vtxuser/; s/^POSTGRES_DB=.*/POSTGRES_DB=vtxdb/" .env
+          check "спецсимволы в пароле, свой пользователь" --fresh
+
+          # HTTPS: DOMAIN и профиль — в .env, как на сервере.
+          fresh_env ci-only-password
+          printf 'DOMAIN=ci.example.com\nCOMPOSE_PROFILES=https\n' >> .env
+          docker compose config --services | grep -qx caddy
+          check "профиль https (Caddyfile, команда caddy через sh)" --fresh
 
   frontend:
     name: tsc + vite build (frontend)

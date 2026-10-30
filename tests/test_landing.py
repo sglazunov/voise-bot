@@ -6,6 +6,8 @@ CSP лендинга пускает хосты Метрики; остально�
 """
 from __future__ import annotations
 
+import re
+
 import pytest
 from conftest import login, register
 
@@ -31,6 +33,17 @@ class TestЛендинг:
         html = client.get("/").text
         for s in ("₽", "руб", "priceCurrency", '"Offer"', "тариф"):
             assert s not in html, s
+        # Цена может быть написана как угодно: «6 000 р. в месяц», «$70»,
+        # «70 USD», «€15» (ревью 30.10: прежний список пропускал «р.» и «$»).
+        num = r"\d[\d\s  .,]*"
+        cur = r"(?:р\.|р\b|руб|rub|usd|eur|€|\$|₽)"
+        for pat in (num + r"\s?" + cur, r"(?:\$|€|₽)\s?\d"):
+            m = re.search(pat, html, re.I)
+            assert not m, f"похоже на цену: {m.group(0)!r}"
+        # «$» в видимом тексте — даже без цифр рядом («от $ в месяц»). В
+        # скриптах «$» бывает по делу, их вырезаем.
+        visible = re.sub(r"<(script|style)\b.*?</\1>", "", html, flags=re.S | re.I)
+        assert "$" not in visible
 
     def test_все_призывы_ведут_на_письмо_а_не_на_регистрацию(self, client):
         html = client.get("/").text

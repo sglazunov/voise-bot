@@ -42,6 +42,37 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         tzdata ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 
+WORKDIR /app
+
+# Зависимости — ПЕРВЫМИ слоями после apt, и версии из lock. Любая правка
+# строки Dockerfile выше слоя сбрасывает его кэш и кэш всех следующих: раньше
+# выше pip стоял RUN с сертификатом Минцифры, а ARG VTX_BUILD (новый на
+# каждом коммите) — выше playwright install. Правка текста echo или любой
+# коммит заново резолвили зависимости с открытыми диапазонами (playwright<2 с
+# новым Chromium, anthropic<1…) — класс сбоя PyAV 19 (ревью 30.10, §1).
+# Теперь ниже pip/playwright только то, что от них не зависит, а сам резолв
+# прибит requirements.lock.txt — пересборка с нуля даёт те же версии.
+# tests/test_requirements_pins.py следит и за порядком слоёв.
+COPY requirements.txt requirements.lock.txt ./
+RUN pip install --upgrade "pip<27" "wheel<1" \
+    && pip install -r requirements.txt -c requirements.lock.txt
+
+# Д7: optional diarization layer (pyannote + CPU torch, ~2.5 GB) — for speaker
+# separation of UPLOADED audio files (bot videos use the tile-based speaker_id
+# instead). Build with:  DIARIZATION=1 docker compose up -d --build app
+# Needs RAM >= 8 GB at runtime; leave 0 on small hosts.
+ARG DIARIZATION=0
+RUN if [ "$DIARIZATION" = "1" ]; then \
+      pip install --no-cache-dir "torch>=2.2,<3" "torchaudio>=2.2,<3" --index-url https://download.pytorch.org/whl/cpu \
+      && pip install --no-cache-dir "pyannote.audio>=3.3,<4"; \
+    fi
+
+# Chromium for the bot, installed to a world-readable path so the non-root app
+# user can use it. playwright (the pip pkg) is already in requirements.txt;
+# --with-deps pulls the browser's own OS libraries.
+RUN playwright install --with-deps chromium \
+    && chmod -R a+rX /ms-playwright
+
 # Корневой сертификат Минцифры («Russian Trusted Root CA»): им подписаны
 # api.giga.chat и ngw.devices.sberbank.ru (GigaChat). Без него GigaChat
 # НЕДОСТУПЕН: соединение без проверки сертификата приложение больше не
@@ -54,33 +85,6 @@ RUN curl -fsSL --max-time 30 -o /usr/local/share/ca-certificates/russian_trusted
     && update-ca-certificates \
     || { echo "ПРЕДУПРЕЖДЕНИЕ: сертификат Минцифры не скачан — GigaChat будет недоступен (или VTX_GIGACHAT_INSECURE_TLS=1)"; \
          rm -f /usr/local/share/ca-certificates/russian_trusted_root_ca.crt; }
-
-WORKDIR /app
-
-# Python deps first (better layer caching).
-COPY requirements.txt ./
-RUN pip install --upgrade pip wheel && pip install -r requirements.txt
-
-# Д7: optional diarization layer (pyannote + CPU torch, ~2.5 GB) — for speaker
-# separation of UPLOADED audio files (bot videos use the tile-based speaker_id
-# instead). Build with:  DIARIZATION=1 docker compose up -d --build app
-# Needs RAM >= 8 GB at runtime; leave 0 on small hosts.
-ARG DIARIZATION=0
-# Метка сборки: короткий хэш коммита, из которого собран образ. Показывается в
-# /healthz и в шапке интерфейса — иначе не отличить, стоит ли на бою новый код
-# или контейнер всё ещё из старого образа (02.09: git был свежий, образ — нет).
-ARG VTX_BUILD=dev
-ENV VTX_BUILD=${VTX_BUILD}
-RUN if [ "$DIARIZATION" = "1" ]; then \
-      pip install --no-cache-dir "torch>=2.2,<3" "torchaudio>=2.2,<3" --index-url https://download.pytorch.org/whl/cpu \
-      && pip install --no-cache-dir "pyannote.audio>=3.3,<4"; \
-    fi
-
-# Chromium for the bot, installed to a world-readable path so the non-root app
-# user can use it. playwright (the pip pkg) is already in requirements.txt;
-# --with-deps pulls the browser's own OS libraries.
-RUN playwright install --with-deps chromium \
-    && chmod -R a+rX /ms-playwright
 
 # App code + entrypoint.
 COPY app/ ./app/
@@ -116,6 +120,14 @@ ENV VTX_DATA_DIR=/data \
     PULSE_RUNTIME_PATH=/tmp/pulse \
     OLLAMA_URL=http://host.docker.internal:11434 \
     TZ=Europe/Moscow
+
+# Метка сборки: короткий хэш коммита, из которого собран образ. Показывается в
+# /healthz и в шапке интерфейса — иначе не отличить, стоит ли на бою новый код
+# или контейнер всё ещё из старого образа (02.09: git был свежий, образ — нет).
+# ⚠️ Строго в конце: значение новое на КАЖДОМ коммите, и каждый слой ниже
+# него собирается заново (раньше так каждый раз ставился Chromium).
+ARG VTX_BUILD=dev
+ENV VTX_BUILD=${VTX_BUILD}
 
 VOLUME ["/data"]
 EXPOSE 8000

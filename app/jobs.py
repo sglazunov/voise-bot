@@ -213,19 +213,31 @@ class JobStore:
                 raw = json.loads(config.JOBS_FILE.read_text(encoding="utf-8"))
             else:
                 return
+            interrupted = []
             for d in raw:
                 job = Job(**d)
                 # Nothing survives a restart mid-flight (no worker resumes it).
                 if job.status in (STATUS_RUNNING, STATUS_QUEUED, STATUS_PAUSED):
                     job.status = STATUS_ERROR
                     job.error = "Прервано (сервис был перезапущен)."
+                    interrupted.append(job)
                 elif job.status == STATUS_ANALYZING:
                     # Transcript is already saved — keep it, just flag the
                     # analysis so the user can re-run it in one click.
                     job.status = STATUS_DONE
                     job.analysis_error = ("Анализ прерван (сервис перезапущен). "
                                           "Нажмите «Повторить анализ».")
+                    interrupted.append(job)
                 self._jobs[job.id] = job
+            # Новый статус — сразу в хранилище. Раньше он жил только в памяти,
+            # а в базе строка оставалась running/analyzing до ретеншна (~24 ч):
+            # scripts/update.sh считает такие строки работой и отказывался
+            # обновлять — выход был только через --force (ревью 30.10, §1).
+            # По одной задаче: на Postgres это upsert строки, а не перезапись
+            # таблицы; сюда доходим, только если разобрались ВСЕ строки, —
+            # файловый режим пишет весь список.
+            for job in interrupted:
+                self._save(job)
         except Exception:
             log.error("Не удалось восстановить задачи после старта", exc_info=True)
 
