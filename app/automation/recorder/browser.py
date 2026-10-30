@@ -2407,6 +2407,21 @@ def login_get(team: str) -> "_LoginSession | None":
     return ses
 
 
+def login_close(team: str) -> None:
+    """Закрыть окно входа команды и забыть его — при удалении аккаунта.
+    Иначе живой браузер с чужим входом в Яндекс доставался следующему
+    владельцу логина (второй раунд ревью 30.10). Сбой закрытия удаление не
+    роняет: окна в словаре уже нет, поток браузера доживёт до тайм-аута."""
+    with _login_lock:
+        ses = login_sessions.pop(team, None)
+    if ses is None:
+        return
+    try:
+        ses.close(wait=5)
+    except Exception:  # noqa: BLE001
+        log.warning("Окно входа команды %s не закрылось", team, exc_info=True)
+
+
 def login_open(cfg: dict, team: str = "") -> "_LoginSession":
     """Запустить (или вернуть уже идущую) сессию входа команды `team`.
 

@@ -283,9 +283,11 @@ class Scheduler:
         # Удаление аккаунта (forget_team → forget_done): команды, которые
         # сейчас удаляются, их забытые карточки (вернуть, если удаление
         # сорвалось) и счётчик удалений — идущий опрос сверяет его и не
-        # воскрешает карточки удалённой команды.
+        # воскрешает карточки удалённой команды. Забытые карточки — ПО ЗАПРОСУ
+        # (ключ — токен, который вернул forget_team): сорвавшийся запрос
+        # возвращает только своё (второй раунд ревью 30.10).
         self._forgetting: set[str] = set()
-        self._forgotten: dict[str, list] = {}
+        self._forgotten: dict[str, dict[object, list]] = {}
         self._forget_epoch: dict[str, int] = {}
         self._boot_time = 0.0  # session start; meetings older than this are missed
         # start() зовут и запуск приложения, и «Обновить из Weeek»: проверка
@@ -1349,9 +1351,11 @@ class Scheduler:
             up = delivery.publish_or_upload(out, cfg, cloud_path, lambda *_: None,
                                             subfolder=place["sub"] or None,
                                             owner=st.owner)
-            cloud_folders.placed(st.owner, st.title, place, up, "recording")
             if st.forgotten:
-                return            # удалили, пока шла выгрузка — Weeek не трогаем
+                # Удалили, пока шла выгрузка — ни Weeek, ни раскладку папок
+                # (память серии под освободившимся логином) не трогаем.
+                return
+            cloud_folders.placed(st.owner, st.title, place, up, "recording")
             cloud_path = up.get("path") or cloud_path
             url = up.get("url") if up.get("ok") else None
             error = None if up.get("ok") else (up.get("error") or "облако недоступно")
@@ -1587,6 +1591,9 @@ class Scheduler:
         pending = ("recording", "uploading", "transcribing", "analyzing")
         cutoff = time.time() - 48 * 3600
         for team in security.list_teams():
+            # Эпоха удалений — ДО чтения снапшотов: удаление, начавшееся и
+            # закончившееся за время чтения, `_forgetting` уже не покажет.
+            epoch = self._forget_epoch.get(team, 0)
             try:
                 cfg = auto_settings.load(team)
                 has_weeek = bool(cfg.get("weeek_token"))
@@ -1628,7 +1635,7 @@ class Scheduler:
                 if snap.get("state") not in pending or not weeek_ok:
                     if video_stuck or left:
                         self._resume_video(team, key, task_id, start, snap, cfg,
-                                           video_stuck)
+                                           video_stuck, epoch)
                     continue
 
                 # Д8: the process died DURING the recording — no job yet, but
@@ -1638,7 +1645,10 @@ class Scheduler:
                         and Path(out_path).stat().st_size > 0:
                     st = self._revive(team, key, task_id, start, snap,
                                       state="transcribing", detail="",
-                                      do_protocol=bool(cfg.get("do_protocol", True)))
+                                      do_protocol=bool(cfg.get("do_protocol", True)),
+                                      epoch=epoch)
+                    if st.forgotten:
+                        continue    # команду удаляют — запись уйдёт с её данными
                     self._resume_parts(team, st, cfg)
                     self._finalize_orphan(st, cfg, out_path)
                     continue
@@ -1646,13 +1656,13 @@ class Scheduler:
                 if not jid:
                     if video_stuck or left:
                         self._resume_video(team, key, task_id, start, snap, cfg,
-                                           video_stuck)
+                                           video_stuck, epoch)
                     continue
                 job = store.get(jid)
                 if job is None:
                     if video_stuck or left:
                         self._resume_video(team, key, task_id, start, snap, cfg,
-                                           video_stuck)
+                                           video_stuck, epoch)
                     continue    # job already purged by retention — nothing left
                 # Д8: the restart interrupted the RECOGNITION itself (worker died
                 # mid-transcription). The source file is still there — requeue it
@@ -1667,7 +1677,10 @@ class Scheduler:
                                     "рестарта", jid, exc_info=True)
                 st = self._revive(team, key, task_id, start, snap,
                                   title=snap.get("title") or Path(job.filename).stem,
-                                  state=snap.get("state") or "transcribing")
+                                  state=snap.get("state") or "transcribing",
+                                  epoch=epoch)
+                if st.forgotten:
+                    continue
                 if video_stuck:
                     self._start_late_upload(team, st, cfg, out_path, first_delay=30)
                 self._resume_parts(team, st, cfg)
@@ -1685,14 +1698,21 @@ class Scheduler:
                     daemon=True).start()
 
     def _revive(self, team: str, key: str, task_id: str, start, snap: dict,
-                **over) -> MeetingState:
+                epoch: int | None = None, **over) -> MeetingState:
         """Карточка встречи из снапшота — или уже существующая, дополненная им.
 
         Карточку мог раньше создать опрос Weeek (`_poll` → `_restore_snapshot`):
         её не подменяем (на ней ссылка комнаты, время, решения), а только
         дописываем то, чего не хватает дозаливке, — путь записи, путь в облаке,
         прежние части. Иначе первая неудачная попытка сохраняла снапшот без
-        пути, и после следующего перезапуска видео не дозаливалось вовсе."""
+        пути, и после следующего перезапуска видео не дозаливалось вовсе.
+
+        Команду удаляют (`_forgetting`) или удалили после чтения снапшотов
+        (`epoch` — эпоха удалений на тот момент) — карточка в `_states` НЕ
+        попадает и возвращается с `forgotten=True` (второй раунд ревью 30.10:
+        раньше восстановление после рестарта поднимало карточки удаляемой
+        команды). Если удаление ещё идёт, карточка отдаётся ему и вернётся,
+        если оно сорвётся."""
         out = snap.get("out_path")
         kw = dict(
             key=key, task_id=task_id,
@@ -1712,6 +1732,11 @@ class Scheduler:
         kw.update(over)
         fresh = MeetingState(**kw)
         with self._lock:
+            if team in self._forgetting or (
+                    epoch is not None and self._forget_epoch.get(team, 0) != epoch):
+                fresh.forgotten = fresh.stop_flag = True
+                self._forget_hold(team, fresh)
+                return fresh
             st = self._states.setdefault(key, fresh)
             if st is not fresh:
                 if not st.out_path:
@@ -1753,10 +1778,13 @@ class Scheduler:
                 self._start_late_upload(team, st, cfg, out, first_delay=30)
 
     def _resume_video(self, team: str, key: str, task_id: str, start,
-                      snap: dict, cfg: dict, video_stuck: bool = True) -> None:
+                      snap: dict, cfg: dict, video_stuck: bool = True,
+                      epoch: int | None = None) -> None:
         """Готовая (или упавшая) встреча, у которой видео так и не уехало в
         облако: поднять карточку из снапшота и запустить дозаливку."""
-        st = self._revive(team, key, task_id, start, snap)
+        st = self._revive(team, key, task_id, start, snap, epoch=epoch)
+        if st.forgotten:
+            return      # команду удаляют; откат удаления перезапустит дозаливку
         if video_stuck:
             self._start_late_upload(team, st, cfg, snap["out_path"], first_delay=30)
         self._resume_parts(team, st, cfg)
@@ -1777,12 +1805,22 @@ class Scheduler:
         preset_cfg = str(cfg.get("analyze_preset") or "auto")
         preset = preset_for_title(st.title) if preset_cfg == "auto" else preset_cfg
 
+        # Двойник `_run` (второй раунд ревью 30.10): без проверок `forgotten`
+        # запись удаляемой команды заливалась, писала раскладку папок (память
+        # серии) и создавала задачу под освободившимся логином. Запись
+        # удалённой команды никуда не уезжает и на диске не остаётся.
+        if st.forgotten:
+            store_drop_sidecars(out, with_media=True)
+            return
         log("Запись прервана перезапуском сервиса — файл цел, дообрабатываю.")
         if not st.cloud_url:
             place = _meeting_place(st, cfg, log, out)
             up = delivery.upload_with_retry(out, cfg, log, attempts=1,
                                             subfolder=place["sub"] or None,
                                             owner=st.owner)
+            if st.forgotten:            # выгрузка идёт минутами
+                store_drop_sidecars(out, with_media=True)
+                return
             cloud_folders.placed(st.owner, st.title, place, up, "recording")
             st.cloud_path = up.get("path") or st.cloud_path
             if up.get("ok"):
@@ -1802,6 +1840,9 @@ class Scheduler:
                       + ("в облаке" if st.cloud_url else "локально")
                       + " (распознавание отключено).")
             return
+        if st.forgotten:
+            store_drop_sidecars(out, with_media=True)
+            return
         job = store.create(
             filename=Path(out).name, audio_path=out,
             language=config.DEFAULT_LANGUAGE, diarize=False,
@@ -1816,6 +1857,12 @@ class Scheduler:
             preset=preset,
             live_path=self._live_path_if_any(out, log),
             owner=st.owner)
+        if st.forgotten:
+            # Удаление между проверкой и созданием задачи: она уже в
+            # хранилище и досталась бы следующему владельцу логина.
+            store.discard(job.id)
+            store_drop_sidecars(out, with_media=True)
+            return
         st.job_id = job.id
         self._set(st, "transcribing",
                   f"Восстановлено после перезапуска. Распознаю видео… — job {job.id}")
@@ -2071,15 +2118,20 @@ class Scheduler:
                 except OSError:
                     pass
 
-    def forget_team(self, team: str) -> int:
+    def forget_team(self, team: str) -> object:
         """Забыть карточки встреч команды — при удалении аккаунта. Идущая
         запись получает команду остановиться. Иначе новый пользователь с тем
-        же логином видел бы чужие встречи на странице «Встречи»."""
-        n = 0
+        же логином видел бы чужие встречи на странице «Встречи».
+
+        Возвращает токен ЭТОГО запроса удаления — его отдают в `forget_done`.
+        Раньше забытые карточки лежали одним списком на команду, и неудачный
+        запрос (неверный пароль, вторая вкладка), пересёкшийся с удачным,
+        возвращал карточки удаляемой команды (второй раунд ревью 30.10)."""
+        token = object()
         with self._lock:
             self._forgetting.add(team)
             self._forget_epoch[team] = self._forget_epoch.get(team, 0) + 1
-            gone = self._forgotten.setdefault(team, [])
+            gone = self._forgotten.setdefault(team, {})[token] = []
             for key, st in list(self._states.items()):
                 if st.owner != team:
                     continue
@@ -2087,21 +2139,60 @@ class Scheduler:
                 st.forgotten = True
                 self._states.pop(key, None)
                 gone.append(st)
-                n += 1
-        return n
+        return token
 
-    def forget_done(self, team: str, restore: bool = False) -> None:
-        """Удаление аккаунта закончилось. `restore=True` — сорвалось, аккаунт
-        остался: карточки возвращаются (идущая запись уже остановлена, но
-        дальше сохраняется и обрабатывается как обычно). Иначе логин свободен
-        и опрос Weeek снова работает — уже для нового владельца."""
+    def _forget_hold(self, team: str, st: MeetingState) -> None:
+        """Карточку, поднятую во время удаления, отдать идущему запросу:
+        сорвётся — вернётся вместе с остальными. Под `self._lock`."""
+        reqs = self._forgotten.get(team)
+        if reqs:
+            next(reversed(reqs.values())).append(st)
+
+    def forget_done(self, team: str, token: object = None,
+                    restore: bool = False) -> None:
+        """Запрос удаления `token` закончился (None — все запросы команды).
+        `restore=True` — сорвался, аккаунт остался: ЕГО карточки возвращаются
+        (идущая запись уже остановлена, но дальше сохраняется и
+        обрабатывается как обычно), а прерванная дозаливка видео
+        перезапускается. Если другой запрос удаления той же команды ещё идёт,
+        карточки переходят к нему — их судьбу решает его исход. Иначе логин
+        свободен и опрос Weeek снова работает — уже для нового владельца."""
+        back: list[MeetingState] = []
         with self._lock:
-            self._forgetting.discard(team)
-            gone = self._forgotten.pop(team, [])
+            reqs = self._forgotten.get(team, {})
+            gone: list[MeetingState] = []
+            for t in (list(reqs) if token is None else [token]):
+                gone += reqs.pop(t, [])
+            if not reqs:
+                self._forgotten.pop(team, None)
+                self._forgetting.discard(team)
             if restore:
-                for st in gone:
-                    st.forgotten = False
-                    self._states.setdefault(st.key, st)
+                if reqs:
+                    next(reversed(reqs.values())).extend(gone)
+                else:
+                    for st in gone:
+                        st.forgotten = False
+                        if self._states.setdefault(st.key, st) is st:
+                            back.append(st)
+        if back:
+            self._restart_uploads(team, back)
+
+    def _restart_uploads(self, team: str, states: list) -> None:
+        """Дозаливка, вышедшая по `forgotten`, после отката удаления: видео
+        уехало бы в облако только после рестарта, а уборка через двое суток
+        стёрла бы его. Повторный запуск при живой дозаливке — no-op
+        (`_start_late_upload` не запускает вторую на тот же файл)."""
+        try:
+            cfg = auto_settings.load(team)
+        except Exception:  # noqa: BLE001
+            _LOG.warning("Настройки команды %s не прочитаны — дозаливка после "
+                         "отката удаления не перезапущена", team, exc_info=True)
+            return
+        for st in states:
+            out = st.out_path
+            if out and st.upload_error and not st.cloud_url and Path(out).exists():
+                self._start_late_upload(team, st, cfg, out, first_delay=30)
+            self._resume_parts(team, st, cfg)
 
     def stop_recording(self, user: str | None = None, task_id=None) -> dict:
         """Stop recording(s) in progress. With `task_id` — just that meeting;

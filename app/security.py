@@ -626,6 +626,9 @@ def create_user(username: str, password: str, code: str | None = None,
         users = _load_users()
         if username in users:
             return {"ok": False, "error": "Такой логин уже существует."}
+        if username in _DELETING:
+            return {"ok": False, "error": "Этот логин сейчас освобождается — "
+                    "повторите через минуту."}
         if _phone_owner(users, norm_phone):
             return {"ok": False, "error": "Этот номер телефона уже привязан к другому аккаунту."}
         code = (code or "").strip()
@@ -636,6 +639,10 @@ def create_user(username: str, password: str, code: str | None = None,
             team, is_admin, invite = admin, False, None
         else:
             team, is_admin, invite = username, True, _gen_invite_code(users)
+        if _DELETING and _blocks_deletion(users, username, {
+                "team": team, "is_admin": is_admin, "created_at": time.time()}):
+            return {"ok": False, "error": "Сейчас на сервере удаляется аккаунт — "
+                    "повторите регистрацию через минуту."}
         rec = {"pw": hash_password(password), "created_at": time.time(),
                "phone": norm_phone, "is_admin": is_admin, "team": team}
         if invite:
@@ -711,6 +718,26 @@ def _deletion_blocker(users: dict, username: str) -> str:
     return ""
 
 
+# Аккаунты, которые сейчас удаляются (от последней проверки до стирания
+# данных под users/). Пока логин здесь, `create_user` не заводит ни его же
+# заново, ни аккаунт, из-за которого удаление стало бы запрещено (участник
+# этой команды, второй аккаунт сервера при удалении основателя), а второй
+# запрос удаления того же аккаунта получает отказ (второй раунд ревью 30.10).
+_DELETING: set[str] = set()
+
+
+def deletion_in_progress(username: str | None) -> bool:
+    """Аккаунт удаляется прямо сейчас — новых данных под ним не заводить."""
+    with _LOCK:
+        return normalize_username(username or "") in _DELETING
+
+
+def _blocks_deletion(users: dict, username: str, rec: dict) -> bool:
+    """Помешал бы новый аккаунт `username` идущему удалению."""
+    trial = {**users, username: rec}
+    return any(d in trial and _deletion_blocker(trial, d) for d in _DELETING)
+
+
 def delete_account(username: str, password: str,
                    before_release: "Callable[[str], None] | None" = None) -> dict:
     """Permanently delete an account: the login, phone, sessions, recovery code
@@ -722,28 +749,41 @@ def delete_account(username: str, password: str,
     освобождался первым: зарегистрировавшийся в это окно видел старые
     расшифровки, а потом удаление задач стирало уже ЕГО. Исключение из
     колбэка уходит наверх, и аккаунт остаётся — удалённым с живыми данными
-    он не бывает."""
+    он не бывает.
+
+    Проверка «можно ли удалять» — ОДНА, до очистки, под `_LOCK`, и в том же
+    захвате логин попадает в `_DELETING`: дальше ничто не может её отменить
+    (регистрация ждёт, второй запрос удаления получает отказ). Раньше
+    проверка повторялась ПОСЛЕ очистки, и регистрация в это окно давала
+    отказ «Вы — основатель» при уже стёртых задачах."""
     username = normalize_username(username)
     if not verify_user(username, password):
         return {"ok": False, "error": "Пароль неверный.", "bad_password": True}
     with _LOCK:
+        if username in _DELETING:
+            return {"ok": False, "error": "Аккаунт уже удаляется — дождитесь "
+                    "окончания в другой вкладке."}
         err = _deletion_blocker(_load_users(), username)
-    if err:
-        return {"ok": False, "error": err}
-    if before_release is not None:
-        before_release(username)
-    with _LOCK:
-        users = _load_users()
-        err = _deletion_blocker(users, username)   # пока чистили, мог войти участник
         if err:
             return {"ok": False, "error": err}
-        users.pop(username, None)
-        _save_users(users)
-        rec = _load_recovery()
-        if rec.pop(username, None) is not None:
-            _save_recovery(rec)
-    destroy_user_sessions(username)
-    _delete_user_data(username)
+        _DELETING.add(username)
+    try:
+        if before_release is not None:
+            before_release(username)
+        with _LOCK:
+            users = _load_users()
+            users.pop(username, None)
+            _save_users(users)
+            rec = _load_recovery()
+            if rec.pop(username, None) is not None:
+                _save_recovery(rec)
+        destroy_user_sessions(username)
+        _delete_user_data(username)
+    finally:
+        # Логин свободен только после стирания users/<логин>: иначе
+        # зарегистрировавшийся в это окно терял свои данные вместе с чужими.
+        with _LOCK:
+            _DELETING.discard(username)
     return {"ok": True}
 
 
@@ -783,6 +823,38 @@ def throttle_check(*keys: str) -> int:
             if len(hits) >= BRUTE_MAX_ATTEMPTS:
                 worst = max(worst, int(BRUTE_WINDOW_SEC - (now - hits[0])) + 1)
         return worst
+
+
+def throttle_reserve(*keys: str) -> tuple[int, float | None]:
+    """Проверить лимит И сразу записать попытку как неудачную — одним захватом
+    лока, ДО медленной проверки пароля. Возвращает (сколько ждать, метка).
+
+    Раньше проверка шла до хэша, а неудача записывалась после: 32 параллельных
+    запроса проходили проверку, пока ни один не успел записать неудачу, —
+    лимит в 8 попыток не давал ни одного 429 (второй раунд ревью 30.10).
+    Исход: успех — `throttle_clear`, ошибка не про пароль (кривой номер,
+    запрет удаления) — `throttle_release(метка)`, неверный пароль — ничего,
+    попытка уже учтена."""
+    now = time.time()
+    with _LOCK:
+        wait = throttle_check(*keys)
+        if wait:
+            return wait, None
+        for k in keys:
+            _FAILED.setdefault(k, []).append(now)
+        return 0, now
+
+
+def throttle_release(stamp: float | None, *keys: str) -> None:
+    """Вернуть попытку, забронированную `throttle_reserve`: это была не
+    ошибка пароля."""
+    if stamp is None:
+        return
+    with _LOCK:
+        for k in keys:
+            hits = _FAILED.get(k)
+            if hits and stamp in hits:
+                hits.remove(stamp)
 
 
 def throttle_fail(*keys: str) -> None:

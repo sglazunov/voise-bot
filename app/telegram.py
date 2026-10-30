@@ -176,21 +176,44 @@ def new_link_code(username: str) -> str:
     живёт только последний."""
     now = time.time()
     code = secrets.token_urlsafe(9)   # 12 символов, годится в ?start=
+    born = _born(username)
     with _LOCK:
         _purge_codes(now)
         for c in [c for c, v in _LINK_CODES.items() if v["user"] == username]:
             _LINK_CODES.pop(c, None)
-        _LINK_CODES[code] = {"user": username, "exp": now + LINK_CODE_TTL}
+        _LINK_CODES[code] = {"user": username, "exp": now + LINK_CODE_TTL,
+                             "born": born}
     return code
 
 
+def _born(username: str):
+    """Отметка конкретного АККАУНТА (время регистрации), а не строки логина."""
+    from . import security
+    return security._get_user(username).get("created_at")
+
+
+def drop_link_codes(username: str) -> None:
+    """Погасить коды привязки логина — при удалении аккаунта."""
+    with _LOCK:
+        for c in [c for c, v in _LINK_CODES.items() if v["user"] == username]:
+            _LINK_CODES.pop(c, None)
+
+
 def consume_link_code(code: str) -> str | None:
-    """Логин по коду привязки; код сгорает. None — неизвестен или просрочен."""
+    """Логин по коду привязки; код сгорает. None — неизвестен или просрочен.
+
+    Код привязан к АККАУНТУ, а не к логину (второй раунд ревью 30.10): после
+    удаления логин могут занять за 10 минут жизни кода, и «/start <код>»
+    привязал бы чат прежнего владельца к новому аккаунту — а /recover потом
+    сбросил бы его пароль. Код, выданный другому аккаунту с тем же логином,
+    не подходит."""
     now = time.time()
     with _LOCK:
         _purge_codes(now)
         rec = _LINK_CODES.pop((code or "").strip(), None)
-    return rec["user"] if rec else None
+    if not rec or rec.get("born") != _born(rec["user"]):
+        return None
+    return rec["user"]
 
 
 def link_url(code: str) -> str:
