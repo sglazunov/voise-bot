@@ -603,6 +603,12 @@ class JobStore:
                                body, job.created_at or time.time())
         except Exception:  # noqa: BLE001 — поиск не должен ломать конвейер
             log.warning("Задача %s не попала в поисковый индекс", job.id, exc_info=True)
+        # Долгая память: куски встречи переживают ретеншн (meeting_index).
+        try:
+            from . import meeting_index
+            meeting_index.index_job(self, job)
+        except Exception:  # noqa: BLE001
+            log.warning("Задача %s не попала в память встреч", job.id, exc_info=True)
 
     def backfill_search(self) -> None:
         """Index the done jobs that existed before the search feature."""

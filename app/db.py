@@ -337,6 +337,31 @@ CREATE TABLE IF NOT EXISTS product_events (
     extra    JSONB
 );
 CREATE INDEX IF NOT EXISTS idx_product_events_team_at ON product_events(team, at);
+-- Куски встреч для поиска и вопросов ПО ВСЕМ встречам команды
+-- (app/meeting_index.py). ⚠️ ПЕРЕЖИВАЮТ ретеншн: search_docs стирается вместе
+-- с задачей через сутки, а память о встречах нужна за месяцы — как
+-- meeting_stats. Удаляются только с аккаунтом команды (delete_user_data) или
+-- при переиндексации того же документа (chunks_replace).
+CREATE TABLE IF NOT EXISTS meeting_chunks (
+    id           TEXT PRIMARY KEY,      -- <doc_id>:<kind><idx>
+    doc_id       TEXT NOT NULL,         -- job id или archive:<хэш пути>
+    team         TEXT NOT NULL,
+    series_key   TEXT,
+    title        TEXT,
+    meeting_date TEXT,                  -- дд.мм.гггг, как в meeting_series
+    meeting_ts   DOUBLE PRECISION,      -- для сортировки по дате
+    kind         TEXT NOT NULL,         -- transcript | protocol
+    idx          INTEGER NOT NULL,
+    ts           TEXT,                  -- первая метка времени окна
+    text         TEXT NOT NULL,
+    is_draft     BOOLEAN DEFAULT FALSE,
+    source       TEXT,                  -- job:<id> или путь файла в облаке
+    created_at   DOUBLE PRECISION
+);
+CREATE INDEX IF NOT EXISTS idx_meeting_chunks_doc ON meeting_chunks(doc_id);
+CREATE INDEX IF NOT EXISTS idx_meeting_chunks_team_ts ON meeting_chunks(team, meeting_ts);
+CREATE INDEX IF NOT EXISTS idx_meeting_chunks_tsv ON meeting_chunks
+    USING GIN (to_tsvector('russian', text));
 """
 
 
@@ -732,6 +757,120 @@ def delete_user_data(user: str) -> None:
         cur.execute("DELETE FROM meeting_stats WHERE team=%s", (user,))
         # И68: полное удаление по требованию — журнал событий тоже данные команды.
         cur.execute("DELETE FROM product_events WHERE team=%s", (user,))
+        # Память о встречах переживает ретеншн, но не удаление команды.
+        cur.execute("DELETE FROM meeting_chunks WHERE team=%s", (user,))
+
+
+# --------------------------------------------------------------------------- #
+# meeting_chunks — куски встреч для вопросов по всем встречам (meeting_index)
+# --------------------------------------------------------------------------- #
+_CHUNK_COLS = ["id", "doc_id", "team", "series_key", "title", "meeting_date",
+               "meeting_ts", "kind", "idx", "ts", "text", "is_draft", "source",
+               "created_at"]
+
+
+def chunks_replace(doc_id: str, rows: list[dict]) -> int:
+    """Заменить куски документа: прежние удаляются, новые пишутся одной
+    транзакцией. Пустой список — просто удаление."""
+    with _conn() as conn, _cur(conn) as cur:
+        cur.execute("DELETE FROM meeting_chunks WHERE doc_id=%s", (doc_id,))
+        if rows:
+            cols = ", ".join(_CHUNK_COLS)
+            ph = ", ".join(["%s"] * len(_CHUNK_COLS))
+            cur.executemany(
+                f"INSERT INTO meeting_chunks ({cols}) VALUES ({ph})",
+                [[r.get(c) for c in _CHUNK_COLS] for r in rows])
+        return len(rows)
+
+
+def chunks_delete_doc(doc_id: str) -> None:
+    with _conn() as conn, _cur(conn) as cur:
+        cur.execute("DELETE FROM meeting_chunks WHERE doc_id=%s", (doc_id,))
+
+
+def chunks_docs(team: str) -> list[dict]:
+    """Документы команды в индексе: [{doc_id, series_key, meeting_date,
+    title, source, is_draft, chunks}] — для дедупа в индексаторе и сводки."""
+    with _conn() as conn, _cur(conn) as cur:
+        cur.execute(
+            """SELECT doc_id, min(series_key) AS series_key,
+                      min(meeting_date) AS meeting_date, min(title) AS title,
+                      min(source) AS source, bool_or(is_draft) AS is_draft,
+                      count(*) AS chunks, max(meeting_ts) AS meeting_ts
+               FROM meeting_chunks WHERE team=%s
+               GROUP BY doc_id ORDER BY max(meeting_ts) DESC NULLS LAST""",
+            (team,))
+        return [dict(r) for r in cur.fetchall()]
+
+
+def chunks_search(team: str, q: str, limit: int = 24,
+                  series_key: str | None = None,
+                  kinds: tuple[str, ...] | None = None) -> list[dict]:
+    """Полнотекстовый поиск по кускам команды: websearch-синтаксис, русская
+    морфология, ранжирование ts_rank_cd. Фильтр по команде ОБЯЗАТЕЛЕН."""
+    sql = """SELECT id, doc_id, series_key, title, meeting_date, meeting_ts,
+                    kind, idx, ts, text, is_draft, source,
+                    ts_rank_cd(to_tsvector('russian', text),
+                               websearch_to_tsquery('russian', %s)) AS rank
+             FROM meeting_chunks
+             WHERE team=%s
+               AND to_tsvector('russian', text) @@ websearch_to_tsquery('russian', %s)"""
+    params: list = [q, team, q]
+    if series_key:
+        sql += " AND series_key=%s"
+        params.append(series_key)
+    if kinds:
+        sql += " AND kind = ANY(%s)"
+        params.append(list(kinds))
+    sql += " ORDER BY rank DESC, meeting_ts DESC NULLS LAST, idx LIMIT %s"
+    params.append(int(limit))
+    with _conn() as conn, _cur(conn) as cur:
+        cur.execute(sql, params)
+        return [dict(r) for r in cur.fetchall()]
+
+
+def chunks_series_recent(team: str, series_key: str, limit: int = 3,
+                         kind: str = "protocol",
+                         exclude_doc: str | None = None,
+                         before_ts: float | None = None) -> list[dict]:
+    """Куски протоколов ПОСЛЕДНИХ встреч серии (не старше `before_ts`, без
+    `exclude_doc`), по документам в порядке «новые сверху», куски по idx."""
+    sql = """SELECT doc_id, max(meeting_ts) AS meeting_ts
+             FROM meeting_chunks
+             WHERE team=%s AND series_key=%s AND kind=%s"""
+    params: list = [team, series_key, kind]
+    if exclude_doc:
+        sql += " AND doc_id<>%s"
+        params.append(exclude_doc)
+    if before_ts is not None:
+        sql += " AND meeting_ts < %s"
+        params.append(float(before_ts))
+    sql += " GROUP BY doc_id ORDER BY max(meeting_ts) DESC NULLS LAST LIMIT %s"
+    params.append(int(limit))
+    with _conn() as conn, _cur(conn) as cur:
+        cur.execute(sql, params)
+        docs = [r["doc_id"] for r in cur.fetchall()]
+        if not docs:
+            return []
+        cur.execute(
+            """SELECT doc_id, title, meeting_date, meeting_ts, kind, idx, ts,
+                      text, is_draft
+               FROM meeting_chunks
+               WHERE team=%s AND kind=%s AND doc_id = ANY(%s)
+               ORDER BY meeting_ts DESC NULLS LAST, doc_id, idx""",
+            (team, kind, docs))
+        return [dict(r) for r in cur.fetchall()]
+
+
+def chunks_count(team: str) -> dict:
+    with _conn() as conn, _cur(conn) as cur:
+        cur.execute(
+            """SELECT count(DISTINCT doc_id) AS docs, count(*) AS chunks,
+                      min(meeting_ts) AS first_ts, max(meeting_ts) AS last_ts
+               FROM meeting_chunks WHERE team=%s""", (team,))
+        r = cur.fetchone() or {}
+        return {"docs": int(r.get("docs") or 0), "chunks": int(r.get("chunks") or 0),
+                "first_ts": r.get("first_ts"), "last_ts": r.get("last_ts")}
 
 
 # --------------------------------------------------------------------------- #

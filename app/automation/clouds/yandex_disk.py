@@ -259,6 +259,56 @@ def list_folder(folder: str, cfg: dict) -> list[dict]:
             return out
 
 
+def list_entries(folder: str, cfg: dict) -> list[dict]:
+    """Файлы И подпапки прямо в папке: [{name, path, type}] (type —
+    «file» | «dir»). Нужен индексатору архива: протоколы лежат по папкам
+    серий (docs/ТЗ-ПАПКИ-ВСТРЕЧ.md). Нет папки — пустой список."""
+    out: list[dict] = []
+    offset = 0
+    while True:
+        status, info = request_json(
+            "GET", f"{API}/resources", headers=_read_auth(cfg),
+            params={"path": folder, "limit": _LIST_PAGE, "offset": offset,
+                    "fields": "_embedded.items.name,_embedded.items.path,"
+                              "_embedded.items.type,_embedded.total"})
+        if status == 404:
+            return out
+        if status in (401, 403):
+            raise CloudError(_READ_DENIED.replace("переложить файл", "прочитать папку"))
+        if status != 200 or not isinstance(info, dict):
+            raise CloudError(f"Яндекс.Диск не отдал список {folder} (HTTP {status}).")
+        emb = info.get("_embedded") or {}
+        items = emb.get("items") or []
+        out += [{"name": i.get("name"), "path": i.get("path"), "type": i.get("type")}
+                for i in items if i.get("type") in ("file", "dir")
+                and i.get("name") and i.get("path")]
+        offset += len(items)
+        if not items or offset >= int(emb.get("total") or 0):
+            return out
+
+
+def download(remote: str, cfg: dict, dest: str | Path, timeout: int = 600) -> Path:
+    """Скачать файл Диска в `dest` (чтение: токен чтения, если он есть).
+    Два шага, как у заливки: ссылка на скачивание → GET по ней."""
+    headers = _read_auth(cfg)
+    status, info = request_json("GET", f"{API}/resources/download",
+                                headers=headers, params={"path": remote})
+    if status in (401, 403):
+        raise CloudError(_READ_DENIED.replace("переложить файл", "скачать файл"))
+    if status == 404:
+        raise CloudError(f"На Диске нет файла {remote}.")
+    href = (info or {}).get("href") if isinstance(info, dict) else None
+    if status != 200 or not href:
+        raise CloudError(f"Яндекс.Диск не дал ссылку на скачивание {remote} (HTTP {status}).")
+    get_status, body = request("GET", href, timeout=timeout)
+    if get_status != 200:
+        raise CloudError(f"Скачивание {remote} не удалось (HTTP {get_status}).")
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(body)
+    return dest
+
+
 def upload(file_path: str, name: str, cfg: dict) -> dict:
     src = Path(file_path)
     if not src.exists():
