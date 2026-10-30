@@ -88,6 +88,9 @@ class MeetingState:
     do_protocol: bool = False         # whether this meeting also builds a protocol
     record_flag: bool | None = None   # Weeek checkbox «Запись встречи»: True/False/unset
     stop_flag: bool = False           # manual "stop this recording"
+    # Аккаунт команды удалён (forget_team): потоки, которые ещё держат эту
+    # карточку, не пишут снапшот, не создают задачу и не заливают видео.
+    forgotten: bool = False
     # Название встречи, которой бот ПЕРЕДАЁТ комнату: у команды одна постоянная
     # ссылка Телемоста на все встречи, и по расписанию Weeek в ней начинается
     # следующая. Запись останавливается с причиной next_meeting, а не stopped.
@@ -1029,6 +1032,13 @@ class Scheduler:
             # через десять минут помечались «пропущена».
             recorder.release_slot(slot)
             slot = None
+            if st.forgotten:
+                # Аккаунт удалили во время записи (проверка правок 30.10): поток
+                # шёл дальше — заливал видео, создавал задачу и снапшот под
+                # командой, которой больше нет. Запись удалённой команды
+                # никуда не уезжает и на диске не остаётся.
+                store_drop_sidecars(out, with_media=True)
+                return
             # ⚠️ Причина остановки записи. Рекордер возвращает её с самого
             # начала (silence, max_duration, chat_stop, call_ended, left_call,
             # nobody_joined, thinned_out, stopped, error), а планировщик её НЕ
@@ -1222,6 +1232,8 @@ class Scheduler:
         while time.time() < deadline and not self._stop.is_set():
             time.sleep(delay)
             delay = 300
+            if st.forgotten:
+                return            # аккаунт удалён — заливать нечего и некуда
             if not Path(out).exists():
                 return  # purged (retention) — nothing left to deliver
             place = _meeting_place(st, cfg, None, out)
@@ -1488,7 +1500,8 @@ class Scheduler:
                 if not jid and out_path and Path(out_path).exists() \
                         and Path(out_path).stat().st_size > 0:
                     st = MeetingState(
-                        key=key, task_id=task_id, title=Path(out_path).stem,
+                        key=key, task_id=task_id,
+                        title=snap.get("title") or Path(out_path).stem,
                         url="", start=start, owner=team, state="transcribing",
                         detail="", out_path=out_path,
                         cloud_url=snap.get("cloud_url"),
@@ -1516,7 +1529,8 @@ class Scheduler:
                         _LOG.warning("Не удалось перезапустить задачу %s после "
                                     "рестарта", jid, exc_info=True)
                 st = MeetingState(
-                    key=key, task_id=task_id, title=Path(job.filename).stem,
+                    key=key, task_id=task_id,
+                    title=snap.get("title") or Path(job.filename).stem,
                     url="", start=start, owner=team,
                     state=snap.get("state") or "transcribing",
                     detail=snap.get("detail") or "", job_id=jid,
@@ -1560,7 +1574,8 @@ class Scheduler:
         облако: поднять карточку из снапшота и запустить дозаливку."""
         out = snap["out_path"]
         st = MeetingState(
-            key=key, task_id=task_id, title=Path(out).stem, url="", start=start,
+            key=key, task_id=task_id, title=snap.get("title") or Path(out).stem,
+            url="", start=start,
             owner=team, state=snap.get("state") or "done",
             detail=snap.get("detail") or "", job_id=snap.get("job_id"),
             cloud_url=None, out_path=out,
@@ -1879,6 +1894,7 @@ class Scheduler:
                 if st.owner != team:
                     continue
                 st.stop_flag = True
+                st.forgotten = True
                 self._states.pop(key, None)
                 n += 1
         return n

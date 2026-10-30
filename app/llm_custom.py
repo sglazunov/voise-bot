@@ -103,6 +103,11 @@ def _resolves_to_service_address(host: str) -> str:
             except ValueError:
                 continue
     for ip in ips:
+        # `::1` — loopback, но Python считает его ещё и «зарезервированным»
+        # (::/8): localhost, разрешившийся в IPv6, запрещался как адрес
+        # метаданных облака. Loopback разрешён явно, как и сказано выше.
+        if ip.is_loopback:
+            continue
         if (ip.is_link_local or ip.is_reserved or ip.is_multicast
                 or ip.is_unspecified):
             return f"{host} → {ip}"

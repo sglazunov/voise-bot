@@ -37,16 +37,13 @@ fi
 FORCE=0
 [ "${1:-}" = "--force" ] && FORCE=1
 
-# Пользователь и база — из .env, как у compose. Раньше брались из окружения
-# оболочки (обычно пустого), и при своём POSTGRES_USER проверка занятости
-# молча отвечала «0 задач» — обновление шло поверх работающего распознавания.
-env_val() { { sed -n "s/^$1=//p" .env 2>/dev/null || true; } | tail -1 | tr -d '\r"'"'"; }
-PGUSER_="${POSTGRES_USER:-$(env_val POSTGRES_USER)}"; PGUSER_="${PGUSER_:-voise}"
-PGDB_="${POSTGRES_DB:-$(env_val POSTGRES_DB)}"; PGDB_="${PGDB_:-voise}"
-
+# Пользователь и база — из окружения САМОГО контейнера db: с ними он и был
+# создан. Брать их из оболочки или из .env нельзя — оба могут разойтись с
+# работающей базой, и тогда psql падает, проверка молча отвечает «0 задач», а
+# обновление идёт поверх работающего распознавания.
 busy_jobs() {
-  docker compose exec -T db psql -U "$PGUSER_" -d "$PGDB_" -tA -c \
-    "select count(*) from jobs where status in ('queued','running','analyzing');" \
+  echo "select count(*) from jobs where status in ('queued','running','analyzing');" \
+    | docker compose exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tA' \
     2>/dev/null | tr -dc '0-9' || true
 }
 

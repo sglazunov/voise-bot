@@ -42,6 +42,10 @@ _snap_lock = threading.Lock()
 
 def of_state(st) -> dict:
     return {"state": st.state, "detail": st.detail,
+            # Название встречи: по нему облако раскладывает видео по папке
+            # серии. Без него дозаливка после перезапуска брала имя файла
+            # («30.10.2026, 10-00. - Планёрка») и уводила видео в «Разовые».
+            "title": st.title,
             "job_id": st.job_id, "cloud_url": st.cloud_url,
             "out_path": st.out_path,
             "live_notes": st.live_notes,
@@ -60,6 +64,8 @@ def of_state(st) -> dict:
 
 
 def save(st) -> None:
+    if getattr(st, "forgotten", False):
+        return          # аккаунт команды удалён — не воскрешать его карточку
     if db.enabled():
         # Одна строка по ключу. Раньше здесь читались ВСЕ встречи команды и
         # записывались обратно целиком, причём meetings_save удаляет ключи,
