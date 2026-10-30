@@ -38,6 +38,14 @@ _MAX_LAST_TASKS = 25
 _MAX_ITEM = 220               # одна строка решения/задачи в памяти
 _MAX_HISTORY = 12             # сколько прошлых встреч помнить в списке
 _MAX_SERIES = 300
+# Глубокая память серии (ревью RAG 30.10): в промпт идёт не только прошлая
+# встреча, но и краткие итоги нескольких до неё — иначе «что решили две
+# недели назад» модель не знала. Бюджет жёсткий: это справка, не расшифровка.
+_MAX_EARLIER = 3              # встреч «раньше в этой серии»
+_MAX_HIST_SUMMARY = 300       # «о чём была» в записи истории
+_MAX_HIST_DECISIONS = 5
+_MAX_HIST_TASKS = 8
+_MAX_EARLIER_CHARS = 2_500
 
 PRIORITIES = ("normal", "urgent", "record_only")
 
@@ -513,8 +521,15 @@ def remember(user: str, title: str | None, analysis: dict | None,
             e["title"] = display_title(title)
         # История: одна запись на протокол (пересборка перезаписывает).
         hist = [h for h in (e.get("history") or []) if h.get("job_id") != (job_id or None)]
+        # Кроме счётчиков — краткие итоги: по ним собирается блок «раньше в
+        # этой серии» для встреч старше прошлой (до 30.10 хранились только числа).
         hist.append({"date": date, "job_id": job_id or "",
-                     "tasks": len(tasks), "decisions": len(decisions)})
+                     "tasks": len(tasks), "decisions": len(decisions),
+                     "summary": last["summary"][:_MAX_HIST_SUMMARY],
+                     "decided": decisions[:_MAX_HIST_DECISIONS],
+                     "open": [t["task"] + (f" — {t['owner']}" if t.get("owner") else "")
+                              for t in tasks[:_MAX_HIST_TASKS]]})
+        hist.sort(key=lambda h: _date_key(h.get("date", "")))
         e["history"] = hist[-_MAX_HISTORY:]
         # «Прошлая» — самая поздняя по дате; пересборка старого протокола не
         # должна затирать память о более свежей встрече.
@@ -588,6 +603,76 @@ def _date_key(d: str) -> tuple:
 # --------------------------------------------------------------------------- #
 SERIES_HEADER = "=== КОНТЕКСТ СЕРИИ ВСТРЕЧ"
 LAST_HEADER = "=== ПРОШЛАЯ ВСТРЕЧА ЭТОЙ СЕРИИ"
+EARLIER_HEADER = "=== РАНЬШЕ В ЭТОЙ СЕРИИ"
+
+_SUMMARY_PREFIX = "О чём шёл разговор: "
+_DECISIONS_PREFIX = "Решения и договорённости:"
+
+
+def _earlier_from_history(e: dict, last: dict) -> list[dict]:
+    """Итоги встреч серии старше прошлой — из истории карточки."""
+    out = []
+    for h in reversed(e.get("history") or []):
+        if not isinstance(h, dict) or not (h.get("summary") or h.get("decided")):
+            continue
+        if h.get("date") == last.get("date") or (
+                h.get("job_id") and h.get("job_id") == last.get("job_id")):
+            continue
+        out.append({"date": h.get("date") or "?", "summary": h.get("summary") or "",
+                    "decided": list(h.get("decided") or [])[:_MAX_HIST_DECISIONS]})
+    return out
+
+
+def _earlier_from_index(team: str, key: str, last: dict, skip_dates: set[str],
+                        need: int) -> list[dict]:
+    """Итоги из памяти встреч (meeting_chunks): протоколы, собранные до того,
+    как история начала хранить итоги, и архив из облака."""
+    from . import meeting_index
+    if need <= 0 or not meeting_index.enabled():
+        return []
+    try:
+        from . import db
+        rows = db.chunks_series_recent(team, key, limit=need + len(skip_dates) + 1,
+                                       kind="protocol",
+                                       exclude_doc=last.get("job_id") or None)
+    except Exception:  # noqa: BLE001 — память встреч не должна ломать протокол
+        return []
+    by_doc: dict[str, dict] = {}
+    for r in rows:
+        d = by_doc.setdefault(r["doc_id"], {"date": r.get("meeting_date") or "?",
+                                            "summary": "", "decided": []})
+        text = str(r.get("text") or "")
+        if text.startswith(_SUMMARY_PREFIX):
+            d["summary"] = text[len(_SUMMARY_PREFIX):].strip()[:_MAX_HIST_SUMMARY]
+        elif text.startswith(_DECISIONS_PREFIX):
+            d["decided"] = [ln[2:].strip() for ln in text.splitlines()[1:]
+                            if ln.startswith("- ")][:_MAX_HIST_DECISIONS]
+    out = [d for d in by_doc.values()
+           if d["date"] not in skip_dates and (d["summary"] or d["decided"])]
+    return out[:need]
+
+
+def earlier_block(team: str, key: str, e: dict, last: dict) -> str:
+    """Блок «РАНЬШЕ В ЭТОЙ СЕРИИ»: до _MAX_EARLIER встреч старше прошлой, новые
+    сверху; сначала из истории карточки, недостающие — из памяти встреч."""
+    items = _earlier_from_history(e, last)[:_MAX_EARLIER]
+    skip = {last.get("date") or ""} | {i["date"] for i in items}
+    items += _earlier_from_index(team, key, last, skip, _MAX_EARLIER - len(items))
+    items.sort(key=lambda i: _date_key(i["date"]), reverse=True)
+    if not items:
+        return ""
+    lines = [f"{EARLIER_HEADER} (кратко, по датам; справка о контексте — НЕ "
+             "переноси в решения/задачи этой встречи) ==="]
+    used = 0
+    for i in items[:_MAX_EARLIER]:
+        line = f"• {i['date']}: {i['summary']}".rstrip(": ")
+        if i["decided"]:
+            line += " Решили: " + "; ".join(i["decided"]) + "."
+        if used + len(line) > _MAX_EARLIER_CHARS:
+            break
+        lines.append(line)
+        used += len(line)
+    return "\n".join(lines) if len(lines) > 1 else ""
 
 
 def block_for(user: str, title: str | None) -> str:
@@ -620,6 +705,12 @@ def block_for(user: str, title: str | None) -> str:
             lines += [f"- {t['task']}" + (f" — {t['owner']}" if t.get("owner") else "")
                       for t in last["tasks"]]
         parts.append("\n".join(lines))
+    try:
+        earlier = earlier_block(security.team_of(user), key, e, last)
+    except Exception:  # noqa: BLE001
+        earlier = ""
+    if earlier:
+        parts.append(earlier)
     return "\n\n".join(parts)
 
 
