@@ -69,3 +69,49 @@ def test_идущая_встреча_не_прерывается():
 def test_ручная_остановка_по_прежнему_работает():
     bot = _Bot(ended=False)
     assert bot.wait_until_end(lambda: True, max_sec=9999, alone_sec=90) == "stopped"
+
+
+def test_чат_открывается_повторно_если_кнопки_не_было(monkeypatch):
+    """Ревью 30.10: кнопка «Чат» не нашлась в первые секунды — и стоп-слово
+    не работало всю встречу. Теперь бот пробует открыть чат снова, пока не
+    откроет (раз в ~30 с), а открытый не трогает."""
+    import app.automation.recorder.browser as br
+    clock = [1000.0]
+    monkeypatch.setattr(br.time, "time", lambda: clock[0])
+    monkeypatch.setattr(br.time, "sleep", lambda s: clock.__setitem__(0, clock[0] + s))
+
+    class B(_Bot):
+        tries = 0
+
+        def open_chat(self, quiet=False):
+            B.tries += 1
+            if B.tries >= 3:
+                self._chat_opened_once = True
+
+        def maybe_chat_stop(self, word):
+            return bool(getattr(self, "_chat_opened_once", False))
+
+    b = B()
+    assert b.wait_until_end(None, max_sec=9999, alone_sec=90,
+                            chat_stop_word="стоп") == "chat_stop"
+    assert B.tries == 3
+    assert clock[0] - 1000.0 < 120, "повтор не реже раза в 30 с"
+
+
+def test_открытый_чат_не_переоткрывается(monkeypatch):
+    import app.automation.recorder.browser as br
+    clock = [1000.0]
+    monkeypatch.setattr(br.time, "time", lambda: clock[0])
+    monkeypatch.setattr(br.time, "sleep", lambda s: clock.__setitem__(0, clock[0] + s))
+
+    class B(_Bot):
+        tries = 0
+
+        def open_chat(self, quiet=False):
+            B.tries += 1
+            self._chat_opened_once = True
+
+    b = B()
+    assert b.wait_until_end(None, max_sec=200, alone_sec=90,
+                            chat_stop_word="стоп") == "max_duration"
+    assert B.tries == 1

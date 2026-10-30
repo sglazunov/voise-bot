@@ -1394,11 +1394,12 @@ class TelemostBot:
         """Is the chat panel open (works for both guest and signed-in modes)?"""
         return self._find_first(self._CHAT_OPEN_HINTS) is not None
 
-    def open_chat(self) -> None:
+    def open_chat(self, quiet: bool = False) -> None:
         """Open the chat panel ONCE at the start of recording and NEVER touch
         the «Чат» button again — it's a toggle, so re-clicking it would close a
         panel that's already open (that's why the chat kept closing after a
-        minute). If it's already open we don't click at all."""
+        minute). If it's already open we don't click at all. `quiet` — повтор
+        из цикла записи: неудача не пишется в лог снова."""
         try:
             if self._chat_open():
                 self._chat_opened_once = True
@@ -1408,7 +1409,8 @@ class TelemostBot:
             self._page.mouse.move(640, 660)
         except Exception:
             pass
-        if self._click_any(self._CHAT_BTN, overall_ms=6000, poll_ms=300):
+        if self._click_any(self._CHAT_BTN, overall_ms=2000 if quiet else 6000,
+                           poll_ms=300):
             self._chat_opened_once = True
             for _ in range(25):
                 self._page.wait_for_timeout(200)
@@ -1417,6 +1419,8 @@ class TelemostBot:
             self._on_log("Открыл чат — слежу за стоп-словом (кнопку «Чат» больше "
                          "не трогаю).")
         else:
+            if quiet:
+                return
             self._on_log("⚠ Кнопка «Чат» не найдена — стоп-слово может не "
                          "сработать (пришлите скриншот встречи).")
 
@@ -1477,10 +1481,51 @@ class TelemostBot:
     _TIME_RE = re.compile(r"(?<!\d)([01]?\d|2[0-3]):([0-5]\d)(?!\d)")
 
     @classmethod
-    def _stop_events(cls, lines: list[str], word: str) -> list[tuple[str, str | None]]:
+    def _bare_time(cls, line: str) -> str | None:
+        """Строка — только время и значки доставки («11:54 ✓✓»), без букв.
+        «Иван Р. 11:30» — чужое сообщение, не время."""
+        nb = line.strip()
+        m = cls._TIME_RE.search(nb)
+        if m and not re.search(r"[^\W\d_]", nb):
+            return m.group(0)
+        return None
+
+    @classmethod
+    def _time_after_text(cls, lines: list[str]) -> bool:
+        """Раскладка чата: время ПОСЛЕ текста (True) или ПЕРЕД ним (False).
+
+        Голосуют разделители дат: в раскладке «после» последний элемент дня —
+        время, и строка прямо над разделителем — время; в раскладке «перед» —
+        текст. Первый разделитель не голосует: над ним может быть что угодно
+        (интерфейс, обрезанное сообщение). Голосов нет — «после»: так верстает
+        Телемост по живым логам 20.10 и 29.10."""
+        after = before = 0
+        headers = 0
+        for i, ln in enumerate(lines):
+            if not cls._is_day_header(ln):
+                continue
+            headers += 1
+            if headers == 1 or i == 0:
+                continue
+            prev = lines[i - 1]
+            if cls._is_day_header(prev) or not prev.strip():
+                continue
+            if cls._bare_time(prev):
+                after += 1
+            else:
+                before += 1
+        return after >= before
+
+    @classmethod
+    def _stop_events(cls, lines: list[str], word: str,
+                     time_after: bool | None = None) -> list[tuple[str, str | None]]:
         """Строки-команды с временем сообщения: «стоп 11:26» — в той же
-        строке; в вёрстке Мессенджера время стоит ОТДЕЛЬНОЙ строкой сразу
-        после текста (реже — перед ним). Нет времени — None."""
+        строке; иначе — соседняя строка С ОДНОЙ стороны, по раскладке чата
+        (`_time_after_text`). Смотреть в обе стороны нельзя: с другой стороны
+        стоит время СОСЕДНЕГО сообщения (ревью 30.10). Нет времени — None."""
+        if time_after is None:
+            time_after = cls._time_after_text(lines)
+        j_off = 1 if time_after else -1
         out = []
         n = len(lines)
         for i, ln in enumerate(lines):
@@ -1490,16 +1535,8 @@ class TelemostBot:
             m = cls._TIME_RE.search(ln)
             if m:
                 t = m.group(0)
-            else:
-                # Соседняя строка — только время и значки доставки («11:54 ✓✓»),
-                # без букв: «Иван Р. 11:30» — чужое сообщение, не берётся.
-                for j in (i + 1, i - 1):
-                    if 0 <= j < n:
-                        nb = lines[j].strip()
-                        m2 = cls._TIME_RE.search(nb)
-                        if m2 and not re.search(r"[^\W\d_]", nb):
-                            t = m2.group(0)
-                            break
+            elif 0 <= i + j_off < n:
+                t = cls._bare_time(lines[i + j_off])
             out.append((ln.strip(), t))
         return out
 
@@ -1582,6 +1619,16 @@ class TelemostBot:
         all_lines = text.splitlines()
         lines = self._today_lines(all_lines, wall)
         scope = "today" if len(lines) != len(all_lines) else "all"
+        if scope == "today":
+            self._today_seen = True
+        elif (getattr(self, "_today_seen", False)
+              and not any(self._is_day_header(ln) for ln in all_lines)):
+            # Ревью 30.10: список приклеен к низу и виртуализирован — при
+            # множестве сообщений за день заголовок «Сегодня» уходит из DOM.
+            # Раздел дня бот уже видел, а других дат на экране нет, — значит,
+            # всё видимое внизу и есть сегодня. Видна прошлая дата — это
+            # прокрутка вверх, остаётся «all».
+            scope = "today"
         n = sum(1 for ln in lines if self._is_stop_line(ln, word))
         if n != self._chat_last_n:
             # When the word IS on the page but no line qualified as a command,
@@ -1600,7 +1647,8 @@ class TelemostBot:
         # отличимо от старого. Это надёжнее счётчика — при прокрутке
         # виртуализированного списка количество видимых строк скачет в обе
         # стороны, и рост «нового сообщения» терялся.
-        events = self._stop_events(lines, word)
+        events = self._stop_events(lines, word,
+                                   time_after=self._time_after_text(all_lines))
         hits = {txt for txt, _ in events}
         timed = set(events)                      # (текст, время) — точнее текста
         # ⚠️ Базовая линия — СВОЯ у каждой области счёта (20.10: «видно 10 →
@@ -1617,17 +1665,17 @@ class TelemostBot:
         st = scopes.get(scope)
         if st is None:
             if scope == "today" and not first_read:
-                # Раздел текущего дня появился ПО ХОДУ записи. Старым под ним
-                # считается то, что бот уже видел раньше (текст и время) или
-                # что написано ДО входа бота (утренняя встреча в той же
-                # комнате). «Стоп» со временем после входа — команда, даже
-                # если такой текст лежит в истории (30.10: в комнате одни
-                # «стоп», и раздел появляется вместе с командой).
-                before = set().union(*(v["timed"] for v in scopes.values()))
+                # Раздел текущего дня появился ПО ХОДУ записи (30.10: в комнате
+                # одни «стоп», и раздел появляется вместе с командой).
+                # Старое под разделом решает ВРЕМЯ, когда оно известно: всё,
+                # написанное не позже входа, — утро той же комнаты, которое
+                # прокрутка показала заново. Совпадение с историей не в счёт:
+                # «стоп 11:18» 23.10 и «стоп 11:18» сегодня — разные сообщения
+                # (ревью 30.10). Без времени — как раньше, по тексту.
                 seen_txt = set().union(*(v["seen"] for v in scopes.values()))
                 old = [(txt, t) for txt, t in events
-                       if (txt, t) in before
-                       or (txt in seen_txt and not self._msg_after(t, since_min, cur_min))]
+                       if (t is not None and not self._msg_after(t, since_min, cur_min))
+                       or (t is None and txt in seen_txt)]
                 st = scopes[scope] = {"baseline": len(old),
                                       "seen": {txt for txt, _ in old},
                                       "timed": set(old)}
@@ -1673,6 +1721,23 @@ class TelemostBot:
                   "августа", "сентября", "октября", "ноября", "декабря")
     _MONTHS_EN = ("january", "february", "march", "april", "may", "june", "july",
                   "august", "september", "october", "november", "december")
+
+    _WEEKDAYS = ("понедельник", "вторник", "среда", "четверг", "пятница",
+                 "суббота", "воскресенье", "monday", "tuesday", "wednesday",
+                 "thursday", "friday", "saturday", "sunday")
+
+    @classmethod
+    def _is_day_header(cls, line: str) -> bool:
+        """Разделитель дня в ленте чата: «Сегодня», «Вчера», «18 сентября»,
+        «18 сентября 2025 г.», «October 18», «понедельник»."""
+        low = line.strip().lower().rstrip(".")
+        if not low or len(low) > 24:
+            return False
+        if low in ("сегодня", "вчера", "today", "yesterday") or low in cls._WEEKDAYS:
+            return True
+        months = "|".join(cls._MONTHS_RU + cls._MONTHS_EN)
+        return bool(re.fullmatch(
+            rf"(\d{{1,2}} ({months})( \d{{4}})?( г)?|({months}) \d{{1,2}}(, \d{{4}})?)", low))
 
     @classmethod
     def _today_markers(cls, now: float | None = None) -> set[str]:
@@ -1731,9 +1796,21 @@ class TelemostBot:
             except Exception:
                 pass
         chat_err_at = 0.0
+        chat_try_at = time.time()
         while True:
             if should_stop and should_stop():
                 return "stopped"
+            # Ревью 30.10: кнопки «Чат» не было в первые секунды — и стоп-слово
+            # молчало всю встречу. Пробуем снова раз в 30 с, пока не откроем.
+            # Открытый чат не трогаем: «Чат» — переключатель (см. open_chat).
+            if ((chat_stop_word or "").strip()
+                    and not getattr(self, "_chat_opened_once", False)
+                    and time.time() - chat_try_at >= 30):
+                chat_try_at = time.time()
+                try:
+                    self.open_chat(quiet=True)
+                except Exception:  # noqa: BLE001
+                    pass
             try:
                 if self.maybe_chat_stop(chat_stop_word):
                     return "chat_stop"
