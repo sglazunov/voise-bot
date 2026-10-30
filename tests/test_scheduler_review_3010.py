@@ -425,7 +425,10 @@ class TestВерсияПослеДо:
     BASE = date(2026, 10, 30)
 
     @pytest.mark.parametrize("text", ["Обновить до версии 2.4.1", "Обновить до 3.2",
-                                      "Поднять до v2.4", "Релиз до версии 2.4"])
+                                      "Поднять до v2.4", "Релиз до версии 2.4",
+                                      # по отдельности: хвост «.1» и слово «версия»
+                                      "Обновить до 12.10.1", "Обновить до версии 12.10",
+                                      "Обновить до v12.10"])
     def test_номер_версии_не_срок(self, text):
         assert wt.parse_due(text, self.BASE, explicit=True) == (None, None)
         assert wt.parse_due(text, self.BASE) == (None, None)
@@ -478,8 +481,9 @@ class TestМутантыДозаливки:
         env.sched._finalize_orphan(_card(owner="team"), dict(env.cfg), str(orphan))
         assert [o for _, o in env.uploads] == ["team", "team", "team"]
 
-    def test_пауза_первой_попытки_после_рестарта(self, tmp_path, resume):
-        _snap(tmp_path)
+    @pytest.mark.parametrize("state", ["done", "transcribing"])
+    def test_пауза_первой_попытки_после_рестарта(self, tmp_path, resume, state):
+        _snap(tmp_path, state=state)
         Scheduler()._resume_pending()
         assert resume.wait()[0][2] == 30
 
@@ -511,6 +515,11 @@ class TestМутантыДозаливки:
         Scheduler()._resume_pending()
         assert resume.wait(timeout=0.3) == []
 
+    def test_без_ошибки_выгрузки_не_дозаливается(self, tmp_path, resume):
+        _snap(tmp_path, upload_error=None)
+        Scheduler()._resume_pending()
+        assert resume.wait(timeout=0.3) == []
+
     def test_файла_на_диске_нет(self, tmp_path, resume):
         st = _snap(tmp_path)
         Path(st.out_path).unlink()
@@ -523,9 +532,10 @@ class TestМутантыДозаливки:
         polled = _card(url=URL)
         s._states[KEY] = polled
         s._resume_pending()
-        st = resume.wait()[0][0]
+        st, out, _ = resume.wait()[0]
         assert s._states[KEY] is polled and st is polled
         assert polled.url == URL
+        assert polled.out_path == out, "карточке опроса не дописан путь записи"
 
     @pytest.mark.parametrize("state", ["done", "transcribing"])
     def test_путь_в_облаке_восстанавливается(self, tmp_path, resume, state):
