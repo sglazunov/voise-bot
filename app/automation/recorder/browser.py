@@ -177,13 +177,17 @@ _IN_CALL = _IN_CALL_STRONG + _IN_CALL_HANGUP
 # Выход из звонка: сначала «покинуть/выйти», «завершить» — последним (у
 # организатора оно может завершать встречу). Кнопки с «для всех» не
 # нажимаются никогда — бот уходит сам, а не выгоняет людей.
+# «Покинуть» — в любом виде (<button> и <div role=button> новой вёрстки) —
+# раньше любого «Выйти»: под «ыйти» попадает и «Выйти из полноэкранного
+# режима» (адверсариальное ревью 30.10; такие кнопки ещё и отсеивает
+# `TelemostBot._not_leave`).
 _LEAVE_BUTTONS = [
-    'button[aria-label*="окинуть"]', 'button[aria-label*="ыйти"]',
-    'button[aria-label*="leave" i]', 'button:has-text("Покинуть")',
+    'button[aria-label*="окинуть"]', '[role="button"][aria-label*="окинуть"]',
+    'button:has-text("Покинуть")',
+    'button[aria-label*="leave" i]', '[role="button"][aria-label*="leave" i]',
     '[data-testid*="hangup"]', 'button[aria-label*="hang" i]',
-    # Новая вёрстка рисует часть кнопок не <button>, а <div role=button>.
-    '[role="button"][aria-label*="окинуть"]', '[role="button"][aria-label*="ыйти"]',
-    '[role="button"][aria-label*="leave" i]', '[role="button"][aria-label*="hang" i]',
+    '[role="button"][aria-label*="hang" i]',
+    'button[aria-label*="ыйти"]', '[role="button"][aria-label*="ыйти"]',
     'button[aria-label*="авершить"]', 'button:has-text("Завершить")',
     '[role="button"][aria-label*="авершить"]',
 ]
@@ -1178,13 +1182,31 @@ class TelemostBot:
         return False
 
     @staticmethod
-    def _for_everyone(el) -> bool:
+    def _label(el) -> str | None:
         try:
-            txt = f"{el.inner_text() or ''} {el.get_attribute('aria-label') or ''}"
+            return f"{el.inner_text() or ''} {el.get_attribute('aria-label') or ''}".lower()
         except Exception:  # noqa: BLE001
-            return False
-        low = txt.lower()
+            return None
+
+    @classmethod
+    def _for_everyone(cls, el) -> bool:
+        """«Завершить для всех» — не нажимать НИКОГДА. Подпись не прочиталась —
+        тоже не нажимать: вкладка встречи закроется и так (`_close_page`), а
+        клик вслепую мог бы завершить встречу всем."""
+        low = cls._label(el)
+        if low is None:
+            return True
         return "для всех" in low or "for all" in low or "everyone" in low
+
+    @classmethod
+    def _not_leave(cls, el) -> bool:
+        """Кнопка, которую нельзя жать при выходе: «для всех» или «Выйти из
+        полноэкранного режима» — её ловил `aria-label*="ыйти"`, и вместо выхода
+        бот возвращал в запись боковую панель с чужими чатами (ревью 30.10)."""
+        if cls._for_everyone(el):
+            return True
+        low = cls._label(el) or ""
+        return any(w in low for w in ("полноэкран", "fullscreen", "full screen"))
 
     def _hangup_button(self):
         """Кнопка выхода из звонка — в окне встречи, не в виджете звонка
@@ -1204,7 +1226,7 @@ class TelemostBot:
                             continue
                     except Exception:  # noqa: BLE001
                         pass
-                    if not self._for_everyone(el):
+                    if not self._not_leave(el):
                         return el
         return None
 
@@ -1276,7 +1298,7 @@ class TelemostBot:
                                 el = _first_visible(fr, sel)
                             except Exception:  # noqa: BLE001
                                 el = None
-                            if el is not None and not self._for_everyone(el):
+                            if el is not None and not self._not_leave(el):
                                 try:
                                     el.click(timeout=3000)
                                     confirmed = True
@@ -1448,39 +1470,58 @@ class TelemostBot:
     # и если панель открылась не внизу, новое сообщение в DOM не появится вовсе.
     # Ищется ближайший прокручиваемый предок у текста со стоп-словом — это и
     # есть список чата; тянется вниз, только если он не у самого низа.
+    # ⚠️ Список с `flex-direction: column-reverse` (так часто верстают чаты)
+    # стоит у низа при scrollTop = 0, а вверх уходит в ОТРИЦАТЕЛЬНЫЕ значения
+    # (проверено в Chromium): обычная проверка «scrollTop у scrollHeight»
+    # у такого списка ложна всегда. Присваивание scrollHeight годится для обоих
+    # видов: позиция зажимается в допустимый диапазон, у `column-reverse` — к 0.
     _PIN_JS = """(word) => {
       const w = String(word || "").toLowerCase();
+      const rev = el => /column-reverse/.test(getComputedStyle(el).flexDirection);
+      const atBottom = el => rev(el)
+        ? Math.abs(el.scrollTop) <= 20
+        : el.scrollTop >= el.scrollHeight - el.clientHeight - 20;
       const seen = new Set(); const found = [];
       const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
       while (walker.nextNode()) {
         const t = walker.currentNode;
         if (!t.nodeValue || !t.nodeValue.toLowerCase().includes(w)) continue;
+        // Предки, пройденные от прошлого текста, не проходятся снова: так и
+        // список с несколькими «стоп» попадает в found один раз.
         for (let el = t.parentElement; el && el !== document.body; el = el.parentElement) {
           if (seen.has(el)) break;
           seen.add(el);
           const st = getComputedStyle(el);
           if (/(auto|scroll)/.test(st.overflowY) && el.scrollHeight > el.clientHeight + 40) {
-            if (!found.includes(el)) found.push(el);
-            if (el.scrollTop < el.scrollHeight - el.clientHeight - 20) {
+            found.push(el);
+            if (!atBottom(el)) {
               el.scrollTop = el.scrollHeight;
             }
             break;
           }
         }
       }
-      const bottom = found.every(el => el.scrollTop >= el.scrollHeight - el.clientHeight - 20);
+      const bottom = found.every(atBottom);
       return {found: found.length, bottom: bottom};
     }"""
 
     def _pin_chat_bottom(self, word: str) -> bool:
         """Прокрутить списки сообщений к низу. True — нашёлся хотя бы один
         такой список и ВСЕ найденные стоят у самого низа: только тогда видимое
-        окно доказанно последнее (см. достраивание раздела дня)."""
+        окно доказанно последнее (см. достраивание раздела дня).
+
+        ⚠️ При оболочке Мессенджера главный документ НЕ трогается: там список
+        чатов с превью («Иван: стоп»), и «прокрутка к низу» каждые 5 с тянула
+        его к старым чатам, а его «низ» делал `pinned` ложным навсегда
+        (адверсариальное ревью 30.10). Чат встречи — во фрейме."""
         page = getattr(self, "_page", None)
         if page is None or not word:
             return False
+        frames = _frames_of(page)
+        if self._shell_present():
+            frames = frames[1:]
         found, bottom = 0, True
-        for fr in _frames_of(page):
+        for fr in frames:
             try:
                 r = fr.evaluate(self._PIN_JS, word) or {}
             except Exception:  # noqa: BLE001
@@ -1500,20 +1541,24 @@ class TelemostBot:
             frames = []
         seen_urls: dict[str, int] = {}
         for i, fr in enumerate(frames):
+            # Ключ фрейма — адрес (и номер среди одинаковых): у каждого фрейма
+            # своя область счёта, и она не должна прыгать, когда страница
+            # добавляет или убирает служебный iframe перед чатом. Номер
+            # считается по ВСЕМ фреймам, а не только по фреймам с текстом:
+            # иначе два about:blank менялись ключами, как только первый
+            # наполнялся (адверсариальное ревью 30.10).
+            url = str(getattr(fr, "url", "") or "").replace("\n", " ")
+            k = seen_urls.get(url, 0)
+            seen_urls[url] = k + 1
             try:
                 t = fr.inner_text("body")
             except Exception:
                 continue
             if not (t and t.strip()):
                 continue
-            # Ключ фрейма — адрес (и номер среди одинаковых): у каждого фрейма
-            # своя область счёта, и она не должна прыгать, когда страница
-            # добавляет или убирает служебный iframe перед чатом.
-            url = str(getattr(fr, "url", "") or "").replace("\n", " ")
-            k = seen_urls.get(url, 0)
-            seen_urls[url] = k + 1
-            key = "main" if i == 0 else f"{url}#{k}"
-            parts.append(t if i == 0 else f"{self._FRAME_SEP}{key}\n{t}")
+            # Главный документ идёт без разделителя — `_split_frames` зовёт
+            # его «main»; у фрейма — строка-граница с его ключом.
+            parts.append(t if i == 0 else f"{self._FRAME_SEP}{url}#{k}\n{t}")
         return "\n".join(parts) if parts else None
 
     # Строка-граница между текстами фреймов. Разделитель дня действует только
@@ -1548,6 +1593,8 @@ class TelemostBot:
         for i, ln in enumerate(lines):
             if not cls._is_day_header(ln):
                 continue
+            if i + 1 < len(lines) and cls._bare_time(lines[i + 1]):
+                continue                 # «Сегодня» со своим временем — сообщение
             headers += 1
             if headers == 1 or i == 0:
                 continue
@@ -1663,25 +1710,28 @@ class TelemostBot:
         if text is None:
             return False
         all_lines = text.splitlines()
-        time_after = self._time_after_text(all_lines)
         # ⚠️ Каждый фрейм — своя область счёта (проверка правок 30.10). Раньше
         # разделитель дня искался в склеенном тексте всех фреймов: «30 октября»
         # из списка чатов оболочки делало сегодняшней историю чата встречи, а
         # после разреза по фреймам чат БЕЗ своего заголовка выпадал целиком —
-        # и «стоп» в нём не было видно вовсе.
+        # и «стоп» в нём не было видно вовсе. Раскладка времени — тоже своя у
+        # фрейма: список чатов оболочки перевешивал голосами чат встречи, и
+        # команда получала время соседнего сообщения (адверсариальное ревью).
         frames = self._split_frames(all_lines)
         plan = []
         n_total = 0
         for fkey, flines in frames:
-            scope, lines = self._frame_scope(fkey, flines, wall, pinned)
+            time_after = self._time_after_text(flines)
+            scope, lines = self._frame_scope(fkey, flines, wall, pinned,
+                                             time_after, word)
             n = sum(1 for ln in lines if self._is_stop_line(ln, word))
             n_total += n
-            plan.append((fkey, scope, lines, n))
+            plan.append((fkey, scope, lines, n, time_after))
         if n_total != self._chat_last_n:
             # When the word IS on the page but no line qualified as a command,
             # show a sample — so a layout change is diagnosable from the card log
             # («вижу слово, но строка не похожа на команду» vs «слова нет вовсе»).
-            seen_lines = [ln for _, _, lines, _ in plan for ln in lines]
+            seen_lines = [ln for _, _, lines, _, _ in plan for ln in lines]
             if n_total == 0 and any(word in ln.lower().replace("ё", "е") for ln in seen_lines):
                 sample = next(ln.strip() for ln in seen_lines
                               if word in ln.lower().replace("ё", "е"))[:80]
@@ -1692,8 +1742,8 @@ class TelemostBot:
                 self._on_log(f"Чат: сообщений «{word}» видно {n_total}.")
             self._chat_last_n = n_total
         fired = False
-        for fkey, scope, lines, n in plan:
-            if self._frame_chat_stop(fkey, scope, lines, n, word, time_after,
+        for fkey, scope, lines, _, time_after in plan:
+            if self._frame_chat_stop(fkey, scope, lines, word, time_after,
                                      since_min, cur_min):
                 fired = True
         self._chat_reads = getattr(self, "_chat_reads", 0) + 1
@@ -1716,27 +1766,71 @@ class TelemostBot:
         return out
 
     def _frame_scope(self, fkey: str, flines: list[str], wall: float,
-                     pinned: bool) -> tuple[str, list[str]]:
+                     pinned: bool, time_after: bool = True,
+                     word: str = "") -> tuple[str, list[str]]:
         """Область счёта фрейма: «today» — строки под разделителем текущего дня
         В ЭТОМ фрейме; иначе «all» — все строки фрейма."""
-        lines = self._today_lines(flines, wall)
+        lines = self._today_lines(flines, wall, time_after)
         seen = getattr(self, "_today_seen_frames", None)
         if seen is None:
             seen = self._today_seen_frames = set()
         if len(lines) != len(flines):
             seen.add(fkey)
+            self._remember_anchors(fkey, lines, word)
             return "today", lines
-        if (fkey in seen and pinned
-                and not any(self._is_day_header(ln) for ln in flines)):
-            # Ревью 30.10: заголовок «Сегодня» ушёл из DOM виртуализированного
-            # списка. Достраиваем раздел дня, только когда это ДОКАЗАНО: раздел
-            # видели в этом же фрейме, список стоит у самого низа, и дат на
-            # экране нет — значит, всё видимое внизу и есть сегодня. Иначе в
-            # окне может быть прошлая неделя со «стоп 11:26» (проверка правок).
-            return "today", flines
+        if fkey in seen:
+            headers = self._day_headers(flines, time_after)
+            if pinned and not headers:
+                # Ревью 30.10: заголовок «Сегодня» ушёл из DOM виртуализированного
+                # списка. Достраиваем раздел дня, только когда это ДОКАЗАНО: раздел
+                # видели в этом же фрейме, список стоит у самого низа, и дат на
+                # экране нет — значит, всё видимое внизу и есть сегодня. Иначе в
+                # окне может быть прошлая неделя со «стоп 11:26» (проверка правок).
+                self._remember_anchors(fkey, flines, word)
+                return "today", flines
+            # Адверсариальное ревью 30.10: заголовок ушёл из DOM вместе с
+            # приходом команды (низ не доказан), или запись перешла через
+            # полночь и вчерашняя дата перестала быть «сегодня». Если в окне
+            # есть сообщение, которое бот уже видел ПОД разделом дня, — всё
+            # ниже него написано не раньше (лента идёт по времени): это и есть
+            # продолжение раздела дня. Ниже якоря не должно быть дат.
+            cut = self._after_anchor(fkey, flines, word)
+            if cut is not None and not any(i >= cut for i in headers):
+                self._remember_anchors(fkey, flines[cut:], word)
+                return "today", flines[cut:]
         return "all", flines
 
-    def _frame_chat_stop(self, fkey: str, scope: str, lines: list[str], n: int,
+    def _anchor_triples(self, lines: list[str], word: str):
+        """Тройки соседних строк (автор, текст, время) — отпечаток сообщения.
+        Строки команды в отпечаток не идут: «Сергей Беск / стоп / 10:40»
+        одинаково во все недели, по нему место в ленте не узнать. (Дат в
+        строках раздела дня не бывает: он кончается последним разделителем.)"""
+        out = []
+        for i in range(len(lines) - 2):
+            tri = tuple(ln.strip() for ln in lines[i:i + 3])
+            if all(tri) and not (word and any(self._is_stop_line(x, word) for x in tri)):
+                out.append((i, tri))
+        return out
+
+    def _remember_anchors(self, fkey: str, lines: list[str], word: str) -> None:
+        store = getattr(self, "_today_anchors", None)
+        if store is None:
+            store = self._today_anchors = {}
+        store.setdefault(fkey, set()).update(t for _, t in self._anchor_triples(lines, word))
+
+    def _after_anchor(self, fkey: str, lines: list[str], word: str) -> int | None:
+        """Индекс строки сразу за ПОСЛЕДНИМ якорем (сообщением, виденным под
+        разделом дня в этом фрейме); None — якоря в окне нет."""
+        known = (getattr(self, "_today_anchors", None) or {}).get(fkey)
+        if not known:
+            return None
+        cut = None
+        for i, tri in self._anchor_triples(lines, word):
+            if tri in known:
+                cut = i + 3
+        return cut
+
+    def _frame_chat_stop(self, fkey: str, scope: str, lines: list[str],
                          word: str, time_after: bool, since_min: int,
                          cur_min: int) -> bool:
         """Новая команда в одном фрейме (логика 20.10–30.10, область — своя)."""
@@ -1744,8 +1838,28 @@ class TelemostBot:
         # отличимо от старого. Это надёжнее счётчика — при прокрутке
         # виртуализированного списка количество видимых строк скачет в обе
         # стороны, и рост «нового сообщения» терялся.
-        events = self._stop_events(lines, word, time_after=time_after)
-        hits = {txt for txt, _ in events}
+        # Текст сравнивается без регистра: «Стоп 11:12» и «стоп 11:12» —
+        # одно и то же для команды, а «новым» текстом становилась любая
+        # заглавная из истории (адверсариальное ревью 30.10).
+        events = [(txt.lower().replace("ё", "е"), t)
+                  for txt, t in self._stop_events(lines, word, time_after=time_after)]
+        if scope == "all" and self._day_headers(lines, time_after):
+            # Адверсариальное ревью 30.10: в окне есть дата, и это не сегодня —
+            # значит, всё видимое не новее этой прошлой даты (строки над ней
+            # ещё старше). Командой тут быть нечему, сколько бы новых строк
+            # ни показала прокрутка: «Стоп» 9 октября после сдвига окна
+            # останавливал запись. Виденным текст при этом считается.
+            cand = []
+        elif scope == "today":
+            # Под разделом дня время, если оно есть, решает всё — и для
+            # новизны, и для счётчика: утреннее «стоп 10:20», подгруженное
+            # прокруткой, — история той же комнаты, а не рост (ревью 30.10).
+            cand = [(txt, t) for txt, t in events
+                    if t is None or self._msg_after(t, since_min, cur_min)]
+        else:
+            cand = events
+        n = len(cand)
+        hits = {txt for txt, _ in cand}
         timed = set(events)                      # (текст, время) — точнее текста
         # ⚠️ Базовая линия — СВОЯ у каждой области счёта (20.10: «видно 10 →
         # 0 → 1», бот видит «стоп» и сидит дальше). На первом чтении
@@ -1774,7 +1888,9 @@ class TelemostBot:
                 old = [(txt, t) for txt, t in events
                        if (t is not None and not self._msg_after(t, since_min, cur_min))
                        or (t is None and txt in seen_txt)]
-                st = scopes[skey] = {"baseline": len(old),
+                # Счётчик считает только строки без времени (с временем решает
+                # время) — в базовую линию идут старые из них.
+                st = scopes[skey] = {"baseline": sum(1 for _, t in old if t is None),
                                      "seen": {txt for txt, _ in old},
                                      "timed": set(old)}
                 self._on_log("Чат: появился раздел текущего дня — "
@@ -1783,15 +1899,17 @@ class TelemostBot:
                 # Первое чтение под разделом дня: всё, что уже лежит, — старое
                 # по ТЕКСТУ, но «стоп» со временем позже начала слежки —
                 # команда и здесь (29.10: чат мог открыться не сразу).
-                st = scopes[skey] = {"baseline": n, "seen": hits, "timed": set()}
+                st = scopes[skey] = {"baseline": n, "seen": {txt for txt, _ in events},
+                                     "timed": set()}
             else:
-                scopes[skey] = {"baseline": n, "seen": hits, "timed": timed}
+                scopes[skey] = {"baseline": n, "seen": {txt for txt, _ in events},
+                                "timed": timed}
                 return False              # всё, что уже лежало в чате
         fresh = hits - st["seen"]
-        st["seen"] |= hits
+        st["seen"] |= {txt for txt, _ in events}
         recent = []
         if scope == "today":
-            recent = [(txt, t) for txt, t in events
+            recent = [(txt, t) for txt, t in cand
                       if (txt, t) not in st["timed"]
                       and self._msg_after(t, since_min, cur_min)]
         st["timed"] |= timed
@@ -1851,18 +1969,45 @@ class TelemostBot:
         }
 
     @classmethod
-    def _today_lines(cls, lines: list[str], now: float | None = None) -> list[str]:
+    def _day_headers(cls, lines: list[str], time_after: bool = True) -> list[int]:
+        """Индексы НАСТОЯЩИХ разделителей дня в строках одного фрейма.
+
+        «Сегодня» или «30 октября» бывает и ТЕКСТОМ сообщения — и тогда старый
+        «стоп» под ним со временем после входа (еженедельная встреча в тот же
+        час) останавливал запись на первом же чтении (адверсариальное ревью
+        30.10). Отличает соседство со временем: у сообщения время стоит рядом
+        со стороны раскладки, у разделителя — нет. Строка, за которой сразу
+        идёт голое время, — сообщение в любой раскладке (в «время перед
+        текстом» за разделителем идёт автор)."""
+        out = []
+        n = len(lines)
+        for i, ln in enumerate(lines):
+            if not cls._is_day_header(ln):
+                continue
+            if i + 1 < n and cls._bare_time(lines[i + 1]):
+                continue
+            if not time_after and i > 0 and cls._bare_time(lines[i - 1]):
+                continue
+            out.append(i)
+        return out
+
+    @classmethod
+    def _today_lines(cls, lines: list[str], now: float | None = None,
+                     time_after: bool | None = None) -> list[str]:
         """Строки ОДНОГО фрейма после разделителя текущего дня. Чат комнаты
         общий и не чистится: в нём «стоп» с прошлых встреч за месяцы, а список
         виртуализирован — при прокрутке старые строки то появляются, то
         уходят. Команда сегодняшней встречи может стоять только под разделом
-        текущего дня; всё выше — история. Разделителя нет — все строки."""
+        текущего дня; всё выше — история. Разделителя нет — все строки.
+        Раздел текущего дня — последний в ленте: если ниже «Сегодня» стоит
+        другая дата, это «Сегодня» — не разделитель."""
+        if time_after is None:
+            time_after = cls._time_after_text(lines)
         markers = cls._today_markers(now)
-        idx = None
-        for i, ln in enumerate(lines):
-            if ln.strip().lower() in markers:
-                idx = i
-        return lines[idx + 1:] if idx is not None else lines
+        headers = cls._day_headers(lines, time_after)
+        if headers and lines[headers[-1]].strip().lower() in markers:
+            return lines[headers[-1] + 1:]
+        return lines
 
     def wait_until_end(self, should_stop, max_sec: int, alone_sec: int,
                        min_participants: int = 1, chat_stop_word: str = "") -> str:

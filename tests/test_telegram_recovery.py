@@ -461,3 +461,37 @@ class TestСтопИзТелеграма:
                             lambda *a, **k: pytest.fail("не должен вызываться"))
         telegram.handle_update(_msg(777, "/stop"))
         assert "привяж" in tg.sent()[-1]["text"].lower()
+
+    # Адверсариальное ревью 30.10: «стоп» во время ожидания нового пароля
+    # останавливал все записи команды, а ожидание оставалось — и следующее
+    # обычное сообщение («привет, как дела») становилось паролем аккаунта.
+    def test_слово_стоп_в_ожидании_пароля_отменяет_ожидание(self, client, tg, monkeypatch):
+        from app.automation.scheduler import scheduler
+        monkeypatch.setattr(scheduler, "stop_recording",
+                            lambda *a, **k: pytest.fail("слово в диалоге пароля — не команда"))
+        self._linked(client, tg)
+        telegram.handle_update(_msg(555, "/recover"))
+        assert "555" in telegram._RECOVER_WAIT
+        telegram.handle_update(_msg(555, "стоп"))
+        assert "555" not in telegram._RECOVER_WAIT
+        reply = tg.sent()[-1]["text"]
+        assert "отменена" in reply and "/stop" in reply
+        # Следующее сообщение — не пароль.
+        telegram.handle_update(_msg(555, "привет как дела у всех"))
+        assert login(client, password="привет как дела у всех").status_code != 200
+        assert login(client, password="password123").status_code == 200
+
+    def test_команда_stop_в_ожидании_пароля_останавливает_и_отменяет(
+            self, client, tg, monkeypatch):
+        from app.automation.scheduler import scheduler
+        calls = []
+        monkeypatch.setattr(scheduler, "stop_recording",
+                            lambda user, task_id=None: (calls.append(user),
+                                                        {"ok": True, "detail": "Останавливаю запись (1)…"})[1])
+        self._linked(client, tg)
+        telegram.handle_update(_msg(555, "/recover"))
+        telegram.handle_update(_msg(555, "/stop"))
+        assert calls == ["alice"]
+        assert "555" not in telegram._RECOVER_WAIT
+        texts = [m["text"] for m in tg.sent()]
+        assert any("отменена" in t for t in texts) and "Останавливаю" in texts[-1]

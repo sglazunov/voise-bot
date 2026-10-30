@@ -83,3 +83,75 @@ def test_дамп_чата_в_списке_побочных_файлов(tmp_pat
     names = {p.name for p in jobs.media_sidecars(str(rec))}
     assert "30.10.2026, 11-00. - Планёрка.chat.html" in names
     assert "30.10.2026, 11-00. - Планёрка.chat.frame1.html" in names
+
+
+# --- Адверсариальное ревью 30.10 (§4, §7) ------------------------------------
+def test_побочные_файлы_записи_с_квадратными_скобками(tmp_path):
+    """«[CRM] …» — в glob это класс символов: HTML фреймов (с превью чужих
+    чатов) не находился и не удалялся."""
+    rec = tmp_path / "30.10.2026, 11-00. - [CRM] Планёрка.mp4"
+    for name in ("30.10.2026, 11-00. - [CRM] Планёрка.chat.frame1.html",
+                 "30.10.2026, 11-00. - [CRM] Планёрка.join-failed.frame2.html"):
+        (tmp_path / name).write_text("x")
+    # Чужая запись, которую класс символов «[CRM]» как раз и поймал бы.
+    (tmp_path / "30.10.2026, 11-00. - C Планёрка.chat.frame1.html").write_text("x")
+    names = {p.name for p in jobs.media_sidecars(str(rec))}
+    assert "30.10.2026, 11-00. - [CRM] Планёрка.chat.frame1.html" in names
+    assert "30.10.2026, 11-00. - [CRM] Планёрка.join-failed.frame2.html" in names
+    assert "30.10.2026, 11-00. - C Планёрка.chat.frame1.html" not in names
+    jobs.drop_sidecars(str(rec))
+    assert sorted(p.name for p in tmp_path.iterdir()) == [
+        "30.10.2026, 11-00. - C Планёрка.chat.frame1.html"]
+
+
+def test_html_чата_сохраняется_до_выхода_из_звонка(_armed, tmp_path):
+    """Порядок важен: после `leave_call` вкладки встречи уже нет, и сохранять
+    было бы нечего."""
+    order = []
+    _Bot.dump_html = lambda self, path: order.append("dump")
+    _Bot.leave_call = lambda self, *a, **kw: order.append("leave")
+    try:
+        out = tmp_path / "x.mp4"
+        slot = recorder.Slot(0, ":99", "meet0", "meet0.monitor")
+        recorder.record_meeting("https://telemost.yandex.ru/j/abc", str(out),
+                                {"chat_stop_word": "стоп", "auth_mode": "profile"},
+                                on_log=lambda *_: None, slot=slot)
+    finally:
+        _Bot.dump_html = lambda self, path: setattr(self, "dumped", path)
+        _Bot.leave_call = lambda self, *a, **kw: setattr(self, "left", True)
+    assert order == ["dump", "leave"]
+
+
+def test_сбой_в_wait_until_end_выходит_из_звонка(_armed, tmp_path, monkeypatch):
+    """Исключение посреди встречи: раньше `leave_call` не звался вовсе, и бот
+    сидел в комнате до `finally` (остановка ffmpeg, закрытие браузера)."""
+    order = []
+
+    def boom(self, *a, **kw):
+        raise RuntimeError("Target page, context or browser has been closed")
+    monkeypatch.setattr(_Bot, "wait_until_end", boom)
+    monkeypatch.setattr(_Bot, "leave_call", lambda self, *a, **kw: order.append("leave"))
+    monkeypatch.setattr(_Rec, "stop", lambda self: order.append("rec.stop"))
+    out = tmp_path / "x.mp4"
+    slot = recorder.Slot(0, ":99", "meet0", "meet0.monitor")
+    res = recorder.record_meeting("https://telemost.yandex.ru/j/abc", str(out),
+                                  {"chat_stop_word": "", "auth_mode": "profile"},
+                                  on_log=lambda *_: None, slot=slot)
+    assert res["ok"] is True and res["reason"] == "error"     # файл спасён
+    assert order[:2] == ["leave", "rec.stop"]
+
+
+def test_сбой_выхода_после_сбоя_записи_не_теряет_файл(_armed, tmp_path, monkeypatch):
+    def boom(self, *a, **kw):
+        raise RuntimeError("сеть")
+
+    def leave_boom(self, *a, **kw):
+        raise RuntimeError("вкладки нет")
+    monkeypatch.setattr(_Bot, "wait_until_end", boom)
+    monkeypatch.setattr(_Bot, "leave_call", leave_boom)
+    out = tmp_path / "x.mp4"
+    slot = recorder.Slot(0, ":99", "meet0", "meet0.monitor")
+    res = recorder.record_meeting("https://telemost.yandex.ru/j/abc", str(out),
+                                  {"chat_stop_word": "", "auth_mode": "profile"},
+                                  on_log=lambda *_: None, slot=slot)
+    assert res["ok"] is True and res["reason"] == "error"

@@ -296,6 +296,15 @@ def record_meeting(url: str, out_path: str, cfg: dict,
                 "joined_at": joined_at,
                 "audio_warning": audio_state["had_silence"]}
     except Exception as e:  # noqa: BLE001
+        # Сбой посреди встречи (вкладка, сеть, вёрстка): выйти из звонка ДО
+        # остановки ffmpeg, как и в штатном пути. Раньше `leave_call` здесь
+        # не звался, и бот сидел в комнате до `finally` (адверсариальное
+        # ревью 30.10). Не вошли — выходить неоткуда.
+        if joined_at is not None:
+            try:
+                bot.leave_call()
+            except Exception:  # noqa: BLE001 — выход не должен стоить записи
+                _LOG.warning("Выход из звонка после сбоя сорвался", exc_info=True)
         try:
             if rec:
                 rec.stop()
