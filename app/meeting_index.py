@@ -195,8 +195,50 @@ def index_job(store, job) -> int:
                     transcript=transcript, analysis=analysis,
                     is_draft=isinstance(fb, list) and bool(fb),
                     source=f"job:{job.id}")
-    db.chunks_replace(job.id, rows)
-    return len(rows)
+    return store_doc(job.id, team, rows)
+
+
+# --------------------------------------------------------------------------- #
+# Запись кусков + векторы (общий шаг задачи и индексатора архива)
+# --------------------------------------------------------------------------- #
+def store_doc(doc_id: str, team: str, rows: list[dict]) -> int:
+    """Заменить куски документа в таблице и досчитать им векторы. Один вход
+    для обоих источников — задачи распознавания и `scripts/index_archive.py`,
+    чтобы эмбеддинги не забылись ни на одном из путей."""
+    from . import db
+    n = db.chunks_replace(doc_id, rows)
+    embed_doc(team, rows)
+    return n
+
+
+def embed_doc(team: str, rows: list[dict]) -> int:
+    """Посчитать и записать векторы кускам (`embeddings`, pgvector) — только
+    если эмбеддинги включены и база их умеет. Best-effort: любой сбой —
+    предупреждение, куски остаются без вектора (их досчитает
+    `scripts/embed_backfill.py`), сборка протокола и индексация не страдают.
+    Возвращает число записанных векторов."""
+    from . import db, embeddings
+    if not rows or not embeddings.enabled():
+        return 0
+    done = 0
+    try:
+        for i in range(0, len(rows), embeddings.BATCH):
+            batch = rows[i:i + embeddings.BATCH]
+            vecs = embeddings.embed_texts(team, [r.get("text") or "" for r in batch],
+                                          embeddings.KIND_DOC)
+            pairs = [(r["id"], v) for r, v in zip(batch, vecs) if v]
+            if not pairs:
+                # Вся пачка без векторов — провайдер лежит или ключ мёртв;
+                # следующие пачки только повторят ожидание.
+                log.warning("Векторы для %s не посчитаны — куски останутся без них",
+                            batch[0].get("doc_id"))
+                break
+            if not db.vector_ready(len(pairs[0][1])):
+                return 0
+            done += db.chunks_set_embeddings(pairs)
+    except Exception:  # noqa: BLE001 — эмбеддинги не ломают индексацию
+        log.warning("Запись векторов не удалась", exc_info=True)
+    return done
 
 
 # --------------------------------------------------------------------------- #
