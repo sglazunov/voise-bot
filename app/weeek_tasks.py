@@ -243,6 +243,10 @@ def prepare(job_id: str, analysis: dict | None, cfg: dict, meeting_date: date,
     user_map = cfg.get("weeek_user_map") or {}
     default_days = cfg.get("weeek_tasks_default_due_days")
     project_id = (series or {}).get("weeek_project_id") or cfg.get("weeek_tasks_project_id")
+    if cfg.get("managed_by_server"):
+        # Проект в карточке серии меняет любой участник — у команды под замком
+        # он отправлял бы задачи в чужой проект общего воркспейса.
+        project_id = cfg.get("weeek_tasks_project_id")
     out: list[dict] = []
     for section in sections:
         for idx, item in enumerate(analysis.get(section) or []):
@@ -335,6 +339,26 @@ def description_html(draft: dict, meeting_title: str, meeting_date: str,
         parts.append("<p>" + " · ".join(links) + "</p>")
     parts.append(f'<p style="color:#888">voise-bot · {_html(draft.get("key"))}</p>')
     return "".join(parts)
+
+
+_LOCATION = ("project_id", "board_id", "column_id")
+
+
+def pin_location(drafts: list[dict], selected: list[dict], cfg: dict) -> list[dict]:
+    """У команды под замком (`managed_by_server`) место задачи — только из
+    настроек: проект/доска/колонка из запроса и из старого черновика
+    отбрасываются. Иначе клиент, выбрав в запросе чужую доску, заводил бы
+    задачи на доски других клиентов. Возвращает очищенный `selected`."""
+    if not cfg.get("managed_by_server"):
+        return selected
+    for d in drafts:
+        if d.get("status") == "created":
+            continue                 # уже заведённая задача — где завели, там и есть
+        d["project_id"] = cfg.get("weeek_tasks_project_id")
+        d["board_id"] = cfg.get("weeek_tasks_board_id")
+        d["column_id"] = cfg.get("weeek_tasks_column_id")
+    return [{k: v for k, v in (s or {}).items() if k not in _LOCATION}
+            for s in selected]
 
 
 def create_selected(drafts: list[dict], selected: list[dict], token: str,

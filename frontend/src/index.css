@@ -58,6 +58,9 @@ a { color: var(--accent); text-decoration: none; }
   .field { @apply w-full rounded-xl px-3 py-2.5 text-[14px] outline-none; background: var(--inbg);
     color: var(--txt); border: 1px solid var(--line); }
   .field:focus { border-color: var(--accent); }
+  /* Недоступное поле (в т.ч. под замком «управляется сервером») должно
+     выглядеть недоступным, а не «почему-то не печатается». */
+  .field:disabled, .btn:disabled { opacity: .55; cursor: not-allowed; }
   .lbl { @apply block text-[12.5px] mb-1.5; color: var(--muted); }
   .chip { @apply inline-flex items-center gap-1.5 rounded-full text-[11.5px] font-bold px-3 py-1; }
 }

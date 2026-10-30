@@ -1,14 +1,20 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link2, RefreshCw, Trash2, FolderTree, CheckCircle2, ListChecks } from "lucide-react";
 import { Page } from "../components/Layout";
+import { TeamPicker } from "../components/TeamPicker";
 import { Card, Select, Switch, useToast } from "../components/ui";
-import { useSettings } from "../lib/useSettings";
+import { teamQuery, useManagedTeam, useSettings } from "../lib/useSettings";
 import { api } from "../lib/api";
 import { TZ_RU, TZ_CIS, otherZones, tzLabel } from "../lib/timezones";
 
 export default function Weeek() {
-  const { s, set, save, reload , ready } = useSettings();
+  // Основатель сервера может открыть настройки клиентской команды ("" — свои).
+  const [team, setTeam] = useManagedTeam();
+  const { s, set, save, reload, ready, locked } = useSettings(team);
+  const tq = (sep = "?") => teamQuery(team, sep);
   const [token, setToken] = useState("");
+  const [meetBoards, setMeetBoards] = useState<any[] | null>(null);
+  useEffect(() => { setMeetBoards(null); setBoards(null); setColumns(null); setProjects(null); setToken(""); }, [team]);
   const [projects, setProjects] = useState<any[] | null>(null);
   const [probeId, setProbeId] = useState("");
   const [probeRes, setProbeRes] = useState<any>(null);
@@ -25,14 +31,28 @@ export default function Weeek() {
   async function onSave() {
     try {
       // Пустая строка = «очистить»: null бэкенд игнорирует как «не меняли».
-      const patch: any = { weeek_project_id: s.weeek_project_id ?? "", timezone: s.timezone ?? "" };
+      const patch: any = { weeek_project_id: s.weeek_project_id ?? "",
+        weeek_board_id: s.weeek_board_id ?? "", timezone: s.timezone ?? "" };
       if (token.trim()) patch.weeek_token = token.trim();
       await save(patch); setToken(""); toast("Weeek сохранён"); reload();
     } catch (e: any) { toast(e.message, true); }
   }
   async function loadProjects() {
-    try { const d = await api.get("/api/automation/weeek/projects"); setProjects(d.projects || d || []); }
+    try { const d = await api.get(`/api/automation/weeek/projects${tq()}`); setProjects(d.projects || d || []); }
     catch (e: any) { toast(e.message, true); }
+  }
+  // Доска, с которой берутся встречи: список досок проекта встреч.
+  async function loadMeetBoards() {
+    const pid = String(s.weeek_project_id || "").trim();
+    if (!pid) { toast("Сначала укажите id проекта встреч", true); return; }
+    try { const d = await api.get(`/api/automation/weeek/boards?project_id=${encodeURIComponent(pid)}${tq("&")}`); setMeetBoards(d.boards || []); }
+    catch (e: any) { toast(e.message, true); }
+  }
+  async function setManaged(on: boolean) {
+    try {
+      await save({ managed_by_server: on });
+      toast(on ? "Настройки команды управляются сервером" : "Замок снят"); reload();
+    } catch (e: any) { toast(e.message, true); }
   }
   async function resetToken() {
     if (!confirm("Сбросить токен Weeek?")) return;
@@ -58,13 +78,13 @@ export default function Weeek() {
   async function loadBoards() {
     const pid = String(s.weeek_tasks_project_id || s.weeek_project_id || "").trim();
     if (!pid) { toast("Сначала укажите id проекта", true); return; }
-    try { const d = await api.get(`/api/automation/weeek/boards?project_id=${encodeURIComponent(pid)}`); setBoards(d.boards || []); }
+    try { const d = await api.get(`/api/automation/weeek/boards?project_id=${encodeURIComponent(pid)}${tq("&")}`); setBoards(d.boards || []); }
     catch (e: any) { toast(e.message, true); }
   }
   async function loadColumns() {
     const bid = String(s.weeek_tasks_board_id || "").trim();
     if (!bid) { toast("Сначала выберите доску", true); return; }
-    try { const d = await api.get(`/api/automation/weeek/board-columns?board_id=${encodeURIComponent(bid)}`); setColumns(d.columns || []); }
+    try { const d = await api.get(`/api/automation/weeek/board-columns?board_id=${encodeURIComponent(bid)}${tq("&")}`); setColumns(d.columns || []); }
     catch (e: any) { toast(e.message, true); }
   }
   async function loadMembers() {
@@ -75,6 +95,7 @@ export default function Weeek() {
 
   return (
     <Page title="Weeek" subtitle="Источник задач со встречами и ссылками на Телемост">
+      <TeamPicker s={s} team={team} setTeam={setTeam} onManaged={setManaged} />
       <div className="grid lg:grid-cols-2 gap-3.5">
         <Card>
           <div className="flex items-center gap-3 mb-3">
@@ -87,11 +108,13 @@ export default function Weeek() {
           </div>
           <label className="lbl">API-токен Weeek</label>
           <input className="field" type="password" value={token} onChange={(e) => setToken(e.target.value)}
+            disabled={locked("weeek_token")}
             placeholder={connected ? "•••••••• сохранён (оставьте пустым)" : "вставьте токен"} />
           <div className="text-[12px] mt-1.5" style={{ color: "var(--muted)" }}>Персональный ключ из настроек воркспейса. Хранится локально на сервере.</div>
           <div className="grid grid-cols-2 gap-3 mt-3">
-            <div><label className="lbl">ID проекта</label>
-              <input className="field" value={s.weeek_project_id || ""} onChange={(e) => set("weeek_project_id", e.target.value)} placeholder="пусто = все" /></div>
+            <div><label className="lbl" htmlFor="wk-project">ID проекта</label>
+              <input id="wk-project" className="field" value={s.weeek_project_id || ""} disabled={locked("weeek_project_id")}
+                onChange={(e) => set("weeek_project_id", e.target.value)} placeholder="пусто = все" /></div>
             <div><label className="lbl">Часовой пояс</label>
               <Select value={s.timezone || "Europe/Moscow"} onChange={(v) => set("timezone", v)}
                 options={[
@@ -101,10 +124,23 @@ export default function Weeek() {
                 ]} /></div>
           </div>
           <div className="text-[12px] mt-1.5" style={{ color: "var(--muted)" }}>Пусто = все проекты</div>
+          <div className="mt-3">
+            <label className="lbl" htmlFor="wk-board">Доска для встреч</label>
+            <div className="flex gap-1">
+              <input id="wk-board" className="field" value={s.weeek_board_id || ""} disabled={locked("weeek_board_id")}
+                onChange={(e) => set("weeek_board_id", e.target.value)} placeholder="пусто = все доски проекта" />
+              <button className="btn btn-ghost flex-none" onClick={loadMeetBoards} disabled={locked("weeek_board_id")}
+                aria-label="Загрузить доски проекта"><RefreshCw size={14} /></button></div>
+            {meetBoards && <select className="field mt-1" aria-label="Выбрать доску для встреч" value={s.weeek_board_id || ""}
+              disabled={locked("weeek_board_id")} onChange={(e) => set("weeek_board_id", e.target.value)}>
+              <option value="">— все доски проекта</option>{meetBoards.map((b: any) => <option key={b.id} value={b.id}>{b.name} (#{b.id})</option>)}</select>}
+            <div className="text-[12px] mt-1.5" style={{ color: "var(--muted)" }}>
+              Бот берёт встречи только с этой доски. Задача, у которой Weeek не отдал доску, при выбранной доске не попадёт в план.</div>
+          </div>
           <div className="flex gap-2.5 mt-3 flex-wrap">
             <button className="btn btn-primary" onClick={onSave} disabled={!ready}>Сохранить</button>
             <button className="btn btn-ghost" onClick={loadProjects}><RefreshCw size={15} /> Мои проекты</button>
-            <button className="btn btn-danger" onClick={resetToken}><Trash2 size={14} /> Сбросить токен</button>
+            <button className="btn btn-danger" onClick={resetToken} disabled={locked("weeek_token")}><Trash2 size={14} /> Сбросить токен</button>
           </div>
         </Card>
 
@@ -153,18 +189,22 @@ export default function Weeek() {
           <div className="grid md:grid-cols-4 gap-3 mt-3">
             <div><label className="lbl" htmlFor="wt-project">Проект (id)</label>
               <input id="wt-project" className="field" value={s.weeek_tasks_project_id || ""} placeholder={s.weeek_project_id ? `как встречи: ${s.weeek_project_id}` : "id проекта"}
-                onChange={(e) => set("weeek_tasks_project_id", e.target.value)} /></div>
+                disabled={locked("weeek_tasks_project_id")} onChange={(e) => set("weeek_tasks_project_id", e.target.value)} /></div>
             <div><label className="lbl" htmlFor="wt-board">Доска (id)</label>
               <div className="flex gap-1">
-                <input id="wt-board" className="field" value={s.weeek_tasks_board_id || ""} onChange={(e) => set("weeek_tasks_board_id", e.target.value)} />
-                <button className="btn btn-ghost flex-none" onClick={loadBoards} aria-label="Загрузить доски"><RefreshCw size={14} /></button></div>
-              {boards && <select className="field mt-1" aria-label="Выбрать доску" value={s.weeek_tasks_board_id || ""} onChange={(e) => set("weeek_tasks_board_id", e.target.value)}>
+                <input id="wt-board" className="field" value={s.weeek_tasks_board_id || ""} disabled={locked("weeek_tasks_board_id")}
+                  onChange={(e) => set("weeek_tasks_board_id", e.target.value)} />
+                <button className="btn btn-ghost flex-none" onClick={loadBoards} disabled={locked("weeek_tasks_board_id")} aria-label="Загрузить доски"><RefreshCw size={14} /></button></div>
+              {boards && <select className="field mt-1" aria-label="Выбрать доску" value={s.weeek_tasks_board_id || ""}
+                disabled={locked("weeek_tasks_board_id")} onChange={(e) => set("weeek_tasks_board_id", e.target.value)}>
                 <option value="">— доска</option>{boards.map((b: any) => <option key={b.id} value={b.id}>{b.name} (#{b.id})</option>)}</select>}</div>
             <div><label className="lbl" htmlFor="wt-col">Колонка (id)</label>
               <div className="flex gap-1">
-                <input id="wt-col" className="field" value={s.weeek_tasks_column_id || ""} onChange={(e) => set("weeek_tasks_column_id", e.target.value)} />
-                <button className="btn btn-ghost flex-none" onClick={loadColumns} aria-label="Загрузить колонки"><RefreshCw size={14} /></button></div>
-              {columns && <select className="field mt-1" aria-label="Выбрать колонку" value={s.weeek_tasks_column_id || ""} onChange={(e) => set("weeek_tasks_column_id", e.target.value)}>
+                <input id="wt-col" className="field" value={s.weeek_tasks_column_id || ""} disabled={locked("weeek_tasks_column_id")}
+                  onChange={(e) => set("weeek_tasks_column_id", e.target.value)} />
+                <button className="btn btn-ghost flex-none" onClick={loadColumns} disabled={locked("weeek_tasks_column_id")} aria-label="Загрузить колонки"><RefreshCw size={14} /></button></div>
+              {columns && <select className="field mt-1" aria-label="Выбрать колонку" value={s.weeek_tasks_column_id || ""}
+                disabled={locked("weeek_tasks_column_id")} onChange={(e) => set("weeek_tasks_column_id", e.target.value)}>
                 <option value="">— колонка</option>{columns.map((c: any) => <option key={c.id} value={c.id}>{c.name} (#{c.id})</option>)}</select>}</div>
             <div><label className="lbl" htmlFor="wt-due">Срок по умолчанию, дней</label>
               <input id="wt-due" className="field" type="number" min={0} value={s.weeek_tasks_default_due_days ?? ""} placeholder="без срока"

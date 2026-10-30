@@ -23,7 +23,7 @@ import time
 import wave
 from pathlib import Path
 
-from ... import config, logs
+from ... import config, logs, security
 
 # Max letter-word tokens on a chat line for it to count as a deliberate stop
 # COMMAND, not a sentence that merely mentions the word. Override via env.
@@ -420,10 +420,30 @@ def login_status(cfg: dict) -> dict:
 
 
 def _profile_dir(cfg: dict) -> Path:
+    """Мастер-профиль бота КОМАНДЫ: в нём живёт вход в Яндекс.
+
+    Раньше умолчание было одно на сервер (`DATA_DIR/browser-profile`): вход
+    через окно «Войти в Яндекс» любой команды перезаписывал вход остальных, и
+    бот клиента ходил на встречи под чужим аккаунтом, с чужими чатами в
+    оболочке Телемоста. Теперь у команды свой каталог
+    (`users/<команда>/browser-profile`); команда основателя сервера остаётся
+    на прежнем пути — иначе на бою пропал бы уже сделанный вход.
+    `cfg["_team"]` ставит `settings.load`; без него (cfg, собранный руками) —
+    прежнее общее умолчание."""
     raw = (cfg.get("browser_profile_dir") or "").strip()
-    base = Path(raw) if raw else (config.DATA_DIR / "browser-profile")
+    team = cfg.get("_team") or ""
+    if raw:
+        base = Path(raw)
+    elif team and not _founder_team(team):
+        base = security.user_dir(team) / "browser-profile"
+    else:
+        base = config.DATA_DIR / "browser-profile"
     base.mkdir(parents=True, exist_ok=True)
     return base
+
+
+def _founder_team(team: str) -> bool:
+    return any(security.is_super_admin(u) for u in security.team_members(team))
 
 
 # Что НЕ копировать в профиль слота: кэши (сотни мегабайт и бесполезны),
@@ -2175,8 +2195,8 @@ def login_open(cfg: dict, team: str = "") -> "_LoginSession":
     with _login_lock:
         ses = login_sessions.get(team)
         if ses is None or not ses.alive():
-            # Профиль браузера один на процесс (каталог профиля не делится):
-            # пока открыто окно другой команды, второе не поднять.
+            # Окно входа — одно на сервер: профили у команд теперь разные, но
+            # проверка входа (`_login_busy`) смотрит на любое открытое окно.
             other = next((s for t, s in login_sessions.items()
                           if t != team and s.alive()), None)
             if other is not None:

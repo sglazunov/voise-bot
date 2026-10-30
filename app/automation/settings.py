@@ -57,6 +57,9 @@ _DEFAULTS: dict[str, Any] = {
     # --- Weeek task tracker ---
     "weeek_token": "",
     "weeek_project_id": None,         # optional: limit polling to one project
+    # Доска, с которой берутся встречи (пусто = все доски проекта). Для
+    # клиентской команды на общем воркспейсе это граница «видит только своё».
+    "weeek_board_id": None,
     "timezone": "Europe/Moscow",      # workspace tz for naive Weeek date/times
     # --- where to put finished recordings ---
     "cloud": "local",                 # "local" | "gdrive" | "yandex_disk"
@@ -151,7 +154,37 @@ _DEFAULTS: dict[str, Any] = {
     # --- экономика команды (docs/ТЗ-МЕТРИКИ.md §7) — заполняет владелец сервиса ---
     "subscription_rub": None,          # подписка команды, ₽ в месяц; None = не продаётся
     "support_hours_month": 0.0,        # часов поддержки владельца на эту команду в месяц
+    # «Настройки управляются сервером»: клиентская команда на общем инстансе.
+    # Ключи MANAGED_KEYS у неё меняет только основатель сервера — иначе любой
+    # участник снял бы фильтр доски и увидел встречи всех клиентов.
+    "managed_by_server": False,
 }
+
+# Что у управляемой команды заблокировано: всё, через что видно или задевается
+# чужое на общем воркспейсе Weeek и в общем облаке — токен, проект и доска
+# встреч, место для задач из протокола, облако и папки, экономика команды.
+MANAGED_KEYS = (
+    "weeek_token", "weeek_project_id", "weeek_board_id",
+    "weeek_tasks_project_id", "weeek_tasks_board_id", "weeek_tasks_column_id",
+    "cloud", "yandex_disk", "gdrive", "local_dir", "protocol_folder",
+    "folders_by_series", "oneoff_folder",
+    "subscription_rub", "support_hours_month",
+)
+# Что меняет только основатель сервера у ЛЮБОЙ команды: сам флаг замка и путь
+# к профилю браузера — это путь на диске сервера, через него админ одной
+# команды подключился бы к входу в Яндекс другой.
+SERVER_ONLY_KEYS = ("managed_by_server", "browser_profile_dir")
+
+
+def locked_keys(user: str, cfg: dict | None = None) -> set[str]:
+    """Ключи настроек команды, которые `user` менять НЕ вправе."""
+    if security.is_super_admin(user):
+        return set()
+    cfg = cfg if cfg is not None else load(user)
+    keys = set(SERVER_ONLY_KEYS)
+    if cfg.get("managed_by_server"):
+        keys |= set(MANAGED_KEYS)
+    return keys
 
 
 def _atomic_write(user: str, data: dict[str, Any]) -> None:
@@ -207,6 +240,10 @@ def load(user: str) -> dict[str, Any]:
     with _LOCK:
         data = _read_raw(user)
     _transform_secrets(user, data, security.decrypt_secret)
+    # Чья это команда — не настройка, а метка для потребителей cfg (профиль
+    # браузера у каждой команды свой). В хранилище не попадает: `save` берёт
+    # только присланные значения, а API — только ключи из _DEFAULTS.
+    data["_team"] = user
     return data
 
 
@@ -272,6 +309,7 @@ def redacted(user: str) -> dict[str, Any]:
     """Settings safe to send to the UI — secrets replaced with a presence flag."""
     data = load(user)
     out = dict(data)
+    out.pop("_team", None)
     out["weeek_token"] = bool(data.get("weeek_token"))
     yd = dict(data.get("yandex_disk") or {})
     yd["token"] = bool(yd.get("token"))
