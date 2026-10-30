@@ -65,8 +65,19 @@ def _month_num(word: str) -> int | None:
     return None
 
 
-def parse_due(text: str, base: date) -> tuple[str | None, str | None]:
+def _cue_before(low: str, pos: int) -> bool:
+    """Перед позицией в тексте стоит подсказка срока («до», «к», «срок»…)."""
+    return bool(_DUE_CUES.search(low[max(0, pos - 14):pos]))
+
+
+def parse_due(text: str, base: date,
+              explicit: bool = False) -> tuple[str | None, str | None]:
     """(ISO-дата, как прозвучало) или (None, None).
+
+    `explicit=True` — текст САМОЙ задачи, а не поле срока: дата в нём —
+    срок, только если перед ней есть подсказка («до 05.11», «к 5 ноября»).
+    Иначе номер версии («Ревью 2.4.15» → 02.04.2015) или упомянутый день
+    («обсудить итоги 15 октября») становились сроком задачи (ревью 30.10).
 
     Относительные сроки считаются от `base` — даты встречи. «до пятницы» на
     встрече в пятницу — следующая пятница. Непонятное → None, без выдумки.
@@ -75,20 +86,26 @@ def parse_due(text: str, base: date) -> tuple[str | None, str | None]:
         return None, None
     low = text.lower().replace("ё", "е")
 
-    m = re.search(r"(?<!\d)(\d{1,2})[./](\d{1,2})(?:[./](\d{2,4}))?(?!\d)", low)
-    if m:
+    for m in re.finditer(r"(?<!\d)(\d{1,2})[./](\d{1,2})(?:[./](\d{2,4}))?(?!\d)", low):
+        if explicit and not _cue_before(low, m.start()):
+            continue
         d, mo, y = int(m.group(1)), int(m.group(2)), m.group(3)
         year = base.year if not y else (int(y) if len(y) == 4 else 2000 + int(y))
         try:
             dt = date(year, mo, d)
-            if not y and dt < base - timedelta(days=60):
-                dt = date(year + 1, mo, d)
-            return dt.isoformat(), m.group(0)
         except ValueError:
-            pass
+            continue
+        if dt < base - timedelta(days=60):
+            if y:
+                continue        # срок в далёком прошлом — это не срок
+            dt = date(year + 1, mo, d)
+        return dt.isoformat(), m.group(0)
 
-    m = re.search(r"(?<!\d)(\d{1,2})(?:-?го)?\s+([а-я]{3,9})", low)
-    if m and _month_num(m.group(2)):
+    for m in re.finditer(r"(?<!\d)(\d{1,2})(?:-?го)?\s+([а-я]{3,9})", low):
+        if not _month_num(m.group(2)):
+            continue
+        if explicit and not _cue_before(low, m.start()):
+            continue
         d, mo = int(m.group(1)), _month_num(m.group(2))
         year = base.year
         try:
@@ -97,7 +114,7 @@ def parse_due(text: str, base: date) -> tuple[str | None, str | None]:
                 dt = date(year + 1, mo, d)
             return dt.isoformat(), m.group(0)
         except ValueError:
-            pass
+            continue
 
     if re.search(r"\bпослезавтра\b", low):
         return (base + timedelta(days=2)).isoformat(), "послезавтра"
@@ -240,9 +257,15 @@ def prepare(job_id: str, analysis: dict | None, cfg: dict, meeting_date: date,
             key = f"{job_id}:{section}:{idx}"
             fp = _fingerprint(text)
             ver = _verification(analysis, section, idx)
-            grounded = bool(ver and ver.get("ok"))
+            # Механическая опора (совпадение основ слов, а не цитата) —
+            # не основание заводить задачу без человека (ревью 30.10).
+            support = (ver or {}).get("support") or ""
+            grounded = bool(ver and ver.get("ok")) and support != "mechanical"
             uid, kind = match_member(owner, members or [], user_map)
-            due, due_raw = parse_due(due_hint or text, meeting_date)
+            # Поле срока от модели — разбираем как есть; текст задачи — только
+            # с явной подсказкой срока (`explicit`, ревью 30.10).
+            due, due_raw = (parse_due(due_hint, meeting_date) if due_hint
+                            else parse_due(text, meeting_date, explicit=True))
             if not due and default_days not in (None, "", 0):
                 try:
                     due = (meeting_date + timedelta(days=int(default_days))).isoformat()
@@ -255,6 +278,7 @@ def prepare(job_id: str, analysis: dict | None, cfg: dict, meeting_date: date,
                 "due": due, "due_raw": due_raw or (due_hint or None),
                 "priority": None,
                 "grounded": grounded,
+                "support": support,
                 "quote": (ver or {}).get("quote") or "",
                 "t": (ver or {}).get("t") or "",
                 "project_id": project_id,
@@ -369,9 +393,15 @@ def create_selected(drafts: list[dict], selected: list[dict], token: str,
     return results
 
 
-def meeting_date_of(title: str, created_at: float | None) -> date:
+def meeting_date_of(name: str, created_at: float | None) -> date:
+    """День встречи — от него считаются «до пятницы» и «завтра».
+
+    Только из НАЧАЛА имени файла записи (`meeting_series.date_prefix`),
+    иначе — день создания задачи. Раньше дата искалась по всему названию, и
+    «Ревью 2.4.15» давало встречу 02.04.2015 — все относительные сроки
+    уезжали на десять лет назад (ревью 30.10)."""
     from . import meeting_series
-    s = meeting_series.date_from_title(title)
+    s = meeting_series.date_prefix(name)
     if s:
         try:
             return datetime.strptime(s, "%d.%m.%Y").date()

@@ -261,8 +261,10 @@ def test_протокол_ложится_в_папку_встречи(monkeypatc
         CFG, protocol_folder="disk:/Телемост-протоколы"))
     got = {}
 
-    def fake_upload(path, name, cfg, backend=None, folder=None, subfolder=None):
+    def fake_upload(path, name, cfg, backend=None, folder=None, subfolder=None,
+                    owner=None):
         got.update(name=name, folder=folder, subfolder=subfolder)
+        assert owner == u
         return {"ok": True, "url": "https://disk.yandex.ru/d/p", "path": "disk:/p",
                 "backend": "yandex_disk"}
 

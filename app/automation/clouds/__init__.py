@@ -9,8 +9,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ... import config
-
 from . import gdrive, local, yandex_disk
 
 # backend key -> (module, settings sub-key, human label)
@@ -21,10 +19,11 @@ BACKENDS = {
 }
 
 
-def _backend_cfg(settings: dict, key: str) -> dict:
-    """The settings sub-dict a backend expects."""
+def _backend_cfg(settings: dict, key: str, owner: str | None = None) -> dict:
+    """The settings sub-dict a backend expects. `owner` — команда: локальному
+    диску нужна своя подпапка в общей папке по умолчанию (local.base_dir)."""
     if key == "local":
-        return {"local_dir": settings.get("local_dir")}
+        return {"local_dir": settings.get("local_dir"), "team": owner or ""}
     sub = settings.get(key)
     return dict(sub) if isinstance(sub, dict) else {}
 
@@ -59,8 +58,12 @@ def publish(remote_path: str, settings: dict, backend: str | None = None) -> dic
 
 def upload(file_path: str, name: str, settings: dict,
            backend: str | None = None, folder: str | None = None,
-           subfolder: str | None = None) -> dict:
+           subfolder: str | None = None, owner: str | None = None) -> dict:
     """Upload `file_path` as `name` to the chosen (or selected) cloud.
+
+    `owner` — команда-владелец файла. Удалённым облакам он не нужен (у каждой
+    команды свой токен), а локальному — обязателен: без него файл ложится в
+    общую на весь сервер папку (ревью 30.10, коллизия имён между командами).
 
     `folder` overrides the destination folder for this one upload (e.g. put
     protocols in a different folder than the recordings). `subfolder` — папка
@@ -71,7 +74,7 @@ def upload(file_path: str, name: str, settings: dict,
     if not entry:
         return {"ok": False, "backend": key, "error": f"Неизвестное облако: {key}"}
     mod = entry[0]
-    bcfg = _backend_cfg(settings, key)
+    bcfg = _backend_cfg(settings, key, owner)
     if folder:
         if key == "local":
             # Папка протоколов задана в форме Яндекс.Диска («disk:/…») — для
@@ -83,9 +86,7 @@ def upload(file_path: str, name: str, settings: dict,
             if Path(folder).is_absolute():
                 bcfg["local_dir"] = folder
             else:
-                bcfg["local_dir"] = str(Path(
-                    (settings.get("local_dir") or "").strip()
-                    or (config.DATA_DIR / "recordings")) / "protocols")
+                bcfg["local_dir"] = str(local.base_dir(bcfg) / "protocols")
         elif key == "gdrive":
             # Та же беда, что и с локальным диском: папка протоколов может быть
             # записана в форме Яндекс.Диска («disk:/…») — так стоит В
@@ -99,8 +100,7 @@ def upload(file_path: str, name: str, settings: dict,
             bcfg["folder"] = folder
     if subfolder:
         if key == "local":
-            base = (bcfg.get("local_dir") or "").strip() or str(config.DATA_DIR / "recordings")
-            bcfg["local_dir"] = str(Path(base) / subfolder)
+            bcfg["local_dir"] = str(local.base_dir(bcfg) / subfolder)
         elif key == "gdrive":
             try:
                 bcfg["folder_id"] = gdrive.child_folder(

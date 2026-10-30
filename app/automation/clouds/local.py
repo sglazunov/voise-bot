@@ -6,12 +6,26 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-from ... import config
+from ... import config, security
+
+
+def base_dir(cfg: dict) -> Path:
+    """Папка «локального облака» команды.
+
+    Своя папка (`local_dir`) — как задана. Папка по умолчанию — ОБЩАЯ на
+    сервер, поэтому в ней у каждой команды своя подпапка (`team`): имя файла
+    записи — «дата, время. - название», и две команды с одинаковыми
+    названием и временем встречи перезаписывали файл друг друга (ревью 30.10)."""
+    raw = (cfg.get("local_dir") or "").strip()
+    if raw:
+        return Path(raw)
+    base = config.DATA_DIR / "recordings"
+    team = (cfg.get("team") or "").strip()
+    return base / security.normalize_username(team) if team else base
 
 
 def _target_dir(cfg: dict) -> Path:
-    raw = (cfg.get("local_dir") or "").strip()
-    base = Path(raw) if raw else (config.DATA_DIR / "recordings")
+    base = base_dir(cfg)
     base.mkdir(parents=True, exist_ok=True)
     return base
 

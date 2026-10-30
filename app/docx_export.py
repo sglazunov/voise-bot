@@ -67,7 +67,12 @@ def _apply_verification(par, v, RGBColor) -> None:
         approx = ", цитата приблизительная" if v.get("match") == "approx" else ""
         extra = f" — {v['note']}" if v.get("note") else ""
         who = " (ответственный — из обращения в реплике)" if v.get("owner_source") == "обращение" else ""
-        note = par.add_run(f"\nОснование{t}{src}{approx}: «{v['quote']}»{extra}{who}")
+        # Опору подобрал поиск по словам, а не модель цитатой (ревью 30.10):
+        # называть её «основанием» — выдавать совпадение слов за проверку.
+        head = (f"Похожее место{t} (подобрано по словам пункта, дословного "
+                f"подтверждения нет)" if v.get("support") == "mechanical"
+                else f"Основание{t}{src}{approx}")
+        note = par.add_run(f"\n{head}: «{v['quote']}»{extra}{who}")
         note.italic = True
         note.font.color.rgb = RGBColor(*_GRAY)
 
@@ -275,7 +280,7 @@ def generate_report(
     if no_owner:
         doc.add_heading("Задачи без ответственного — назначьте исполнителя", level=1)
         p = doc.add_paragraph()
-        r = p.add_run("Эти задачи подтверждены расшифровкой, но на встрече не прозвучало, "
+        r = p.add_run("Эти задачи нашлись в расшифровке, но на встрече не прозвучало, "
                       "кто их делает. Без исполнителя задача не попадёт в работу.")
         r.italic = True
         r.font.size = Pt(10)

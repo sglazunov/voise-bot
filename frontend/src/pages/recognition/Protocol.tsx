@@ -8,7 +8,7 @@ import { ChevronRight, ExternalLink, FileText, Loader2, RotateCcw } from "lucide
 import { useToast } from "../../components/ui";
 import { api } from "../../lib/api";
 
-type Verify = { ok?: boolean; quote?: string; t?: string; source?: string; match?: string; note?: string; owner_source?: string } | null;
+type Verify = { ok?: boolean; quote?: string; t?: string; source?: string; match?: string; support?: string; note?: string; owner_source?: string } | null;
 
 function VerifyMark({ v }: { v?: Verify }) {
   // null — пункт не проверялся (проверка оборвалась): молчим, а не пугаем.
@@ -33,7 +33,11 @@ function VerifyMark({ v }: { v?: Verify }) {
       <summary className="text-[11px] cursor-pointer" style={{ color: "var(--muted)" }}>
         {/* Значка «≈» больше нет: «цитата приблизительная» и «основания нет»
             — разные вещи, и различает их слово, а не значок. */}
-        основание{v.t ? ` · ${v.t}` : ""}{v.source === "notes" ? " · из заметок" : ""}{v.match === "approx" ? " · цитата приблизительная" : ""}
+        {/* support=mechanical — место подобрано поиском по словам, а не
+            цитатой модели: это не подтверждение (ревью 30.10). */}
+        {v.support === "mechanical"
+          ? `похожее место${v.t ? ` · ${v.t}` : ""} · подобрано по словам, не дословно`
+          : <>основание{v.t ? ` · ${v.t}` : ""}{v.source === "notes" ? " · из заметок" : ""}{v.match === "approx" ? " · цитата приблизительная" : ""}</>}
         {v.note ? ` · ${v.note}` : ""}{v.owner_source === "обращение" ? " · ответственный из обращения" : ""}</summary>
       <div className="text-[11.5px] italic mt-0.5 pl-2" style={{ color: "var(--muted)", borderLeft: "2px solid var(--line)" }}>
         «{v.quote}»</div>
