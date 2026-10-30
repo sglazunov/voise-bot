@@ -300,6 +300,18 @@ def _begin_recover(chat_id) -> None:
                   f"Передумали — напишите /cancel. Жду {RECOVER_TTL // 60} мин.")
 
 
+def _take_recover_wait(chat_id) -> bool:
+    """Снять ожидание нового пароля; True — оно было И ещё не истекло.
+
+    Второй раунд ревью 30.10 (регресс): брошенный /recover, срок которого
+    давно вышел, всё ещё «ждал пароль» — и следующий «стоп» в чате снимал
+    ожидание вместо того, чтобы остановить запись. Истёкшее ожидание — это
+    отсутствие ожидания."""
+    with _LOCK:
+        exp = _RECOVER_WAIT.pop(str(chat_id), None)
+    return exp is not None and exp >= time.time()
+
+
 def _finish_recover(chat_id, msg: dict, text: str) -> None:
     from . import security
     with _LOCK:
@@ -380,8 +392,7 @@ def handle_update(upd: dict) -> None:
     parts = text.split(maxsplit=1)
     # Смена пароля: команда, слова или deep link ?start=recover.
     if lowered in _CANCEL_WORDS:
-        with _LOCK:
-            waiting = _RECOVER_WAIT.pop(str(chat_id), None) is not None
+        waiting = _take_recover_wait(chat_id)
         if waiting:
             send(chat_id, "Смена пароля отменена.")
         return
@@ -397,8 +408,7 @@ def handle_update(upd: dict) -> None:
         # ожидание снимается всегда. Слово «стоп» в ответ на «пришлите пароль»
         # — это «передумал», а не «остановите запись всей команды» (её не
         # вернуть), поэтому запись останавливает только явная команда /stop.
-        with _LOCK:
-            waiting = _RECOVER_WAIT.pop(str(chat_id), None) is not None
+        waiting = _take_recover_wait(chat_id)
         if waiting:
             if not text.startswith("/"):
                 send(chat_id, "Смена пароля отменена. Чтобы остановить запись "
