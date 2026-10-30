@@ -9,6 +9,23 @@ jobs:
   backend:
     name: pytest (backend)
     runs-on: ubuntu-latest
+    # Живой Postgres для tests/test_postgres_smoke.py: остальной набор идёт в
+    # файловом режиме (conftest убирает DATABASE_URL), а на проде — Postgres.
+    # Образ тот же, что в docker-compose.yml.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: voise
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: voise
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U voise -d voise"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -23,7 +40,31 @@ jobs:
           grep -vE '^(faster-whisper|ctranslate2|setuptools<80)' requirements.txt > /tmp/req.txt
           pip install -r /tmp/req.txt httpx numpy
       - name: Tests
+        env:
+          # Не DATABASE_URL: его conftest гасит. Без этой переменной в Actions
+          # smoke-набор не пропускается, а падает — опечатка не выключит его молча.
+          VTX_TEST_DATABASE_URL: postgresql://voise:ci-only-password@localhost:5432/voise
         run: python -m pytest tests/ -q
+
+  # `docker compose config -q` на .env из .env.example — как при чистой
+  # установке по README. Плюс сверка, что DATABASE_URL у app ведёт в сервис db
+  # с его паролем: валидный для compose конфиг, в котором приложение не входит
+  # в свою базу, и был ошибкой P0-1 ревью 30.10.
+  compose:
+    name: docker compose config
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: .env из .env.example
+        run: |
+          cp .env.example .env
+          sed -i 's/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=ci-only-password/' .env
+      - name: compose config (без HTTPS)
+        run: docker compose config -q
+      - name: compose config (профиль https)
+        run: DOMAIN=ci.example.com COMPOSE_PROFILES=https docker compose config -q
+      - name: DATABASE_URL ведёт в сервис db
+        run: docker compose config --format json | python3 scripts/check_compose_config.py
 
   frontend:
     name: tsc + vite build (frontend)
