@@ -64,15 +64,23 @@ case "$1" in
   exec)
     svc="$3"; shift 3
     if [ "$svc" = db ]; then
+      cmd="$3"            # sh -c '<команда psql>'
       sql="$(cat)"
       echo "SQL: $sql" >> "$STATE/calls.log"
       [ -n "${DB_DOWN:-}" ] && { echo 'service "db" is not running' >&2; exit 1; }
+      # Как настоящий psql со скриптом из stdin: ошибка SQL без
+      # -v ON_ERROR_STOP=1 — сообщение и КОД 0, с ним — код 3.
+      sql_error() {
+        echo "ERROR:  $1" >&2
+        case "$cmd" in *"ON_ERROR_STOP=1"*) exit 3 ;; *) exit 0 ;; esac
+      }
       case "$sql" in
         *"count(*)"*)
+          [ -n "${COUNT_SQL_ERROR:-}" ] && sql_error 'relation "jobs" does not exist'
           if [ -f "$STATE/built" ] && [ -n "${BUSY_AFTER_BUILD:-}" ]; then echo 1
           else echo "${BUSY_JOBS:-0}"; fi ;;
         *datcollversion*) echo "${COLL:-ok}" ;;
-        *REINDEX*) [ -z "${REINDEX_FAIL:-}" ] || exit 1 ;;
+        *REINDEX*) [ -z "${REINDEX_FAIL:-}" ] || sql_error 'could not create unique index "users_pkey"' ;;
       esac
       exit 0
     fi
@@ -96,11 +104,20 @@ GIT_SHIM = r'''#!/usr/bin/env bash
 echo "git $*" >> "$STATE/calls.log"
 case "$1" in
   status)
+    if [ -n "${STATUS_FAIL:-}" ]; then
+      echo "fatal: detected dubious ownership in repository at '$PWD'" >&2; exit 128
+    fi
     if [ "${2:-}" = -sb ]; then echo "## main...origin/main [ahead 1, behind 2]"; exit 0; fi
     [ -n "${GIT_DIRTY:-}" ] && printf ' M %s\n' "$GIT_DIRTY"
     exit 0 ;;
   fetch) [ -z "${FETCH_FAIL:-}" ] ;;
-  merge) [ -z "${MERGE_FAIL:-}" ] || { echo "fatal: Not possible to fast-forward" >&2; exit 128; } ;;
+  merge)
+    [ -z "${MERGE_FAIL:-}" ] || { echo "fatal: Not possible to fast-forward" >&2; exit 128; }
+    # Слияние привезло новую версию update.sh. Как git: новый файл (новый
+    # inode) на месте старого, а не перезапись старого на месте.
+    if [ -n "${NEW_UPDATE_SH:-}" ]; then
+      cp "$NEW_UPDATE_SH" scripts/update.sh.new && mv -f scripts/update.sh.new scripts/update.sh
+    fi ;;
   rev-parse) echo abc1234 ;;
   *) echo "шим git: неизвестно $*" >&2; exit 99 ;;
 esac
@@ -121,14 +138,34 @@ class OperationalError(Exception):
     pass
 
 
+class _Cur:
+    def __init__(self, row):
+        self._row = row
+
+    def fetchone(self):
+        return self._row
+
+
 class _Conn:
     def close(self):
         pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def execute(self, sql, *a):
+        assert "count(*)" in sql, sql
+        return _Cur((int(os.environ.get("FAKE_BUSY", "0")),))
 
 
 def connect(url, connect_timeout=None):
     if os.environ.get("FAKE_DB_DOWN"):
         raise OperationalError('connection to server at "db" failed: Connection refused')
+    if os.environ.get("FAKE_DB_ERROR"):
+        raise OperationalError(os.environ["FAKE_DB_ERROR"])
     m = re.match(r"postgresql://[^:@/]*:([^@/]*)@", url)
     pw = m.group(1) if m else os.environ.get("PGPASSWORD")
     if pw is None:
@@ -207,6 +244,8 @@ def run_update(tmp_path):
                               encoding="utf-8", timeout=120)
         return Run(proc, state)
 
+    run.proj = proj
+    run.tmp = tmp_path
     return run
 
 
@@ -366,3 +405,161 @@ class TestСменаОбразаБазы:
 def test_образ_не_обновился__предупреждает(run_update):
     r = run_update(STALE_IMAGE=1)
     assert "образ НЕ обновился" in r.out
+
+
+# ---- Второй раунд ревью 30.10 (docs/АДВЕРСАРИАЛЬНОЕ-РЕВЮ-2026-10-30-2.md §1) --
+
+EXTERNAL_CFG = {"services": {
+    "app": {"environment": {
+        "DATABASE_URL": "postgresql://vtx:extpw@pg.example.com:5432/vtx",
+        "PGPASSWORD": "0123456789abcdef", "VTX_EXTERNAL_DB": "1"}},
+    "db": {"environment": {"POSTGRES_USER": "voise", "POSTGRES_PASSWORD": "0123456789abcdef",
+                           "POSTGRES_DB": "voise"}},
+}}
+
+
+class TestНоваяВерсияСкрипта:
+    """К: bash дочитывает СТАРЫЙ текст update.sh и после git pull. Старый
+    хвост делал `up -d app` без REINDEX — защита срабатывала только со второй
+    раскатки. Теперь после слияния изменившийся скрипт перезапускается."""
+
+    def _stub(self, run_update):
+        stub = run_update.tmp / "new_update.sh"
+        stub.write_text(
+            '#!/usr/bin/env bash\n'
+            'echo "NEW-SCRIPT args=[$*] reexec=${VTX_UPDATE_REEXEC:-}"\n'
+            'echo "new-script $*" >> "$STATE/calls.log"\n', encoding="utf-8", newline="\n")
+        return stub
+
+    def test_изменился__исполняется_новая_версия_а_не_старый_хвост(self, run_update):
+        r = run_update("--allow-dirty", NEW_UPDATE_SH=self._stub(run_update))
+        assert r.rc == 0, r.out
+        assert "NEW-SCRIPT args=[--allow-dirty] reexec=1" in r.out
+        assert not r.called("compose build") and not r.called("compose up"), \
+            "старый текст скрипта не должен идти дальше слияния"
+
+    def test_новая_версия_проходит_целиком_с_reindex_до_app(self, run_update):
+        # «Новая версия» — сам update.sh с меткой: настоящий второй проход.
+        src = (ROOT / "scripts" / "update.sh").read_text(encoding="utf-8")
+        marked = src.replace("set -euo pipefail\n",
+                             'set -euo pipefail\necho "NEW-VERSION-MARKER"\n', 1)
+        assert marked != src
+        new = run_update.tmp / "update_new.sh"
+        new.write_text(marked, encoding="utf-8", newline="\n")
+        r = run_update(NEW_UPDATE_SH=new, COLL="reindex")
+        assert r.rc == 0, r.out
+        assert "NEW-VERSION-MARKER" in r.out
+        assert r.count("git fetch") == 1, "новая версия сеть не трогает: всё уже забрано"
+        assert r.count("compose build app") == 1
+        calls = r.calls
+        assert calls.index("compose up -d --wait db") < calls.index("REINDEX DATABASE") \
+            < calls.index("compose up -d app")
+        assert "совпадает с git" in r.out
+
+    def test_защита_от_цикла(self, run_update):
+        # Уже перезапущенная версия второй раз себя не перезапускает и сеть
+        # не трогает, даже если файл снова «изменился».
+        r = run_update(NEW_UPDATE_SH=self._stub(run_update), VTX_UPDATE_REEXEC="1")
+        assert r.rc == 0, r.out
+        assert "NEW-SCRIPT" not in r.out
+        assert not r.called("git fetch") and not r.called("git merge")
+        assert r.called("compose up -d app")
+
+    def test_не_изменился__без_перезапуска(self, run_update):
+        r = run_update()
+        assert r.rc == 0 and "перезапускаю новую версию" not in r.out
+
+
+class TestПроверкаЗанятостиСтроже:
+    def test_нечисловой_ответ_psql__не_ноль(self, run_update):
+        r = run_update(BUSY_JOBS="ERROR")
+        assert r.rc == 1, r.out
+        assert "НЕ МОГУ ПРОВЕРИТЬ" in r.out and not r.called("compose build")
+
+    def test_ошибка_sql_при_подсчёте__не_ноль(self, run_update):
+        r = run_update(COUNT_SQL_ERROR=1)
+        assert r.rc == 1 and "НЕ МОГУ ПРОВЕРИТЬ" in r.out
+
+    def test_совет_не_отключает_проверку_записи_молча(self, run_update):
+        r = run_update(DB_DOWN=1)
+        assert r.rc == 1
+        assert "--skip-jobs-check" in r.out
+        for line in r.out.splitlines():
+            if "--force" in line:
+                assert "запис" in line, f"--force без слов о записи: {line!r}"
+
+    def test_skip_jobs_check__запись_всё_равно_проверяется(self, run_update):
+        r = run_update("--skip-jobs-check", DB_DOWN=1, REC_N=1)
+        assert r.rc == 1, r.out
+        assert "идёт запись" in r.out and not r.called("compose build")
+
+    def test_skip_jobs_check__база_лежит_обновление_идёт(self, run_update):
+        r = run_update("--skip-jobs-check", DB_DOWN=1)
+        assert r.rc == 0, r.out
+        assert "SQL: select count(*)" not in r.calls
+        assert r.called("compose up -d app")
+
+
+def test_ошибка_git_status__не_чистое_дерево(run_update):
+    r = run_update(STATUS_FAIL=1)
+    assert r.rc == 1, r.out
+    assert "git status" in r.out and "dubious ownership" in r.out
+    assert not r.called("git fetch") and not r.called("compose build")
+
+
+class TestПробаВходаФатальныеОшибки:
+    def test_базы_нет__стоп(self, run_update):
+        r = run_update(FAKE_DB_ERROR='connection to server at "db" (172.18.0.2), port 5432 '
+                                     'failed: FATAL:  database "voisee" does not exist')
+        assert r.rc == 1, r.out
+        assert "НЕ ВОЙДЁТ" in r.out and "does not exist" in r.out
+        assert not r.called("compose build")
+
+    def test_роли_нет__стоп(self, run_update):
+        r = run_update(FAKE_DB_ERROR='connection to server at "db" failed: '
+                                     'FATAL:  role "vtx" does not exist')
+        assert r.rc == 1 and not r.called("compose build")
+
+    def test_кривой_адрес__стоп(self, run_update):
+        r = run_update(FAKE_DB_ERROR='invalid connection option "sslmod"')
+        assert r.rc == 1 and not r.called("compose build")
+
+    def test_база_ещё_стартует__продолжает(self, run_update):
+        r = run_update(FAKE_DB_ERROR='connection to server at "db" failed: '
+                                     'FATAL:  the database system is starting up')
+        assert r.rc == 0, r.out
+        assert "проверить не удалось" in r.out
+
+
+class TestВнешнийPostgres:
+    """`.env.example` документирует внешний Postgres, а update.sh отказывал ему
+    навсегда (хост не `db`, `--force` не помогал)."""
+
+    def test_с_явным_флагом__обновляется(self, run_update):
+        r = run_update(cfg=EXTERNAL_CFG, role_pw="extpw",
+                       DATABASE_URL="postgresql://vtx:extpw@pg.example.com:5432/vtx")
+        assert r.rc == 0, r.out
+        assert r.called("compose build app") and r.called("compose up -d app")
+        # Занятость спрошена у ВНЕШНЕЙ базы (через app), а не у пустого db.
+        assert "SQL: select count(*)" not in r.calls
+        assert "datcollversion" not in r.calls and "REINDEX" not in r.calls
+
+    def test_внешняя_база_занята__стоп(self, run_update):
+        r = run_update(cfg=EXTERNAL_CFG, role_pw="extpw", FAKE_BUSY=2,
+                       DATABASE_URL="postgresql://vtx:extpw@pg.example.com:5432/vtx")
+        assert r.rc == 1, r.out
+        assert "задач в работе: 2" in r.out and not r.called("compose build")
+
+    def test_без_флага__отказ_как_раньше(self, run_update):
+        cfg = json.loads(json.dumps(EXTERNAL_CFG))
+        del cfg["services"]["app"]["environment"]["VTX_EXTERNAL_DB"]
+        r = run_update(cfg=cfg, role_pw="extpw")
+        assert r.rc == 1 and "не сходится" in r.out
+
+
+def test_доллар_в_пароле__проба_берёт_настоящий_пароль(run_update):
+    # `compose config` печатает «$» как «$$»; в контейнер уходит одиночный.
+    cfg = _app_cfg("postgresql://voise@db:5432/voise", pgpassword="p$$word", pw="p$$word")
+    r = run_update(cfg=cfg, role_pw="p$word")
+    assert r.rc == 0, r.out
+    assert "Вход в базу с новыми настройками проверен" in r.out

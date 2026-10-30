@@ -7,8 +7,11 @@
 # момент шла запись — встреча теряется совсем.
 #
 # Поэтому скрипт сначала спрашивает у самого сервиса, занят ли он, и только
-# потом собирает. Обойти проверку: bash scripts/update.sh --force
-# Собрать с локальными правками отслеживаемых файлов: --allow-dirty
+# потом собирает. Параметры:
+#   --skip-jobs-check  не спрашивать базу о задачах (база лежит, а обновление
+#                      должно её поднять); идущая ЗАПИСЬ встречи проверяется;
+#   --force            пропустить ВСЕ проверки занятости, в том числе записи;
+#   --allow-dirty      собрать с локальными правками отслеживаемых файлов.
 #
 # Заодно решает две местные болячки:
 #  - ssh до SourceCraft периодически уходит в IPv6 («Network is unreachable»)
@@ -18,6 +21,13 @@
 # Тесты: tests/test_update_sh.py (шимы docker и git во временной папке).
 set -euo pipefail
 cd "$(dirname "$0")/.."
+
+# Текст, который исполняет ЭТОТ bash. Он читает скрипт по ходу выполнения и
+# после `git merge` дочитывает прежний текст (git кладёт новый файл, старый
+# остаётся открытым), поэтому первая раскатка новой версии шла по СТАРОМУ
+# хвосту: `up -d app` без REINDEX (ревью 30.10, второй раунд, К). Сверяем
+# после слияния и перезапускаем новую версию.
+SELF_SUM="$(cksum < scripts/update.sh)"
 
 # SSH до сервера рвётся посреди сборки («client_loop: send disconnect:
 # Connection reset», 28.10) — и скрипт умирал вместе с сессией, иногда между
@@ -38,12 +48,14 @@ if [ -z "${VTX_UPDATE_DETACHED:-}" ] && [ -t 1 ]; then
 fi
 
 FORCE=0
+SKIP_JOBS=0
 ALLOW_DIRTY=0
 for arg in "$@"; do
   case "$arg" in
     --force) FORCE=1 ;;
+    --skip-jobs-check) SKIP_JOBS=1 ;;
     --allow-dirty) ALLOW_DIRTY=1 ;;
-    *) echo "Неизвестный параметр: $arg (есть --force и --allow-dirty)"; exit 2 ;;
+    *) echo "Неизвестный параметр: $arg (есть --skip-jobs-check, --force и --allow-dirty)"; exit 2 ;;
   esac
 done
 # Пауза между попытками git fetch (тесты ставят 0).
@@ -57,13 +69,38 @@ db_sql() {
     'psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tA'
 }
 
+# Где база: сервис db этого compose или внешний Postgres (VTX_EXTERNAL_DB=1 в
+# .env, см. .env.example). Не смогли узнать — считаем, что своя.
+db_mode() {
+  if command -v python3 >/dev/null 2>&1 \
+      && [ "$(docker compose config --format json 2>/dev/null \
+              | python3 scripts/check_compose_config.py --db-mode 2>/dev/null)" = external ]; then
+    echo external
+  else
+    echo compose
+  fi
+}
+
+BUSY_SQL="select count(*) from jobs where status in ('queued','running','analyzing');"
+# Внешний Postgres: спрашиваем ту базу, с которой работает ЗАПУЩЕННОЕ
+# приложение, — из контейнера app его же адресом. Локальный db пуст, и его
+# «0 задач» (или «нет таблицы jobs») ничего не значит.
+BUSY_PY='
+import os, sys, psycopg
+with psycopg.connect(os.environ["DATABASE_URL"], connect_timeout=10) as c:
+    print(c.execute(sys.argv[1]).fetchone()[0])
+'
+
 # Число задач в работе. Ошибка (контейнер db не запущен, psql упал, в ответе
 # не число) — код возврата 1, а НЕ «0 задач»: раньше `|| true` превращал
 # упавшую базу в «свободно», и обновление шло поверх распознавания.
 busy_jobs() {
   local out
-  out="$(echo "select count(*) from jobs where status in ('queued','running','analyzing');" \
-    | db_sql 2>/dev/null)" || return 1
+  if [ "$(db_mode)" = external ]; then
+    out="$(docker compose exec -T app python -c "$BUSY_PY" "$BUSY_SQL" 2>/dev/null)" || return 1
+  else
+    out="$(echo "$BUSY_SQL" | db_sql 2>/dev/null)" || return 1
+  fi
   out="$(printf '%s' "$out" | tr -d '[:space:]')"
   case "$out" in ''|*[!0-9]*) return 1 ;; esac
   printf '%s' "$out"
@@ -78,13 +115,18 @@ busy_recorders() {
 
 refuse_if_busy() {
   [ "$FORCE" -eq 0 ] || return 0
-  if ! jobs_n="$(busy_jobs)"; then
+  if [ "$SKIP_JOBS" -eq 1 ]; then
+    jobs_n=0
+    echo "==> Задачи в базе не проверяю (--skip-jobs-check); запись встречи проверяю."
+  elif ! jobs_n="$(busy_jobs)"; then
     echo "НЕ МОГУ ПРОВЕРИТЬ ЗАНЯТОСТЬ: база не ответила (контейнер db не запущен"
     echo "или psql завершился с ошибкой). Обновляться вслепую — значит рисковать"
     echo "идущим распознаванием, поэтому останавливаюсь."
     echo "  Проверьте: docker compose ps db; docker compose logs --tail 50 db"
     echo "  Если база лежит и обновление как раз должно её поднять:"
-    echo "  bash scripts/update.sh --force"
+    echo "    bash scripts/update.sh --skip-jobs-check"
+    echo "  Задачи при этом не проверяются, идущая запись встречи — проверяется."
+    echo "  (Не путать с --force: он отключает и проверку записи встречи.)"
     exit 1
   fi
   rec_n="$(busy_recorders)"; rec_n="${rec_n:-0}"
@@ -94,7 +136,8 @@ refuse_if_busy() {
     [ "$rec_n" -gt 0 ] && echo "  • идёт запись встречи (процессов ffmpeg: $rec_n)"
     echo
     echo "$1"
-    echo "Дождитесь окончания либо запустите: bash scripts/update.sh --force"
+    echo "Дождитесь окончания. Прервать всё, включая идущую запись встречи:"
+    echo "  bash scripts/update.sh --force   (прервёт и задачи, и запись)"
     exit 1
   fi
 }
@@ -104,11 +147,15 @@ refuse_if_busy() {
 # командную строку пароль не попадает. Postgres берёт POSTGRES_PASSWORD только
 # при создании тома, и удалённая из .env строка DATABASE_URL=…voise:voise…
 # (на старом томе рабочий пароль — voise) значит: после перезапуска
-# приложение в базу не войдёт. Коды: 0 — вошёл, 3 — отказ по паролю,
-# 4 — прочее (база не отвечает, нет psycopg).
+# приложение в базу не войдёт. Коды: 0 — вошёл, 3 — отказ по паролю, 5 — иная
+# ошибка, после которой приложение тоже не поднимется (нет базы или роли,
+# кривой адрес, неизвестная ошибка), 4 — база временно не отвечает (не
+# запущена, стартует, сеть) или нет psycopg: проверить нельзя, но и вывода
+# «не войдёт» сделать нельзя. `$` в выводе compose config — «$$».
 PROBE_PY='
 import json, os, sys
 env = json.load(sys.stdin).get("services", {}).get("app", {}).get("environment") or {}
+env = {k: v.replace("$$", "$") if isinstance(v, str) else v for k, v in env.items()}
 url = env.get("DATABASE_URL") or ""
 if not url:
     sys.exit(0)
@@ -126,7 +173,17 @@ try:
 except Exception as e:
     text = " ".join(str(e).split()) or type(e).__name__
     print(text, file=sys.stderr)
-    sys.exit(3 if "password" in text or "authentication failed" in text else 4)
+    low = text.lower()
+    if "password" in low or "authentication failed" in low:
+        sys.exit(3)
+    transient = ("connection refused", "timeout expired", "timed out",
+                 "could not translate host name", "name or service not known",
+                 "temporary failure in name resolution", "no route to host",
+                 "network is unreachable", "server closed the connection",
+                 "connection reset", "the database system is starting up",
+                 "the database system is shutting down",
+                 "the database system is in recovery mode", "too many clients")
+    sys.exit(4 if any(t in low for t in transient) else 5)
 '
 
 check_db_login() {
@@ -143,6 +200,11 @@ check_db_login() {
       echo "    либо смените пароль роли — README, «Пароль базы на старой установке»."
       echo "    Ничего не собираю, контейнер НЕ перезапускаю."
       exit 1 ;;
+    5)
+      echo "!!  С новыми настройками приложение НЕ ВОЙДЁТ в базу (ошибка выше: нет"
+      echo "    базы или роли, кривой DATABASE_URL…) — после перезапуска оно ушло бы"
+      echo "    в цикл падений. Ничего не собираю, контейнер НЕ перезапускаю."
+      exit 1 ;;
     *) echo "!!  Вход в базу проверить не удалось (контейнер app не запущен или база"
        echo "    не отвечает) — продолжаю без этой проверки." ;;
   esac
@@ -156,6 +218,10 @@ check_db_login() {
 # Лечение — REINDEX и запись текущей версии; на нашей базе это секунды.
 reindex_if_collation_changed() {
   local state
+  if [ "$(db_mode)" = external ]; then
+    echo "==> Внешний Postgres — правила сортировки локального db не проверяю."
+    return 0
+  fi
   if ! state="$(echo "select case when d.datcollversion is null
       and d.datcollate not in ('C', 'POSIX')
       and pg_database_collation_actual_version(d.oid) is not null
@@ -182,7 +248,16 @@ reindex_if_collation_changed() {
 # собирал СТАРЫЙ код), а если и проходит — правки молча уезжают в образ. Так
 # однажды чуть не уехал compose с DATABASE_URL без хоста db (ревью 30.10,
 # P0-1). Поэтому решение — за человеком, и до любых обращений к сети.
-DIRTY="$(git status --porcelain --untracked-files=no 2>/dev/null || true)"
+# Ошибка самого git status (dubious ownership: каталог чужого пользователя) —
+# это НЕ чистое дерево: раньше `|| true` делал из неё «правок нет», а дальше
+# git fetch падал так же и выглядел как «репозиторий недоступен».
+if ! DIRTY="$(git status --porcelain --untracked-files=no 2>/dev/null)"; then
+  echo "!!  git status не сработал — не могу проверить рабочую копию, обновление остановлено:"
+  git status --porcelain --untracked-files=no 2>&1 >/dev/null | sed 's/^/      /' || true
+  echo "    «dubious ownership» — запускайте от владельца каталога или:"
+  echo "      git config --global --add safe.directory \"$PWD\""
+  exit 1
+fi
 if [ -n "$DIRTY" ]; then
   echo "!!  В рабочей копии есть НЕЗАКОММИЧЕННЫЕ правки отслеживаемых файлов:"
   printf '%s\n' "$DIRTY" | sed 's/^/      /'
@@ -203,18 +278,28 @@ refuse_if_busy "Пересборка прервёт их, и работа нач
 # применилось скачанное (расхождение веток, правки в тех же файлах при
 # --allow-dirty) — это не «репозиторий недоступен», и собирать старый код
 # молча нельзя.
-echo "==> Забираю изменения (IPv4, с повторами)…"
 FETCHED=0
-for i in 1 2 3; do
-  if GIT_SSH_COMMAND="ssh -4 -o ConnectTimeout=10" git fetch; then
-    FETCHED=1
-    break
-  fi
-  [ "$i" -lt 3 ] && { echo "    попытка $i не прошла, повтор через $RETRY_SEC с…"; sleep "$RETRY_SEC"; }
-done
-
 PULLED=0
-if [ "$FETCHED" -eq 1 ]; then
+if [ -n "${VTX_UPDATE_REEXEC:-}" ]; then
+  # Нас запустила предыдущая версия скрипта сразу после слияния: изменения
+  # уже применены, второй раз к SourceCraft не ходим.
+  echo "==> Новая версия update.sh: изменения уже забраны, продолжаю."
+  FETCHED=1
+  PULLED=1
+else
+  echo "==> Забираю изменения (IPv4, с повторами)…"
+  for i in 1 2 3; do
+    if GIT_SSH_COMMAND="ssh -4 -o ConnectTimeout=10" git fetch; then
+      FETCHED=1
+      break
+    fi
+    [ "$i" -lt 3 ] && { echo "    попытка $i не прошла, повтор через $RETRY_SEC с…"; sleep "$RETRY_SEC"; }
+  done
+fi
+
+if [ "$PULLED" -eq 1 ]; then
+  :
+elif [ "$FETCHED" -eq 1 ]; then
   if ! git merge --ff-only '@{u}'; then
     echo "!!  Изменения скачаны, но НЕ применяются к рабочей копии (локальные"
     echo "    правки в тех же файлах или ветка разошлась с сервером):"
@@ -223,6 +308,14 @@ if [ "$FETCHED" -eq 1 ]; then
     exit 1
   fi
   PULLED=1
+  # Слияние привезло новую версию этого скрипта — дальше должна идти ОНА, а не
+  # прежний текст, который bash дочитал бы из старого файла. Один раз:
+  # VTX_UPDATE_REEXEC не даёт новой версии перезапускать себя снова.
+  if [ "$(cksum < scripts/update.sh)" != "$SELF_SUM" ]; then
+    echo "==> scripts/update.sh обновился — перезапускаю новую версию…"
+    export VTX_UPDATE_REEXEC=1 VTX_UPDATE_DETACHED=1
+    exec bash scripts/update.sh "$@"
+  fi
 else
   # Недоступность репозитория НЕ должна отменять применение настроек: правки
   # .env (модель распознавания, число потоков) к git отношения не имеют, а

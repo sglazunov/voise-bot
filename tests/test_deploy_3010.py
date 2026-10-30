@@ -75,7 +75,10 @@ class TestПрерванныеЗадачиПослеРестарта:
         assert config.JOBS_FILE.read_text(encoding="utf-8") == before
 
     @pytest.fixture(autouse=True)
-    def _restore_jobs_file(self):
+    def _restore_jobs_file(self, monkeypatch):
+        # Прерванные пишет только процесс сервиса (docker/run.sh), см.
+        # tests/test_deploy_round2_3010.py.
+        monkeypatch.setenv("VTX_SERVICE_PROCESS", "1")
         f = config.JOBS_FILE
         saved = f.read_bytes() if f.exists() else None
         yield

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import glob
 import json
+import os
 import queue
 import re
 import threading
@@ -237,6 +238,16 @@ class JobStore:
             # По одной задаче: на Postgres это upsert строки, а не перезапись
             # таблицы; сюда доходим, только если разобрались ВСЕ строки, —
             # файловый режим пишет весь список.
+            # ⚠️ Только процесс СЕРВИСА (docker/run.sh ставит
+            # VTX_SERVICE_PROCESS=1 перед uvicorn): JobStore создаётся при
+            # импорте app.jobs, и скрипт в соседнем процессе
+            # (scripts/compare_models.py, gen_api_table.py — `docker compose
+            # exec app python …`) иначе переписал бы ЖИВЫЕ задачи сервиса в
+            # «Прервано», а update.sh увидел бы 0 занятых и пересобрал поверх
+            # работы (ревью 30.10, второй раунд). В памяти скрипта они
+            # «прерваны» — это никому не мешает.
+            if os.environ.get("VTX_SERVICE_PROCESS") != "1":
+                return
             for job in interrupted:
                 self._save(job)
         except Exception:

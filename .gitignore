@@ -28,3 +28,7 @@ _td/
 frontend/node_modules/
 frontend/dist/
 frontend/tsconfig.tsbuildinfo
+
+# Бэкапы (README: кладутся в ~/voise-backups; если всё же в корне — не в git)
+backup*.sql
+.env.bak*
