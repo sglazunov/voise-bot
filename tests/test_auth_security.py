@@ -401,9 +401,12 @@ class TestPhoneRecovery:
                              phone="+79991112233").status_code == 200
 
     def test_profile_change_password_by_phone(self, client):
+        # Телефон — только вместе с одноразовым кодом (ревью 30.10, P1-1).
         register(client, "alice")
+        assert self._request(client).status_code == 200
         r = client.post("/api/profile/password", json={
-            "new_password": "changed-by-phone1", "phone": "+79990000000"})
+            "new_password": "changed-by-phone1", "phone": "+79990000000",
+            "code": self._last_code()})
         assert r.status_code == 200
         client.post("/api/auth/logout")
         assert login(client, "alice", "changed-by-phone1").status_code == 200

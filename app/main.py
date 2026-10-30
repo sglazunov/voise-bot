@@ -130,6 +130,16 @@ def _engine_list(user_keys: dict | None = None) -> list[dict]:
 
 app = FastAPI(title="Voice Transcriber", version="1.0")
 
+
+@app.exception_handler(security.UsersStoreError)
+async def _users_store_broken(request: Request, exc: security.UsersStoreError):
+    """Битый users.json: 503 вместо «пользователей нет» — иначе первая же
+    запись затёрла бы все учётки (ревью 30.10, P1-2)."""
+    return JSONResponse({"detail": "Хранилище учётных записей недоступно. "
+                                   "Обратитесь к администратору сервера."},
+                        status_code=503)
+
+
 # Маршруты автоматизации (26 штук про Weeek/запись/облако) вынесены в свой
 # модуль — пути не изменились, префикс задан у роутера.
 from .api_automation import router as _automation_router   # noqa: E402
@@ -205,6 +215,10 @@ _PUBLIC_PATHS = {"/login", "/register", "/recover", "/healthz",
                  "/apple-touch-icon.png", "/icon-512.png", "/og-image.png",
                  "/api/auth/login", "/api/auth/register",
                  "/api/auth/recover/request", "/api/auth/recover/verify"}
+# Формы, которые открывают сессию: их CSRF-проверка не ждёт живой сессии и
+# строже общей — соседний поддомен (same-site) тоже чужой: на kreativdelo.ru
+# живут и другие сайты.
+_AUTH_FORM_PATHS = {"/api/auth/login", "/api/auth/register"}
 _SECURE_COOKIE = os.getenv("VTX_HTTPS", "0") == "1"
 
 
@@ -222,10 +236,14 @@ async def _auth_gate(request: Request, call_next):
         security.session_user, request.cookies.get(security.SESSION_COOKIE))
     request.state.user = user
     path = request.url.path
-    if user and _cross_site_write(request):
+    if (user or path in _AUTH_FORM_PATHS) and _cross_site_write(
+            request, allow_same_site=path not in _AUTH_FORM_PATHS):
         # CSRF: до сих пор защита держалась только на SameSite=Lax у куки.
         # Sec-Fetch-Site ставит сам браузер, со страницы атакующего его не
         # подделать; запросы со своего сайта и навигация проходят.
+        # Вход и регистрация проверяются и БЕЗ сессии (login CSRF, ревью
+        # 30.10, P1-3): иначе чужая страница логинит браузер жертвы в аккаунт
+        # атакующего, и всё, что жертва потом загрузит, достаётся ему.
         resp = JSONResponse({"detail": "Запрос с чужого сайта отклонён."},
                             status_code=403)
     elif user or path in _PUBLIC_PATHS:
@@ -305,14 +323,17 @@ def _login_page(request: Request, **ctx) -> HTMLResponse:
     return resp
 
 
-def _cross_site_write(request: Request) -> bool:
-    """Меняющий состояние запрос к API, пришедший с ЧУЖОГО сайта."""
+def _cross_site_write(request: Request, allow_same_site: bool = True) -> bool:
+    """Меняющий состояние запрос к API, пришедший с ЧУЖОГО сайта.
+    allow_same_site=False — соседний поддомен тоже считается чужим."""
     if request.method not in ("POST", "PUT", "PATCH", "DELETE"):
         return False
     if not request.url.path.startswith("/api/"):
         return False
     site = (request.headers.get("sec-fetch-site") or "").lower()
-    if site and site not in ("same-origin", "same-site", "none"):
+    allowed = ("same-origin", "same-site", "none") if allow_same_site \
+        else ("same-origin", "none")
+    if site and site not in allowed:
         return True
     origin = request.headers.get("origin")
     if origin and not site:
@@ -845,17 +866,33 @@ class PasswordChange(BaseModel):
     new_password: str
     old_password: str = ""
     phone: str = ""
+    code: str = ""
 
 
 @app.post("/api/profile/password")
-def profile_change_password(body: PasswordChange, user: str = Depends(current_user)):
-    """Change the password, confirming identity by old password OR by phone."""
+def profile_change_password(body: PasswordChange, request: Request,
+                            user: str = Depends(current_user)):
+    """Смена пароля: текущий пароль ИЛИ телефон + одноразовый код.
+
+    Лимит попыток — по логину (сессию можно гонять с любых IP) и по IP. После
+    смены гаснут ВСЕ сессии аккаунта — возможно, угнанные, — а этому браузеру
+    выдаётся новая кука, чтобы человек не вылетал из профиля."""
+    keys = (f"pwd:{user}", f"pwd:{_client_ip(request)}")
+    wait = security.throttle_check(*keys)
+    if wait:
+        raise HTTPException(429, f"Слишком много неудачных попыток. Подождите {wait} с.")
     res = security.change_password(user, body.new_password,
                                    old=body.old_password or None,
-                                   phone=body.phone or None)
+                                   phone=body.phone or None,
+                                   code=body.code or None)
     if not res.get("ok"):
+        security.throttle_fail(*keys)
         raise HTTPException(400, res.get("error"))
-    return {"ok": True}
+    security.throttle_clear(*keys)
+    security.destroy_user_sessions(user)
+    resp = JSONResponse({"ok": True})
+    _set_session_cookie(resp, security.create_session(user))
+    return resp
 
 
 class AccountDelete(BaseModel):

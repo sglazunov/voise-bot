@@ -149,15 +149,32 @@ def _atomic_write_json(path: Path, data: Any) -> None:
     _chmod_600(path)
 
 
+class UsersStoreError(RuntimeError):
+    """users.json есть, но прочитать его нельзя. Отдаётся наружу как 503."""
+
+
 def _load_users() -> dict:
+    """Все учётки. Нет файла — пустой сервер; файл есть, но битый — ОШИБКА.
+
+    Раньше битый файл читался как {}: следующая же запись (регистрация, смена
+    пароля, back-fill основателя) сохраняла этот пустой словарь поверх и
+    стирала все учётки в файловом режиме (ревью 30.10, P1-2). Теперь сайт
+    отвечает 503, а файл остаётся как есть — его можно починить руками."""
     if db.enabled():
         return db.users_load()
     if not _USERS_FILE.exists():
         return {}
     try:
-        return json.loads(_USERS_FILE.read_text(encoding="utf-8")) or {}
-    except (ValueError, OSError):
-        return {}
+        users = json.loads(_USERS_FILE.read_text(encoding="utf-8"))
+    except (ValueError, OSError) as e:
+        log.error("users.json не читается (%s) — учётки недоступны, файл не "
+                  "трогаю: %s", e, _USERS_FILE)
+        raise UsersStoreError("Хранилище учётных записей повреждено.") from e
+    if not isinstance(users, dict):
+        log.error("users.json — не словарь (%s) — учётки недоступны, файл не "
+                  "трогаю: %s", type(users).__name__, _USERS_FILE)
+        raise UsersStoreError("Хранилище учётных записей повреждено.")
+    return users
 
 
 def _save_users(users: dict) -> None:
@@ -424,6 +441,17 @@ def confirm_recovery_code(username: str, phone: str, code: str,
     username = normalize_username(username)
     if len(new_password or "") < MIN_PASSWORD_LEN:
         return {"ok": False, "error": f"Пароль не короче {MIN_PASSWORD_LEN} символов."}
+    err = _consume_recovery_code(username, phone, code)
+    if err:
+        return {"ok": False, "error": err}
+    _set_password(username, new_password)
+    destroy_user_sessions(username)
+    return {"ok": True}
+
+
+def _consume_recovery_code(username: str, phone: str, code: str) -> str | None:
+    """Проверить одноразовый код (логин + телефон, срок, лимит попыток) и при
+    совпадении сжечь его. None — код принят, иначе текст ошибки."""
     given = re.sub(r"\D", "", code or "")
     with _LOCK:
         rec = _load_recovery()
@@ -431,12 +459,12 @@ def confirm_recovery_code(username: str, phone: str, code: str,
         if not entry or entry.get("expires", 0) < time.time():
             rec.pop(username, None)
             _save_recovery(rec)
-            return {"ok": False, "error": "Код не найден или истёк. Запросите новый."}
+            return "Код не найден или истёк. Запросите новый."
         entry["attempts"] = entry.get("attempts", 0) + 1
         if entry["attempts"] > RECOVERY_MAX_ATTEMPTS:
             rec.pop(username, None)
             _save_recovery(rec)
-            return {"ok": False, "error": "Слишком много попыток. Запросите новый код."}
+            return "Слишком много попыток. Запросите новый код."
         matches = (bool(given)
                    and verify_phone(username, phone)
                    and hmac.compare_digest(_hash_code(given, entry["salt"]),
@@ -445,12 +473,10 @@ def confirm_recovery_code(username: str, phone: str, code: str,
             left = RECOVERY_MAX_ATTEMPTS - entry["attempts"]
             _save_recovery(rec)   # persist the used attempt
             tail = f" Осталось попыток: {left}." if left > 0 else ""
-            return {"ok": False, "error": f"Неверный код.{tail}"}
+            return f"Неверный код.{tail}"
         rec.pop(username, None)
         _save_recovery(rec)
-    _set_password(username, new_password)
-    destroy_user_sessions(username)
-    return {"ok": True}
+    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -631,20 +657,27 @@ def verify_user(username: str, password: str) -> bool:
 
 
 def change_password(username: str, new: str, old: str | None = None,
-                    phone: str | None = None) -> dict:
-    """Change the password from the profile. The user proves it's them with
-    EITHER the current password OR the registered phone number."""
+                    phone: str | None = None, code: str | None = None) -> dict:
+    """Смена пароля из профиля. Личность подтверждается ТЕКУЩИМ паролем либо
+    телефоном вместе с одноразовым кодом (тот же, что при восстановлении:
+    SMS или Telegram, запрос — /api/auth/recover/request).
+
+    Одного номера телефона мало (ревью 30.10, P1-1): он не секрет, и угнанной
+    сессии хватало, чтобы забрать аккаунт насовсем. Лимит попыток и гашение
+    остальных сессий — на стороне API (`profile_change_password`)."""
     username = normalize_username(username)
     if len(new or "") < MIN_PASSWORD_LEN:
         return {"ok": False, "error": f"Пароль не короче {MIN_PASSWORD_LEN} символов."}
     if old:
         if not verify_user(username, old):
             return {"ok": False, "error": "Текущий пароль неверный."}
-    elif phone:
-        if not verify_phone(username, phone):
-            return {"ok": False, "error": "Номер телефона не совпадает."}
+    elif phone and code:
+        err = _consume_recovery_code(username, phone, code)
+        if err:
+            return {"ok": False, "error": err}
     else:
-        return {"ok": False, "error": "Подтвердите личность: текущий пароль или телефон."}
+        return {"ok": False, "error": "Подтвердите личность: текущий пароль "
+                "или телефон и код из SMS/Telegram."}
     _set_password(username, new)
     return {"ok": True}
 

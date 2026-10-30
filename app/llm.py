@@ -474,9 +474,12 @@ class GigaChatProvider(_KeyProviderMixin):
     # сертификат в образ и указать его здесь (VTX_GIGACHAT_CA либо стандартный
     # путь /usr/local/share/ca-certificates/russian_trusted_root_ca.crt): с ним
     # проверка СТРОГАЯ, без отката.
-    # Без файла соединение сначала ПРОВЕРЯЕТСЯ системным хранилищем (новый
-    # хост может отвечать публичным сертификатом) и только при отказе проверки
-    # повторяется без неё — с предупреждением в лог, как и раньше, но не молча.
+    # Без файла соединение ПРОВЕРЯЕТСЯ системным хранилищем (новый хост может
+    # отвечать публичным сертификатом), а при отказе проверки — ОШИБКА
+    # (ревью 30.10, P1-4: раньше тут был молчаливый откат на соединение без
+    # проверки, и ключ авторизации уходил по каналу, который мог подменить
+    # кто угодно по пути). Откат остался только явным решением владельца:
+    # VTX_GIGACHAT_INSECURE_TLS=1, с предупреждением в лог.
     _ctx = ssl.create_default_context()
     _ca_path = os.getenv(
         "VTX_GIGACHAT_CA",
@@ -498,22 +501,30 @@ class GigaChatProvider(_KeyProviderMixin):
     # -- транспорт ---------------------------------------------------------
     @classmethod
     def _open(cls, req: urllib.request.Request, timeout: int):
-        """urlopen с проверкой сертификата; откат на непроверенное соединение —
-        только без сертификата Минцифры и только при отказе ИМЕННО проверки."""
+        """urlopen с проверкой сертификата. Откат на непроверенное соединение —
+        только по VTX_GIGACHAT_INSECURE_TLS=1, без сертификата Минцифры и только
+        при отказе ИМЕННО проверки."""
         try:
             return urllib.request.urlopen(req, timeout=timeout, context=cls._ctx)
         except urllib.error.URLError as e:
             if cls._strict or not isinstance(
                     getattr(e, "reason", None), ssl.SSLCertVerificationError):
                 raise
-        host = urllib.parse.urlsplit(req.full_url).hostname or "?"
+            host = urllib.parse.urlsplit(req.full_url).hostname or "?"
+            if os.getenv("VTX_GIGACHAT_INSECURE_TLS", "0") != "1":
+                _LOG.error(
+                    "GigaChat: сертификат %s не прошёл проверку — соединения нет. "
+                    "Положите корневой сертификат Минцифры в образ (%s) или "
+                    "задайте VTX_GIGACHAT_CA.", host, cls._ca_path)
+                raise
         if host not in cls._lax_hosts:
             cls._lax_hosts.add(host)
             _LOG.warning(
                 "GigaChat: сертификат %s не прошёл проверку (нет корневого "
-                "сертификата Минцифры, %s) — соединение без проверки, ключ "
-                "уходит по непроверенному каналу. Положите файл в образ или "
-                "задайте VTX_GIGACHAT_CA.", host, cls._ca_path)
+                "сертификата Минцифры, %s), VTX_GIGACHAT_INSECURE_TLS=1 — "
+                "соединение без проверки, ключ уходит по непроверенному каналу. "
+                "Положите файл в образ или задайте VTX_GIGACHAT_CA.",
+                host, cls._ca_path)
         return urllib.request.urlopen(req, timeout=timeout, context=cls._ctx_lax)
 
     def _post(self, url: str, data: bytes, headers: dict, timeout: int,
