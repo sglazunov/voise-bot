@@ -163,7 +163,14 @@ class TestИсторияЧатаИВиртуализация:
         assert self._feed(b, self.HISTORY) is False, "дорисовались строки прошлых недель"
 
     def test_команда_под_сегодня_срабатывает(self):
+        # Вход 10:30, сейчас 10:45: под «Сегодня» время сообщения решает, и
+        # «стоп 10:40» с выключенным правилом (вход 23:59) было бы утренним
+        # (адверсариальное ревью 30.10: и счётчик, и новизна текста под
+        # разделом дня больше не игнорируют время).
+        import datetime as dt
         b = self._bot()
+        b._chat_since_min = 10 * 60 + 30
+        b._clock = lambda: dt.datetime(2026, 9, 29, 10, 45).timestamp()
         assert self._feed(b, self.HISTORY) is False
         assert self._feed(b, self.HISTORY + ["Сергей Глазунов", "стоп 10:40"]) is True
 
@@ -534,3 +541,351 @@ class TestПроверкаПослеПравок3010:
         b._pin_chat_bottom = lambda w: True
         assert self._feed(b, shell + [sep] + old + ["Сергей Беск", "привет", "11:30"]) is False
         assert self._feed(b, shell + [sep] + old) is False
+
+
+# ---------------------------------------------------------------------------
+# Адверсариальное ревью 30.10 (docs/АДВЕРСАРИАЛЬНОЕ-РЕВЮ-2026-10-30.md, §4 и
+# §7): ложные остановки, пропуски команды и выжившие мутанты.
+# ---------------------------------------------------------------------------
+def _rbot(joined="11:00", now="11:30", day=(2026, 10, 30)):
+    import datetime as dt
+    from app.automation.recorder.browser import TelemostBot
+    b = TelemostBot.__new__(TelemostBot)
+    b._chat_last_peek = 0.0
+    b._chat_last_n = -1
+    b._chat_scopes = {}
+    b._chat_reads = 0
+    h, m = map(int, now.split(":"))
+    b._clock = lambda: dt.datetime(*day, h, m).timestamp()
+    jh, jm = map(int, joined.split(":"))
+    b._chat_since_min = jh * 60 + jm
+    b.log = []
+    b._on_log = b.log.append
+    return b
+
+
+def _rfeed(b, lines):
+    b._read_all_text = lambda: "\n".join(lines)
+    b._chat_last_peek = 0.0
+    return b.maybe_chat_stop("стоп")
+
+
+def _sep():
+    from app.automation.recorder.browser import TelemostBot
+    return TelemostBot._FRAME_SEP
+
+
+class _F:
+    """Фрейм страницы для `_read_all_text`: адрес и текст тела."""
+    def __init__(self, url, text, boom=False):
+        self.url, self.text, self.boom = url, text, boom
+
+    def inner_text(self, sel):
+        assert sel == "body"
+        if self.boom:
+            raise RuntimeError("detached")
+        return self.text
+
+
+class _P:
+    def __init__(self, frames): self.frames = frames
+
+
+class TestЛожныеОстановкиРевью3010:
+    """§4, три «К»: бот остановил бы запись, хотя команды не было."""
+
+    def test_сообщение_сегодня_не_разделитель_дня(self):
+        """В истории кто-то написал «Сегодня» — строка совпадает с подписью
+        раздела дня. Старый «стоп» под ней (еженедельная встреча в тот же час,
+        время после входа) срабатывал на первом же чтении."""
+        b = _rbot()
+        assert _rfeed(b, ["9 октября", "Сергей Беск", "стоп", "11:12",
+                          "16 октября", "Иван Р.", "Сегодня", "11:20",
+                          "Сергей Беск", "стоп", "11:26"]) is False
+
+    def test_сообщение_с_датой_не_разделитель_дня(self):
+        b = _rbot()
+        assert _rfeed(b, ["9 октября", "Сергей Беск", "стоп", "11:12",
+                          "16 октября", "Иван Р.", "30 октября", "11:20",
+                          "Сергей Беск", "стоп", "11:26"]) is False
+
+    def test_сообщение_сегодня_в_раскладке_время_перед_текстом(self):
+        b = _rbot()
+        lines = ["9 октября", "Сергей Беск", "11:10", "привет",
+                 "16 октября", "Иван Р.", "11:20", "сегодня",
+                 "Сергей Беск", "11:24", "стоп",
+                 "23 октября", "Сергей Беск", "11:25", "ок"]
+        assert _rfeed(b, lines) is False
+
+    def test_сообщение_сегодня_последним_в_раскладке_перед(self):
+        """Раскладка «время, потом текст»: у сообщения «Сегодня» время стоит
+        НАД ним. Это последняя «дата» в окне — и всё равно не разделитель."""
+        b = _rbot()
+        lines = ["9 октября", "Анна", "11:00", "да",
+                 "16 октября", "Иван Р.", "11:20", "привет",
+                 "23 октября", "Иван Р.", "11:22", "Сегодня",
+                 "Сергей Беск", "11:26", "стоп"]
+        assert _rfeed(b, lines) is False
+
+    def test_многострочное_сообщение_сегодня_и_дата_ниже(self):
+        """«Сегодня / в 11 созвон / 11:20» — время не рядом, соседство не
+        спасает. Но ниже стоит «23 октября»: раздел текущего дня в ленте
+        последний, значит, «Сегодня» выше — текст."""
+        b = _rbot()
+        assert _rfeed(b, ["16 октября", "Иван Р.", "Сегодня", "в 11 созвон", "11:20",
+                          "23 октября", "Сергей Беск", "стоп", "11:26"]) is False
+
+    def test_сообщения_с_датами_не_голосуют_за_раскладку(self):
+        """Три сообщения «Сегодня» / «вчера» / «Понедельник» (над ними — имя
+        автора) голосовали за «время перед текстом» и перевешивали настоящие
+        разделители: команда получала время соседа и терялась."""
+        b = _rbot()
+        hist = ["9 октября", "Анна", "да", "11:00",
+                "16 октября", "Иван Р.", "Сегодня", "11:20",
+                "Иван Р.", "вчера", "11:21", "Иван Р.", "Понедельник", "11:22",
+                "Сегодня", "Сергей Беск", "привет", "11:05"]
+        assert _rfeed(b, hist) is False
+        assert _rfeed(b, hist + ["Сергей Беск", "стоп", "11:26"]) is True
+
+    def test_настоящий_раздел_дня_после_сообщения_сегодня_работает(self):
+        b = _rbot()
+        hist = ["16 октября", "Иван Р.", "Сегодня", "11:20"]
+        assert _rfeed(b, hist) is False
+        assert _rfeed(b, hist + ["Сегодня", "Сергей Беск", "стоп", "11:26"]) is True
+
+    def test_счётчик_под_сегодня_не_считает_утренние(self):
+        """Подгрузка утренних «стоп» (до входа) — счётчик растёт, но время
+        говорит: история той же комнаты."""
+        b = _rbot()
+        assert _rfeed(b, ["Сегодня", "Сергей Беск", "стоп", "10:40"]) is False
+        assert _rfeed(b, ["Сегодня", "Иван Р.", "стоп", "10:20",
+                          "Сергей Беск", "стоп", "10:40"]) is False
+
+    def test_счётчик_под_сегодня_для_строк_без_времени_остался(self):
+        b = _rbot()
+        assert _rfeed(b, ["Сегодня", "стоп"]) is False
+        assert _rfeed(b, ["Сегодня", "стоп", "стоп"]) is True
+
+    def test_область_all_под_прошлой_датой_не_команда(self):
+        """Окно сдвинулось к 9 октября: «Стоп» с заглавной — новый текст, и
+        счётчик вырос, но всё видимое — под прошлой датой."""
+        b = _rbot()
+        assert _rfeed(b, ["9 октября", "Сергей Беск", "стоп", "11:12"]) is False
+        assert _rfeed(b, ["2 октября", "Сергей Беск", "Стоп", "11:05",
+                          "9 октября", "Сергей Беск", "стоп", "11:12"]) is False
+
+    def test_область_all_строки_над_прошлой_датой_тоже_история(self):
+        b = _rbot()
+        assert _rfeed(b, ["9 октября", "Сергей Беск", "привет", "11:12"]) is False
+        assert _rfeed(b, ["Сергей Беск", "Стоп", "11:05",
+                          "9 октября", "Сергей Беск", "привет", "11:12"]) is False
+
+    def test_регистр_не_делает_старый_текст_новым(self):
+        b = _rbot()
+        assert _rfeed(b, ["стоп 12:08"]) is False
+        assert _rfeed(b, ["Стоп 12:08"]) is False
+
+
+class TestПропускиКомандыРевью3010:
+    """§4, три «В»: команда написана — бот её не видит."""
+
+    SHELL = ["Чаты", "Вчера", "Иван", "10:00", "привет",
+             "Понедельник", "Анна", "09:00", "ок",
+             "Воскресенье", "Олег", "08:00", "да"]
+
+    def test_раскладка_голосуется_по_каждому_фрейму(self):
+        """Список чатов оболочки сверстан «время перед текстом» и набирает
+        голоса; чат встречи во фрейме — «время после», голосов у него нет.
+        Общий подсчёт отдавал «стоп» время соседа — команда терялась."""
+        b = _rbot()
+        b._pin_chat_bottom = lambda w: True
+        sep = _sep() + "https://telemost.yandex.ru/j/1#0"
+        assert _rfeed(b, self.SHELL + [sep, "Сегодня", "Сергей Беск", "стоп", "10:40"]) is False
+        assert _rfeed(b, self.SHELL + [sep, "Сергей Беск", "стоп", "11:26"]) is True
+
+    def test_раскладка_фрейма_своя(self):
+        from app.automation.recorder.browser import TelemostBot
+        lines = self.SHELL + [_sep() + "x#0", "Сегодня", "Сергей Беск", "стоп", "11:26"]
+        frames = TelemostBot._split_frames(lines)
+        assert TelemostBot._time_after_text(frames[0][1]) is False
+        assert TelemostBot._time_after_text(frames[1][1]) is True
+
+    def test_заголовок_ушёл_вместе_с_приходом_команды(self):
+        """Раздел дня видели; команда пришла, и заголовок «Сегодня» ушёл из DOM
+        (низ не доказан). Сообщение «привет 11:05», виденное под разделом дня,
+        осталось в окне — всё ниже него сегодняшнее."""
+        b = _rbot()
+        assert _rfeed(b, ["Сегодня", "Сергей Беск", "привет", "11:05"]) is False
+        assert _rfeed(b, ["Сергей Беск", "привет", "11:05",
+                          "Сергей Беск", "стоп", "11:26"]) is True
+
+    def test_заголовок_ушёл_утренний_стоп_ниже_якоря_не_команда(self):
+        b = _rbot()
+        assert _rfeed(b, ["Сегодня", "Сергей Беск", "привет", "10:30"]) is False
+        assert _rfeed(b, ["Сергей Беск", "привет", "10:30",
+                          "Сергей Беск", "стоп", "10:40"]) is False
+
+    def test_якорь_с_датой_ниже_не_якорь(self):
+        """Окно ушло в историю, и там нашлось сообщение, дословно равное
+        сегодняшнему («Иван Р. / ок / 11:05» неделей раньше). Ниже него —
+        прошлая дата: лента идёт по времени, значит, это не сегодня."""
+        b = _rbot()
+        assert _rfeed(b, ["Сегодня", "Иван Р.", "ок", "11:05"]) is False
+        assert _rfeed(b, ["Иван Р.", "ок", "11:05", "23 октября",
+                          "Сергей Беск", "стоп", "11:26"]) is False
+
+    def test_граница_раздела_за_последним_якорем(self):
+        b = _rbot()
+        b._remember_anchors("f", ["Иван Р.", "ок", "11:05", "Анна", "да", "11:10"], "стоп")
+        lines = ["Иван Р.", "ок", "11:05", "Анна", "да", "11:10", "Сергей Беск", "стоп"]
+        assert b._after_anchor("f", lines, "стоп") == 6
+        assert b._after_anchor("другой", lines, "стоп") is None
+        assert b._after_anchor("f", ["Сергей Беск", "стоп", "11:26"], "стоп") is None
+
+    def test_строка_команды_не_якорь(self):
+        """«Сергей Беск / стоп / 10:40» одинаково во все недели — по нему место
+        в ленте не узнать: окно прошлой недели не становится сегодняшним."""
+        b = _rbot()
+        assert _rfeed(b, ["Сегодня", "Сергей Беск", "стоп", "10:40"]) is False
+        assert _rfeed(b, ["Сергей Беск", "стоп", "10:40",
+                          "Сергей Беск", "стоп", "11:26"]) is False
+
+    def test_переход_через_полночь_с_датами(self):
+        """Вошёл в 23:50, раздел дня — «30 октября». После полуночи эта дата
+        уже прошлая, а новой Телемост ещё не нарисовал: команда в 00:05 под
+        виденным сообщением 23:55 — команда."""
+        import datetime as dt
+        b = _rbot(joined="23:50", now="23:56")
+        hist = ["29 октября", "Иван Р.", "стоп", "23:40",
+                "30 октября", "Сергей Беск", "привет", "23:55"]
+        assert _rfeed(b, hist) is False
+        b._clock = lambda: dt.datetime(2026, 10, 31, 0, 10).timestamp()
+        assert _rfeed(b, hist) is False
+        # Список виртуализирован: вчерашнее «стоп 23:40» ушло, новое пришло —
+        # ни текст, ни счётчик не изменились, решает место под якорем и время.
+        assert _rfeed(b, hist[4:] + ["Сергей Беск", "стоп", "00:05"]) is True
+
+    def test_ключ_фрейма_не_зависит_от_пустых_фреймов(self):
+        """Два about:blank: пока первый пуст, второй (чат) получал ключ «#0»,
+        как только первый наполнялся — «#1». Области счёта менялись местами."""
+        b = _rbot()
+        blank1, chat = _F("about:blank", ""), _F("about:blank", "Сегодня\nстоп\n10:40")
+        b._page = _P([_F("https://telemost.yandex.ru/j/1", "Чаты"), blank1, chat])
+        first = b._read_all_text()
+        blank1.text = "реклама"
+        second = b._read_all_text()
+        sep = _sep()
+        assert first == f"Чаты\n{sep}about:blank#1\nСегодня\nстоп\n10:40"
+        assert second.endswith(f"{sep}about:blank#1\nСегодня\nстоп\n10:40")
+        assert f"{sep}about:blank#0\nреклама" in second
+
+    def test_ключи_фреймов_не_путают_области_счёта(self):
+        """То же сквозь maybe_chat_stop: первый about:blank наполнился —
+        утренний «стоп» чата не становится «новым» в чужой области."""
+        b = _rbot()
+        blank1 = _F("about:blank", "")
+        chat = _F("about:blank", "Сегодня\nСергей Беск\nстоп\n10:40")
+        b._page = _P([_F("https://telemost.yandex.ru/j/1", "Чаты"), blank1, chat])
+        b._chat_last_peek = 0.0
+        assert b.maybe_chat_stop("стоп") is False
+        blank1.text = "Сергей Беск\nпривет\n11:20"
+        b._chat_last_peek = 0.0
+        assert b.maybe_chat_stop("стоп") is False
+        chat.text += "\nСергей Беск\nстоп\n11:26"
+        b._chat_last_peek = 0.0
+        assert b.maybe_chat_stop("стоп") is True
+
+
+class TestВыжившиеМутантыСтопСлова:
+    """§7: «Стоп-слово — 33 выживших из 65». Каждый тест убивает своего."""
+
+    def test_базовая_линия_счётчика_не_опускается_без_раздела_дня(self):
+        """29.09 «13 → 12 → 13»: защиту прежде проверяли только с «Сегодня»,
+        под которым истории нет вовсе, — опускание линии ничего не ломало."""
+        b = _rbot(joined="23:59", now="23:59")
+        assert _rfeed(b, ["стоп 12:08", "стоп 17:42"]) is False
+        assert _rfeed(b, ["стоп 17:42"]) is False                 # строка ушла из DOM
+        assert _rfeed(b, ["стоп 12:08", "стоп 17:42"]) is False   # и вернулась
+
+    def test_раздел_появился_по_ходу_счётчик_не_считает_утренние(self):
+        """Раздел дня появился с утренним «стоп 10:40» (до входа) — он в линию
+        счётчика не идёт: счётчик его и не считает. Новое «стоп» без времени
+        ниже — рост."""
+        b = _rbot()
+        assert _rfeed(b, ["Иван Р.", "привет", "10:00"]) is False
+        assert _rfeed(b, ["Сегодня", "Сергей Беск", "стоп", "10:40"]) is False
+        assert _rfeed(b, ["Сегодня", "Сергей Беск", "стоп", "10:40", "Анна", "стоп"]) is True
+
+    def test_read_all_text_главный_без_разделителя_фреймы_с_ним(self):
+        b = _rbot()
+        b._page = _P([_F("https://telemost.yandex.ru/j/1", "главный"),
+                      _F("https://a/x\ny", "фрейм"), _F("https://a/x y", "дубль"),
+                      _F("https://b", "", boom=True), _F("https://c", "   ")])
+        sep = _sep()
+        assert b._read_all_text() == (f"главный\n{sep}https://a/x y#0\nфрейм\n"
+                                      f"{sep}https://a/x y#1\nдубль")
+
+    def test_read_all_text_без_текста_none(self):
+        b = _rbot()
+        b._page = _P([])
+        assert b._read_all_text() is None
+
+        class Broken:
+            @property
+            def frames(self): raise RuntimeError("closed")
+        b._page = Broken()
+        assert b._read_all_text() is None
+
+    def test_read_all_text_первый_фрейм_всегда_main(self):
+        """Главный документ без текста не отдаёт свой ключ «main» первому
+        дочернему фрейму."""
+        b = _rbot()
+        b._page = _P([_F("https://telemost.yandex.ru/j/1", ""), _F("https://a", "чат")])
+        assert b._read_all_text() == f"{_sep()}https://a#0\nчат"
+        from app.automation.recorder.browser import TelemostBot
+        assert TelemostBot._split_frames(["главный", f"{_sep()}https://a#0", "чат"]) == [
+            ("main", ["главный"]), ("https://a#0", ["чат"])]
+
+    def test_read_all_text_фрейм_с_адресом_главного_второй_по_счёту(self):
+        """Номер среди одинаковых адресов считает и главный документ: фрейм
+        встречи с тем же адресом — «#1», как бы ни менялся текст главного."""
+        b = _rbot()
+        main = _F("https://telemost.yandex.ru/j/1", "")
+        b._page = _P([main, _F("https://telemost.yandex.ru/j/1", "чат")])
+        first = b._read_all_text()
+        main.text = "Чаты"
+        assert first == f"{_sep()}https://telemost.yandex.ru/j/1#1\nчат"
+        assert b._read_all_text() == f"Чаты\n{_sep()}https://telemost.yandex.ru/j/1#1\nчат"
+
+    def test_is_day_header(self):
+        from app.automation.recorder.browser import TelemostBot as T
+        for ok in ("Сегодня", "сегодня", "Вчера", "Today", "Yesterday", "Понедельник",
+                   "воскресенье", "Friday", "18 сентября", "1 мая",
+                   "18 сентября 2025", "18 сентября 2025 г.", "18 сентября 2025 г",
+                   "October 18", "october 18, 2025", "18 october", "May 1"):
+            assert T._is_day_header(ok), ok
+        for no in ("", "   ", "стоп", "сегодня в 11", "30 октября релиз",
+                   "18 сентебря", "October", "18", "11:26", "Иван Р.",
+                   "понедельник понедельник понедельник", "сегодня!",
+                   "123 сентября", "18 сентября 25"):
+            assert not T._is_day_header(no), no
+
+    def test_достраивание_дня_не_при_видимой_прошлой_дате(self):
+        """Защита «нет дат на экране»: раздел дня видели, список у низа, но в
+        окне прошлая дата — это прокрутка вверх, не сегодня."""
+        b = _rbot()
+        b._pin_chat_bottom = lambda w: True
+        assert _rfeed(b, ["Сегодня", "Сергей Беск", "привет", "11:05"]) is False
+        assert _rfeed(b, ["23 октября", "Сергей Беск", "стоп", "11:26"]) is False
+
+    def test_достраивание_дня_нужен_доказанный_низ(self):
+        b = _rbot()
+        b._pin_chat_bottom = lambda w: False
+        assert _rfeed(b, ["Сегодня", "Сергей Беск", "привет", "11:05"]) is False
+        assert _rfeed(b, ["Сергей Беск", "стоп", "11:26"]) is False
+
+    def test_достраивание_дня_при_доказанном_низе(self):
+        b = _rbot()
+        b._pin_chat_bottom = lambda w: True
+        assert _rfeed(b, ["Сегодня", "Сергей Беск", "привет", "11:05"]) is False
+        assert _rfeed(b, ["Сергей Беск", "стоп", "11:26"]) is True

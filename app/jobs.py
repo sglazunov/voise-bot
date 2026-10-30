@@ -9,6 +9,7 @@ Job state is persisted to a JSON file so results survive a restart.
 """
 from __future__ import annotations
 
+import glob
 import json
 import queue
 import re
@@ -1680,7 +1681,9 @@ def media_sidecars(path: str) -> list[Path]:
     out += [src.with_suffix(suf) for suf in
             (".16k.wav", ".join-failed.png", ".join-failed.html", ".chat.html")]
     try:
-        base = src.with_suffix("").name
+        # Имя записи — из названия встречи: «[CRM] …» без экранирования стало
+        # бы классом символов glob — свой HTML не находился, чужой находился.
+        base = glob.escape(src.with_suffix("").name)
         out += sorted(src.parent.glob(base + ".join-failed.frame*.html"))
         out += sorted(src.parent.glob(base + ".chat.frame*.html"))
     except OSError:

@@ -699,3 +699,96 @@ def test_повторный_выход_после_закрытия_безопа�
     bot = _bot(_closable(page))
     bot.leave_call(timeout=1)
     assert bot.leave_call(timeout=1) is False       # вкладки уже нет
+
+
+# ---------------------------------------------------------------------------
+# Адверсариальное ревью 30.10 (§4, §7): выход из звонка.
+# ---------------------------------------------------------------------------
+def test_выйти_из_полноэкранного_режима_не_кнопка_выхода():
+    """Все `button[aria-label*="ыйти"]` шли раньше `[role=button]` «Покинуть»:
+    бот жал «Выйти из полноэкранного режима», и боковая панель с чужими
+    чатами снова попадала в запись."""
+    fullscreen = _Btn("", aria="Выйти из полноэкранного режима")
+    leave = _Btn("", aria="Покинуть звонок")
+    page, child = _call(leave, '[role="button"][aria-label*="окинуть"]',
+                        extra={'button[aria-label*="ыйти"]': fullscreen})
+    bot = _bot(_closable(page))
+    assert bot.leave_call(timeout=1) is True
+    assert fullscreen.clicks == 0 and leave.clicks == 1
+
+
+def test_полноэкранный_режим_не_нажимается_и_как_подтверждение():
+    leave = _Btn("", aria="Покинуть звонок")
+    fullscreen = _Btn("Выйти из полноэкранного режима")
+    confirm = _Btn("Выйти")
+    page, child = _call(leave, 'button[aria-label*="окинуть"]', confirm_needed=True,
+                        extra={'button:has-text("Выйти")': fullscreen,
+                               'button:has-text("Leave")': confirm})
+    orig = confirm.click
+
+    def ok(**kw):
+        orig(**kw)
+        child.left = True
+    confirm.click = ok
+    bot = _bot(_closable(page))
+    assert bot.leave_call(timeout=2) is True
+    assert fullscreen.clicks == 0 and confirm.clicks == 1
+
+
+def test_подтверждение_для_всех_не_нажимается():
+    """Защита от «завершить встречу для всех» в ПОДТВЕРЖДЕНИИ выхода: меню
+    после «Покинуть» предлагает «Покинуть и завершить для всех»."""
+    leave = _Btn("", aria="Покинуть звонок")
+    everyone = _Btn("Покинуть и завершить для всех")
+    page, child = _call(leave, 'button[aria-label*="окинуть"]', confirm_needed=True,
+                        extra={'button:has-text("Покинуть звонок")': everyone})
+    bot = _bot(_closable(page))
+    assert bot.leave_call(timeout=0.3) is False
+    assert everyone.clicks == 0 and leave.clicks == 1
+    assert page.closed is True
+
+
+def test_for_everyone_по_тексту_и_подписи():
+    T = TelemostBot
+    for el in (_Btn("Завершить для всех"), _Btn("", aria="Завершить звонок для всех"),
+               _Btn("End for all"), _Btn("", aria="End meeting for everyone"),
+               _Btn("ЗАВЕРШИТЬ ДЛЯ ВСЕХ")):
+        assert T._for_everyone(el) is True, (el._t, el._a)
+    for el in (_Btn("Покинуть звонок"), _Btn("", aria="Выйти"), _Btn("")):
+        assert T._for_everyone(el) is False, (el._t, el._a)
+
+    # Подпись не прочиталась — не жать: вкладка закроется и без клика.
+    class Broken:
+        def inner_text(self): raise RuntimeError("detached")
+        def get_attribute(self, name): return None
+    assert T._for_everyone(Broken()) is True
+
+
+def test_кнопка_выход_без_читаемой_подписи_не_нажимается():
+    class Broken(_Btn):
+        def inner_text(self): raise RuntimeError("detached")
+    btn = Broken("", aria="Покинуть звонок")
+    page, child = _call(btn, 'button[aria-label*="окинуть"]')
+    bot = _bot(_closable(page))
+    assert bot.leave_call(timeout=0.2) is False
+    assert btn.clicks == 0 and page.closed is True
+
+
+def test_выйти_без_полноэкранного_всё_ещё_выход():
+    """Старая вёрстка: единственная кнопка — «Выйти из звонка»."""
+    btn = _Btn("", aria="Выйти из звонка")
+    page, child = _call(btn, 'button[aria-label*="ыйти"]')
+    bot = _bot(_closable(page))
+    assert bot.leave_call(timeout=1) is True and btn.clicks == 1
+
+
+def test_покинуть_раньше_любого_выйти():
+    """«Выйти …» бывает не только у полноэкранного режима («Выйти из режима
+    докладчика»): кнопка «Покинуть» в любом виде ищется раньше любого «Выйти»."""
+    other = _Btn("", aria="Выйти из режима докладчика")
+    leave = _Btn("", aria="Покинуть звонок")
+    page, child = _call(leave, '[role="button"][aria-label*="окинуть"]',
+                        extra={'button[aria-label*="ыйти"]': other})
+    bot = _bot(_closable(page))
+    assert bot.leave_call(timeout=1) is True
+    assert other.clicks == 0 and leave.clicks == 1
