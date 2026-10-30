@@ -27,11 +27,37 @@ router = APIRouter(prefix="/api/automation", tags=["automation"])
 # --------------------------------------------------------------------------- #
 # Meeting automation (Weeek → record → cloud → protocol). See app/automation.
 # --------------------------------------------------------------------------- #
-@router.get("/settings")
-def automation_settings(user: str = Depends(current_user)):
-    """Current automation settings (secrets redacted to presence flags)."""
+def _team_for(user: str, team: str = "") -> str:
+    """Команда, с чьими настройками работает запрос. Без `team` — своя.
+    Чужую (клиентскую) команду настраивает только основатель сервера: так он
+    заводит клиенту токен, доску и облако и ставит замок."""
+    team = (team or "").strip()
+    if not team:
+        return security.team_of(user)
+    if not security.is_super_admin(user):
+        raise HTTPException(403, "Настройки другой команды меняет только "
+                                 "основатель сервера.")
+    team = security.normalize_username(team)
+    if team not in security.list_teams():
+        raise HTTPException(404, "Команда не найдена.")
+    return team
+
+
+def _settings_view(user: str, team: str) -> dict:
     from .automation import settings as auto_settings
-    return auto_settings.redacted(user)
+    out = auto_settings.redacted(team)
+    out["locked_keys"] = sorted(auto_settings.locked_keys(user, auto_settings.load(team)))
+    out["can_manage_teams"] = security.is_super_admin(user)
+    out["team"] = team
+    return out
+
+
+@router.get("/settings")
+def automation_settings(team: str = "", user: str = Depends(current_user)):
+    """Current automation settings (secrets redacted to presence flags).
+    `locked_keys` — что этому человеку менять нельзя (интерфейс показывает
+    такие поля недоступными); `team` — только для основателя сервера."""
+    return _settings_view(user, _team_for(user, team))
 
 
 class AutomationSettings(BaseModel):
@@ -59,22 +85,79 @@ class AutomationSettings(BaseModel):
 
 
 @router.post("/settings")
-def automation_save(body: AutomationSettings, user: str = Depends(current_user)):
-    """Persist automation settings. Only non-null fields are updated."""
+def automation_save(body: AutomationSettings, team: str = "",
+                    user: str = Depends(current_user)):
+    """Persist automation settings. Only non-null fields are updated.
+
+    Заблокированные ключи (`settings.locked_keys`) молча НЕ меняются, даже
+    если прислал админ своей команды: фронт шлёт форму целиком, и отказ всего
+    сохранения из-за одного недоступного поля только мешал бы. Замок — здесь,
+    на сервере; интерфейс лишь показывает поля недоступными."""
     from .automation import settings as auto_settings
+    target = _team_for(user, team)
     # None отбрасываем — так фронт помечает «поле не трогали». Пустая строка
     # при этом ЗНАЧИМА: ею очищают поле (проект Weeek, фильтры, папка).
     values = {k: v for k, v in body.known().items() if v is not None}
-    auto_settings.save(user, values)
-    return auto_settings.redacted(user)
+    locked = auto_settings.locked_keys(user, auto_settings.load(target))
+    dropped = sorted(k for k in values if k in locked)
+    if dropped:
+        log.info("Настройки команды %s: %s не может менять %s — оставляю как есть",
+                 target, user, ", ".join(dropped))
+    auto_settings.save(target, {k: v for k, v in values.items() if k not in locked})
+    return _settings_view(user, target)
+
+
+@router.get("/teams")
+def automation_teams(user: str = Depends(current_user)):
+    """Команды сервера и их замок — для основателя сервера: кого он
+    обслуживает, какая доска у клиента и управляются ли его настройки."""
+    from .automation import settings as auto_settings
+    if not security.is_super_admin(user):
+        raise HTTPException(403, "Только основатель сервера.")
+    out = []
+    own = security.team_of(user)
+    for team in security.list_teams():
+        cfg = auto_settings.load(team)
+        out.append({"team": team, "own": team == own,
+                    "managed_by_server": bool(cfg.get("managed_by_server")),
+                    "weeek_project_id": cfg.get("weeek_project_id"),
+                    "weeek_board_id": cfg.get("weeek_board_id"),
+                    "members": len(security.team_members(team))})
+    return {"teams": out}
+
+
+def _managed_guard(user: str, cfg: dict) -> bool:
+    """Ограничивать ли ручки Weeek этому человеку: команда под замком, а он не
+    основатель. Токен у такой команды — ключ общего воркспейса, и без
+    ограничений через него видны чужие проекты, доски и задачи."""
+    return bool(cfg.get("managed_by_server")) and not security.is_super_admin(user)
+
+
+def _allowed_boards(cfg: dict) -> set[str]:
+    return {str(b).strip() for b in (cfg.get("weeek_board_id"),
+                                     cfg.get("weeek_tasks_board_id"))
+            if b not in (None, "") and str(b).strip()}
+
+
+def _guard_task(user: str, cfg: dict, token: str, task_id: str) -> None:
+    """Задача должна лежать на доске команды (для команды под замком)."""
+    from .automation import weeek
+    if not _managed_guard(user, cfg):
+        return
+    try:
+        task = weeek.get_task(token, task_id)
+    except weeek.WeeekError as e:
+        raise HTTPException(502, str(e))
+    if not _allowed_boards(cfg) & set(weeek.task_board_ids(task)):
+        raise HTTPException(403, "Эта задача не на доске вашей команды.")
 
 
 @router.get("/meetings")
-def automation_meetings(user: str = Depends(current_user)):
+def automation_meetings(team: str = "", user: str = Depends(current_user)):
     """Upcoming meeting tasks from Weeek that carry a Telemost link."""
     from .automation import settings as auto_settings, weeek
     from datetime import timezone
-    cfg = auto_settings.load(user)
+    cfg = auto_settings.load(_team_for(user, team))
     token = cfg.get("weeek_token")
     if not token:
         raise HTTPException(400, "Сначала задайте токен Weeek в настройках.")
@@ -84,7 +167,9 @@ def automation_meetings(user: str = Depends(current_user)):
     except Exception:
         tz = timezone.utc
     try:
-        meetings = weeek.upcoming_meetings(token, cfg.get("weeek_project_id"), tz)
+        meetings = weeek.upcoming_meetings(
+            token, cfg.get("weeek_project_id"),
+            board_id=cfg.get("weeek_board_id"), local_tz=tz)
     except weeek.WeeekError as e:
         raise HTTPException(502, str(e))
     # Show upcoming meetings + only the single most recent past one (older past
@@ -100,7 +185,7 @@ def automation_meetings(user: str = Depends(current_user)):
             "meetings": [
         {"task_id": m.task_id, "title": m.title, "url": m.url,
          "start": m.start.isoformat() if m.start else None,
-         "project_id": m.project_id,
+         "project_id": m.project_id, "board_id": m.board_id,
          "decision": decisions.get(str(m.task_id))}  # True/False/None
         for m in meetings
     ]}
@@ -216,6 +301,7 @@ def automation_meeting_links(inp: MeetingLinksIn, user: str = Depends(current_us
     task_id = _clean_task_id(inp.task_id)
     if not task_id:
         raise HTTPException(400, "Не указана задача Weeek (нужен номер или ссылка).")
+    _guard_task(user, cfg, token, task_id)
     pairs = []   # (человекочитаемое имя, поле Weeek, url, эмодзи)
     for label, field_key, default, url, emoji in (
             ("видео", "weeek_video_field", "Видео встречи", inp.video_url, "🎥"),
@@ -480,17 +566,24 @@ def _recorder_test(user: str, url: str, seconds: int) -> dict:
 
 
 @router.get("/weeek/projects")
-def automation_weeek_projects(user: str = Depends(current_user)):
+def automation_weeek_projects(team: str = "", user: str = Depends(current_user)):
     """List the workspace's projects (id + name) so the user can pick which one
-    to record. The token sees all projects; `projectId` is what scopes it."""
+    to record. The token sees all projects; `projectId` is what scopes it.
+    Команде под замком — только её проект."""
     from .automation import settings as auto_settings, weeek
-    token = auto_settings.get(user, "weeek_token")
+    cfg = auto_settings.load(_team_for(user, team))
+    token = cfg.get("weeek_token")
     if not token:
         raise HTTPException(400, "Сначала задайте токен Weeek и нажмите «Сохранить».")
     try:
-        return {"projects": weeek.list_projects(token)}
+        projects = weeek.list_projects(token)
     except weeek.WeeekError as e:
         raise HTTPException(502, str(e))
+    if _managed_guard(user, cfg):
+        own = {str(p).strip() for p in (cfg.get("weeek_project_id"),
+                                        cfg.get("weeek_tasks_project_id")) if p}
+        projects = [p for p in projects if str(p.get("id")) in own]
+    return {"projects": projects}
 
 
 @router.get("/weeek/members")
@@ -517,27 +610,43 @@ def automation_weeek_members(refresh: int = 0, user: str = Depends(current_user)
 
 
 @router.get("/weeek/boards")
-def automation_weeek_boards(project_id: str = "", user: str = Depends(current_user)):
+def automation_weeek_boards(project_id: str = "", team: str = "",
+                            user: str = Depends(current_user)):
+    """Доски проекта — для выбора доски встреч и доски задач. Команде под
+    замком — только её доски и только в её проекте."""
     from .automation import settings as auto_settings, weeek
-    token = auto_settings.get(user, "weeek_token")
+    cfg = auto_settings.load(_team_for(user, team))
+    token = cfg.get("weeek_token")
     if not token:
         raise HTTPException(400, "Сначала подключите Weeek.")
     if not project_id.strip().isdigit():
         raise HTTPException(400, "Нужен числовой id проекта.")
+    guard = _managed_guard(user, cfg)
+    if guard and project_id.strip() not in {
+            str(p).strip() for p in (cfg.get("weeek_project_id"),
+                                     cfg.get("weeek_tasks_project_id")) if p}:
+        raise HTTPException(403, "Этот проект не принадлежит вашей команде.")
     try:
-        return {"boards": weeek.list_boards(token, project_id.strip())}
+        boards = weeek.list_boards(token, project_id.strip())
     except weeek.WeeekError as e:
         raise HTTPException(502, str(e))
+    if guard:
+        boards = [b for b in boards if str(b.get("id")) in _allowed_boards(cfg)]
+    return {"boards": boards}
 
 
 @router.get("/weeek/board-columns")
-def automation_weeek_board_columns(board_id: str = "", user: str = Depends(current_user)):
+def automation_weeek_board_columns(board_id: str = "", team: str = "",
+                                   user: str = Depends(current_user)):
     from .automation import settings as auto_settings, weeek
-    token = auto_settings.get(user, "weeek_token")
+    cfg = auto_settings.load(_team_for(user, team))
+    token = cfg.get("weeek_token")
     if not token:
         raise HTTPException(400, "Сначала подключите Weeek.")
     if not board_id.strip().isdigit():
         raise HTTPException(400, "Нужен числовой id доски.")
+    if _managed_guard(user, cfg) and board_id.strip() not in _allowed_boards(cfg):
+        raise HTTPException(403, "Эта доска не принадлежит вашей команде.")
     try:
         return {"columns": weeek.list_board_columns(token, board_id.strip())}
     except weeek.WeeekError as e:
@@ -570,12 +679,14 @@ def automation_weeek_user_map(body: UserMapBody, user: str = Depends(current_use
 def automation_weeek_probe(task_id: str, user: str = Depends(current_user)):
     """Return the raw JSON of one Weeek task — used to pin date/link field names."""
     from .automation import settings as auto_settings, weeek
-    token = auto_settings.get(user, "weeek_token")
+    cfg = auto_settings.load(user)
+    token = cfg.get("weeek_token")
     if not token:
         raise HTTPException(400, "Сначала задайте токен Weeek в настройках.")
     task_id = _clean_task_id(task_id)
     if not task_id:
         raise HTTPException(400, "Нужен номер задачи Weeek или ссылка на неё.")
+    _guard_task(user, cfg, token, task_id)
     try:
         return weeek.probe_task(token, task_id)
     except weeek.WeeekError as e:

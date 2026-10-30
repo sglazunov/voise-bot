@@ -66,6 +66,16 @@ export function Card({ children, className = "" }: { children: ReactNode; classN
   return <div className={`glass p-4 md:p-[18px] ${className}`}>{children}</div>;
 }
 
+/* ---- Пояснение к полям под замком «управляется сервером» ---- */
+export function LockNote({ children }: { children?: ReactNode }) {
+  return (
+    <div role="note" className="glass2 rounded-2xl px-3.5 py-2.5 mb-3 text-[12.5px]"
+      style={{ color: "var(--muted)", borderColor: "rgba(250,204,21,.35)" }}>
+      🔒 {children || "Эти настройки задаёт администратор сервера: поля видны, но изменить их нельзя. Если нужно другое — напишите ему."}
+    </div>
+  );
+}
+
 /* ---- Modal (centered dialog with backdrop) ---- */
 export function Modal({ open, onClose, title, children, wide }:
   { open: boolean; onClose: () => void; title?: ReactNode; children: ReactNode;

@@ -272,6 +272,9 @@ class Scheduler:
         self._last_poll: dict[str, float] = {}  # per-user last Weeek poll
         # Последняя ошибка опроса по командам — показывается в интерфейсе.
         self._last_error: dict[str, str] = {}
+        # Фильтр (проект, доска), которым отобраны карточки команды на прошлом
+        # опросе: его смена убирает карточки прежней доски (_poll).
+        self._poll_scope: dict[str, tuple[str, str]] = {}
         self._boot_time = 0.0  # session start; meetings older than this are missed
 
     # -- lifecycle ----------------------------------------------------------
@@ -504,7 +507,8 @@ class Scheduler:
             return
         try:
             meetings = weeek.upcoming_meetings(
-                token, cfg.get("weeek_project_id"), tz)
+                token, cfg.get("weeek_project_id"),
+                board_id=cfg.get("weeek_board_id"), local_tz=tz)
         except Exception:               # noqa: BLE001 — чистка не обязана удаться
             _LOG.warning("Ночная чистка полей: не удалось получить встречи",
                          exc_info=True)
@@ -660,7 +664,16 @@ class Scheduler:
 
     def _poll(self, user: str, cfg: dict) -> None:
         meetings = weeek.upcoming_meetings(
-            cfg.get("weeek_token"), cfg.get("weeek_project_id"), self._tz(cfg))
+            cfg.get("weeek_token"), cfg.get("weeek_project_id"),
+            board_id=cfg.get("weeek_board_id"), local_tz=self._tz(cfg))
+        # Чем отобраны встречи. Сменился фильтр (доска, проект) — карточки,
+        # которых нет в новой выдаче, относятся к ДРУГОЙ доске: их надо убрать,
+        # а не ждать, пока задача «вернётся» (иначе бот запишет встречу доски,
+        # которую команда уже не видит).
+        scope = (str(cfg.get("weeek_project_id") or ""),
+                 str(cfg.get("weeek_board_id") or ""))
+        scope_changed = self._poll_scope.get(user, scope) != scope
+        self._poll_scope[user] = scope
         rec_field = cfg.get("weeek_record_field") or "Запись встречи"
         # Снапшоты (а на Postgres это запрос к базе) читаем ДО лока: под ним
         # стоят status(), обновления состояния из потоков записи и остановка
@@ -730,6 +743,9 @@ class Scheduler:
                 slot = (str(s.task_id),
                         s.start.isoformat() if s.start else "no-time")
                 stale = str(s.task_id) in fetched_ids and slot not in current
+                if scope_changed and str(s.task_id) not in fetched_ids \
+                        and not is_adhoc(s.task_id):
+                    stale = True
                 dup_missed = (s.state == "missed" and s.start is not None
                               and any(tid == str(s.task_id)
                                       and abs((s.start - st0).total_seconds())

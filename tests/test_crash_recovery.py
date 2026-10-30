@@ -247,7 +247,7 @@ class TestRescheduledSlots:
     def _poll_with(self, s, monkeypatch, meetings):
         from app.automation import scheduler as sched_mod
         monkeypatch.setattr(sched_mod.weeek, "upcoming_meetings",
-                            lambda tok, pid, tz: meetings)
+                            lambda *a, **k: meetings)
         monkeypatch.setattr(sched_mod.weeek, "custom_field_bool",
                             lambda raw, field: None)
         s._poll("alice", {"weeek_token": "t"})

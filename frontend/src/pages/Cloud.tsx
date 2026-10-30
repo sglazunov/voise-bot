@@ -2,7 +2,8 @@ import { useState } from "react";
 import { HardDrive, Cloud as CloudIcon, FolderInput, UploadCloud } from "lucide-react";
 import { Page } from "../components/Layout";
 import { Card, useToast } from "../components/ui";
-import { useSettings } from "../lib/useSettings";
+import { TeamPicker } from "../components/TeamPicker";
+import { useManagedTeam, useSettings } from "../lib/useSettings";
 import { api } from "../lib/api";
 
 const DEST = [
@@ -12,7 +13,10 @@ const DEST = [
 ];
 
 export default function CloudPage() {
-  const { s, set, save , ready } = useSettings();
+  const [team, setTeam] = useManagedTeam();
+  const { s, set, save, ready, reload, locked } = useSettings(team);
+  // Облако и папки клиентской команды под замком задаёт основатель сервера.
+  const lock = locked("cloud");
   const [ytoken, setYtoken] = useState("");
   // Учётка Google: сервер отдаёт эти три поля как «есть/нет», а не значением,
   // поэтому вводим их отдельным состоянием и шлём только заполненные.
@@ -40,6 +44,10 @@ export default function CloudPage() {
       toast("Облако сохранено");
     } catch (e: any) { toast(e.message, true); }
   }
+  async function setManaged(on: boolean) {
+    try { await save({ managed_by_server: on }); toast(on ? "Настройки команды управляются сервером" : "Замок снят"); reload(); }
+    catch (e: any) { toast(e.message, true); }
+  }
   async function test() {
     try { const r = await api.post("/api/automation/clouds/test"); toast(r.url ? "✓ Загрузка удалась" : "Готово"); }
     catch (e: any) { toast(e.message, true); }
@@ -47,6 +55,7 @@ export default function CloudPage() {
 
   return (
     <Page title="Облако" subtitle="Куда выгружать готовые записи">
+      <TeamPicker s={s} team={team} setTeam={setTeam} onManaged={setManaged} />
       <Card className="mb-3.5">
         <div className="font-bold text-[15px]">Куда сохранять запись</div>
         <div className="text-[12px] mb-3" style={{ color: "var(--muted)" }}>Готовый mp4 выгружается в облако. Секреты хранятся локально на сервере.</div>
@@ -54,7 +63,7 @@ export default function CloudPage() {
           {DEST.map((d) => {
             const on = cloud === d.id;
             return (
-              <button key={d.id} onClick={() => set("cloud", d.id)}
+              <button key={d.id} onClick={() => set("cloud", d.id)} disabled={lock}
                 className="glass2 rounded-2xl p-4 text-left transition"
                 style={on ? { borderColor: "var(--accent)", boxShadow: "0 10px 26px -14px var(--accent)" } : {}}>
                 <div className="grid place-items-center rounded-xl mb-3"
@@ -71,18 +80,18 @@ export default function CloudPage() {
       {cloud === "yandex_disk" && (
         <Card>
           <label className="lbl">OAuth-токен Я.Диска</label>
-          <input className="field" type="password" value={ytoken} onChange={(e) => setYtoken(e.target.value)}
+          <input className="field" disabled={lock} type="password" value={ytoken} onChange={(e) => setYtoken(e.target.value)}
             placeholder={yd.token ? "•••••••• сохранён" : "вставьте токен"} />
           <div className="text-[12px] mt-1.5" style={{ color: "var(--muted)" }}>scope: disk.read + disk.write</div>
           <div className="grid md:grid-cols-2 gap-3 mt-3">
             <div><label className="lbl">{split ? "Папка встреч (видео и протоколы)" : "Папка для записи"}</label>
-              <input className="field" value={yd.folder || ""} onChange={(e) => set("yandex_disk", { ...yd, folder: e.target.value })} placeholder="disk:/Телемост/Записи" /></div>
+              <input className="field" disabled={lock} value={yd.folder || ""} onChange={(e) => set("yandex_disk", { ...yd, folder: e.target.value })} placeholder="disk:/Телемост/Записи" /></div>
             <div><label className="lbl">Папка для протокола{split ? " — не используется при раскладке по встречам" : ""}</label>
-              <input className="field" value={s.protocol_folder || ""} disabled={split} onChange={(e) => set("protocol_folder", e.target.value)} placeholder="disk:/Телемост/Протоколы" /></div>
+              <input className="field" value={s.protocol_folder || ""} disabled={lock || split} onChange={(e) => set("protocol_folder", e.target.value)} placeholder="disk:/Телемост/Протоколы" /></div>
           </div>
           <div className="flex gap-2.5 mt-3">
-            <button className="btn btn-primary" onClick={onSave} disabled={!ready}>Сохранить</button>
-            <button className="btn btn-ghost" onClick={test}><UploadCloud size={15} /> Тест загрузки</button>
+            <button className="btn btn-primary" onClick={onSave} disabled={!ready || lock}>Сохранить</button>
+            <button className="btn btn-ghost" onClick={test} disabled={!!team} title={team ? "Тест загрузки — только для своей команды" : undefined}><UploadCloud size={15} /> Тест загрузки</button>
           </div>
         </Card>
       )}
@@ -96,31 +105,31 @@ export default function CloudPage() {
           </div>
           <div className="grid md:grid-cols-2 gap-3">
             <div><label className="lbl">client_id</label>
-              <input className="field" value={gsec.client_id}
+              <input className="field" disabled={lock} value={gsec.client_id}
                 onChange={(e) => setGsec({ ...gsec, client_id: e.target.value })}
                 placeholder={gd.client_id ? "•••••••• сохранён" : "…apps.googleusercontent.com"} /></div>
             <div><label className="lbl">client_secret</label>
-              <input className="field" type="password" value={gsec.client_secret}
+              <input className="field" disabled={lock} type="password" value={gsec.client_secret}
                 onChange={(e) => setGsec({ ...gsec, client_secret: e.target.value })}
                 placeholder={gd.client_secret ? "•••••••• сохранён" : "вставьте секрет"} /></div>
             <div><label className="lbl">refresh_token</label>
-              <input className="field" type="password" value={gsec.refresh_token}
+              <input className="field" disabled={lock} type="password" value={gsec.refresh_token}
                 onChange={(e) => setGsec({ ...gsec, refresh_token: e.target.value })}
                 placeholder={gd.refresh_token ? "•••••••• сохранён" : "1//0…"} /></div>
             <div><label className="lbl">ID папки для записи</label>
-              <input className="field" value={gd.folder_id || ""}
+              <input className="field" disabled={lock} value={gd.folder_id || ""}
                 onChange={(e) => set("gdrive", { ...gd, folder_id: e.target.value })}
                 placeholder="пусто = корень My Drive" /></div>
           </div>
           <div className="mt-3">
             <label className="lbl">Папка для протокола{split ? " — не используется при раскладке по встречам" : ""}</label>
-            <input className="field" value={s.protocol_folder || ""} disabled={split}
+            <input className="field" value={s.protocol_folder || ""} disabled={lock || split}
               onChange={(e) => set("protocol_folder", e.target.value)}
               placeholder="ID папки; пусто = туда же, куда запись" />
           </div>
           <div className="flex gap-2.5 mt-3">
-            <button className="btn btn-primary" onClick={onSave} disabled={!ready}>Сохранить</button>
-            <button className="btn btn-ghost" onClick={test}><UploadCloud size={15} /> Тест загрузки</button>
+            <button className="btn btn-primary" onClick={onSave} disabled={!ready || lock}>Сохранить</button>
+            <button className="btn btn-ghost" onClick={test} disabled={!!team} title={team ? "Тест загрузки — только для своей команды" : undefined}><UploadCloud size={15} /> Тест загрузки</button>
           </div>
         </Card>
       )}
@@ -132,15 +141,15 @@ export default function CloudPage() {
           когда она повторится, станет серией, и её файлы переедут в свою папку. Свою папку или
           «разовая» можно задать на карточке серии («Контекст для ИИ» → «Повторяющиеся встречи»).</div>
         <label className="flex items-center gap-2 text-[13px] mb-3">
-          <input type="checkbox" checked={split} onChange={(e) => set("folders_by_series", e.target.checked)} />
+          <input type="checkbox" disabled={lock} checked={split} onChange={(e) => set("folders_by_series", e.target.checked)} />
           Раскладывать по папкам встреч</label>
         <label className="lbl">Папка для разовых встреч</label>
-        <input className="field" value={s.oneoff_folder ?? "Разовые встречи"} disabled={!split}
+        <input className="field" value={s.oneoff_folder ?? "Разовые встречи"} disabled={lock || !split}
           onChange={(e) => set("oneoff_folder", e.target.value)} placeholder="Разовые встречи" />
-        <div className="flex gap-2.5 mt-3"><button className="btn btn-primary" onClick={onSave} disabled={!ready}>Сохранить</button></div>
+        <div className="flex gap-2.5 mt-3"><button className="btn btn-primary" onClick={onSave} disabled={!ready || lock}>Сохранить</button></div>
       </Card>
       {cloud !== "yandex_disk" && cloud !== "gdrive" && (
-        <Card><div className="flex gap-2.5"><button className="btn btn-primary" onClick={onSave} disabled={!ready}>Сохранить</button></div></Card>
+        <Card><div className="flex gap-2.5"><button className="btn btn-primary" onClick={onSave} disabled={!ready || lock}>Сохранить</button></div></Card>
       )}
     </Page>
   );

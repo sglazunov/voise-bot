@@ -616,8 +616,9 @@ def job_weeek_tasks_create(job_id: str, body: WeeekTasksCreate,
         store.prepare_weeek_tasks(job)
     title = meeting_series.display_title(job.context_hint or job.filename)
     date = meeting_series.date_from_title(job.context_hint or job.filename) or ""
+    items = weeek_tasks.pin_location(job.weeek_tasks, body.items[:100], cfg)
     results = weeek_tasks.create_selected(
-        job.weeek_tasks, body.items[:100], token, title, date, user,
+        job.weeek_tasks, items, token, title, date, user,
         protocol_url=job.protocol_cloud_url or "")
     store._save(job)
     created = sum(1 for r in results if (r or {}).get("ok"))

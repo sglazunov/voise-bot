@@ -22,6 +22,7 @@ EXPECTED = {
     "GET /api/automation/recorder/status",
     "GET /api/automation/scheduler/status",
     "GET /api/automation/settings",
+    "GET /api/automation/teams",
     "GET /api/automation/weeek/probe",
     "GET /api/automation/weeek/projects",
     "GET /api/context",

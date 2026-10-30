@@ -53,6 +53,9 @@ class Meeting:
     start: datetime | None         # meeting start (tz-aware, UTC) if known
     project_id: Any = None
     raw: dict = field(default_factory=dict)
+    # Доска задачи (первая из найденных) — строкой; по ней клиенты одного
+    # инстанса видят только свои встречи (`weeek_board_id`).
+    board_id: str | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -381,6 +384,7 @@ def task_to_meeting(task: dict, local_tz: tzinfo = timezone.utc) -> Meeting | No
     proj = task.get("projectId") or task.get("project_id")
     if proj is None and isinstance(task.get("project"), dict):
         proj = task["project"].get("id")
+    boards = task_board_ids(task)
     return Meeting(
         task_id=task.get("id"),
         title=task.get("title") or task.get("name") or f"Задача {task.get('id')}",
@@ -388,24 +392,70 @@ def task_to_meeting(task: dict, local_tz: tzinfo = timezone.utc) -> Meeting | No
         start=parse_start(task, local_tz),
         project_id=proj,
         raw=task,
+        board_id=boards[0] if boards else None,
     )
 
 
-def upcoming_meetings(token: str, project_id: Any = None,
+def task_board_ids(task: dict) -> list[str]:
+    """Все доски задачи строками, без повторов: `boardId` / `board_id` /
+    `board.id` и `locations[].boardId` (задача Weeek может лежать в нескольких
+    местах; при создании задачи доска уходит именно в `locations`)."""
+    found: list = [task.get("boardId"), task.get("board_id")]
+    if isinstance(task.get("board"), dict):
+        found.append(task["board"].get("id"))
+    for loc in task.get("locations") or []:
+        if isinstance(loc, dict):
+            found += [loc.get("boardId"), loc.get("board_id")]
+    out: list[str] = []
+    for b in found:
+        b = str(b).strip() if b not in (None, "", 0) else ""
+        if b and b not in out:
+            out.append(b)
+    return out
+
+
+def _norm_id(v: Any) -> str | None:
+    return str(v).strip() if v not in (None, "", 0) and str(v).strip() else None
+
+
+def upcoming_meetings(token: str, project_id: Any = None, board_id: Any = None,
                       local_tz: tzinfo = timezone.utc) -> list[Meeting]:
     """Tasks with a Telemost link, as Meetings. When `project_id` is set, only
     that project's meetings are returned — enforced BOTH server-side (the API
-    filter) and client-side (belt-and-suspenders, in case the API ignores it)."""
+    filter) and client-side (belt-and-suspenders, in case the API ignores it).
+
+    `board_id` — то же для доски, но строже: это граница между клиентами
+    одного инстанса, поэтому задача, у которой доску прочитать нельзя, при
+    включённом фильтре ОТСЕКАЕТСЯ (лучше пустой план, чем чужая встреча).
+    Если API не принял `boardId` в запросе, задачи читаются без него, а фильтр
+    на нашей стороне остаётся."""
+    bid = _norm_id(board_id)
+    if bid:
+        extra = {"boardId": _as_int(bid)}
+        try:
+            tasks = list_tasks(token, project_id=project_id, extra_params=extra)
+        except WeeekError as e:
+            _LOG.warning("Weeek не принял фильтр boardId=%s (%s) — фильтрую доску "
+                         "на своей стороне", bid, e)
+            tasks = list_tasks(token, project_id=project_id)
+    else:
+        tasks = list_tasks(token, project_id=project_id)
     meetings = []
-    for task in list_tasks(token, project_id=project_id):
+    for task in tasks:
         m = task_to_meeting(task, local_tz)
         if m:
             meetings.append(m)
-    pid = str(project_id).strip() if project_id not in (None, "", 0) else None
+    pid = _norm_id(project_id)
     if pid and any(m.project_id is not None for m in meetings):
         # Only filter when we can actually read project ids, so an unexpected
         # field name can't silently drop every meeting.
         meetings = [m for m in meetings if str(m.project_id) == pid]
+    if bid:
+        kept = [m for m in meetings if bid in task_board_ids(m.raw)]
+        if meetings and not any(task_board_ids(m.raw) for m in meetings):
+            _LOG.warning("Фильтр доски %s: ни у одной задачи Weeek нет доски в "
+                         "ответе — встреч не будет (см. «Диагностика задачи»)", bid)
+        meetings = kept
     meetings.sort(key=lambda m: (m.start is None, m.start or datetime.max.replace(
         tzinfo=timezone.utc)))
     return meetings
