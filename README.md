@@ -61,8 +61,10 @@ docker compose up -d --build
 
 1. Поставьте Docker (см. выше) и склонируйте репозиторий на сервер.
 2. Создайте `.env` и задайте **свой** ключ шифрования секретов и пароль базы
-   (без пароля `docker compose` не стартует; `DATABASE_URL` compose собирает
-   сам из `POSTGRES_*` — в `.env` его не задавайте):
+   (без пароля `docker compose` не стартует; на **новой** установке
+   `DATABASE_URL` compose собирает сам из `POSTGRES_*` — в `.env` его не
+   задавайте. На **существующей** — строку `DATABASE_URL` не удаляйте, см.
+   «Пароль базы на старой установке»):
    ```bash
    cp .env.example .env
    sed -i "s/^VTX_SECRET_KEY=.*/VTX_SECRET_KEY=$(openssl rand -hex 32)/" .env
@@ -216,12 +218,75 @@ bash scripts/update.sh
 только потом собирает. Пересборка вслепую посреди часовой встречи означает
 потерянную запись и час работы процессора впустую. Обойти проверку — `--force`.
 
+Скрипт останавливается и ничего не собирает, если:
+- в рабочей копии есть незакоммиченные правки отслеживаемых файлов — откатите
+  (`git checkout -- <файл>`), отложите (`git stash`) или соберите с ними:
+  `bash scripts/update.sh --allow-dirty`;
+- база не ответила на вопрос о занятости (контейнер `db` лежит, `psql` с
+  ошибкой) — это не «0 задач»; если база лежит и обновление должно её поднять —
+  `--force`;
+- скачанные изменения не применяются (ветка разошлась с сервером);
+- `docker compose config` не проходит или адрес базы у `app` не сходится с
+  сервисом `db` (`scripts/check_compose_config.py`);
+- **с новыми настройками приложение не войдёт в базу** — скрипт пробует войти
+  из работающего контейнера `app` до сборки (см. ниже про пароль).
+
+Если репозиторий недоступен (сеть), собирается текущий код — правки `.env`
+всё равно применятся. Базу скрипт поднимает раньше приложения: том, созданный
+образом `postgres:16-alpine`, на `pgvector/pgvector:pg16` (glibc) требует
+перестройки текстовых индексов — скрипт делает `REINDEX DATABASE` сам, один
+раз (порядок сортировки строк у musl и glibc разный).
+
+### Пароль базы на старой установке
+
+Postgres берёт `POSTGRES_PASSWORD` **только при создании тома** `pgdata`; потом
+это просто строка в `.env`, и её смена пароль роли в базе не меняет. Установки,
+поднятые до 30.10.2026, создавали том с паролем `voise`, и приложение входит в
+базу лишь благодаря строке в `.env`:
+
+```
+DATABASE_URL=postgresql://voise:voise@db:5432/voise
+```
+
+**Не удаляйте её**, пока пароль роли не сменён — иначе приложение после
+перезапуска не войдёт в базу (`update.sh` это поймает и не перезапустит, но
+ручной `docker compose up -d` — нет). Смена, когда ничего не идёт:
+
+```bash
+# 0. Бэкап базы и .env
+docker compose exec -T db sh -c 'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' > backup-$(date +%F).sql
+cp .env .env.bak-$(date +%F)
+# 1. В .env — свой POSTGRES_PASSWORD (не voise). Строку DATABASE_URL пока НЕ трогаем.
+# 2. Пароль роли := POSTGRES_PASSWORD из .env. Пароль идёт по конвейеру,
+#    в командной строке и истории его нет:
+docker compose config --format json \
+  | python3 scripts/check_compose_config.py --alter-role-sql \
+  | docker compose exec -T db sh -c 'psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+# 3. Сразу же убрать строку и перезапустить приложение (между шагами 2 и 3
+#    новые подключения старого контейнера не проходят — делайте подряд):
+sed -i '/^DATABASE_URL=/d' .env
+docker compose up -d app
+# 4. Проверка: строгая сверка конфига и живой вход
+docker compose config --format json | python3 scripts/check_compose_config.py --fresh
+docker compose logs --tail 30 app
+```
+
+Откат, если после шага 3 приложение не входит: `cp .env.bak-<дата> .env`, затем
+`echo "ALTER ROLE voise WITH PASSWORD 'voise';" | docker compose exec -T db sh -c 'psql -X -U "$POSTGRES_USER" -d "$POSTGRES_DB"'`
+и `docker compose up -d app`.
+
+Пароль может содержать любые символы: compose передаёт его приложению
+отдельно (`PGPASSWORD`), а не внутри адреса. Только во внешнем `DATABASE_URL`
+символы `@ # / ? %` нужно экранировать (`%40 %23 %2F %3F %25`).
+
 Вручную (когда точно ничего не идёт):
 
 ```bash
 git pull                      # забрать изменения
 docker compose up -d --build  # пересобрать и перезапустить
 ```
+⚠️ Первое обновление после смены образа базы на `pgvector/pgvector:pg16` —
+только скриптом: вручную `REINDEX` не делается (см. выше).
 - Логи: `docker compose logs -f app` (уровень — `VTX_LOG_LEVEL`)
 - Бэкап: `pg_dump` базы (том `pgdata`) **и** папка `./data` — см. «Раскатка на сервере».
 - Модель на лету: `VTX_MODEL=medium docker compose up -d` (первый запрос докачает её).

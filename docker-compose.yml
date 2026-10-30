@@ -49,8 +49,16 @@ services:
       # Start that Ollama with OLLAMA_HOST=0.0.0.0 so it accepts connections.
       OLLAMA_URL: "${OLLAMA_URL:-http://host.docker.internal:11434}"
       # Structured state (users, sessions, jobs, settings, …) lives in Postgres.
-      # Media files still go to ./data. Override credentials via .env if needed.
-      DATABASE_URL: "${DATABASE_URL:-postgresql://${POSTGRES_USER:-voise}:${POSTGRES_PASSWORD:?задайте POSTGRES_PASSWORD в .env}@db:5432/${POSTGRES_DB:-voise}}"
+      # Media files still go to ./data.
+      # Пароля в адресе НЕТ: compose не умеет %-экранировать, и пароль с «@»,
+      # «#», «/» ломал бы разбор адреса (libpq видит в «p@ss» хост «ss@db»).
+      # libpq берёт недостающий пароль из PGPASSWORD — он ниже.
+      # ⚠️ Явный DATABASE_URL в .env (старые установки: …voise:voise@db…)
+      # перекрывает это умолчание вместе с паролем — и на томе pgdata,
+      # созданном со старым паролем, только он и работает. Не удалять, пока
+      # не сменён пароль роли: README, «Пароль базы на старой установке».
+      DATABASE_URL: "${DATABASE_URL:-postgresql://${POSTGRES_USER:-voise}@db:5432/${POSTGRES_DB:-voise}}"
+      PGPASSWORD: "${POSTGRES_PASSWORD:?задайте POSTGRES_PASSWORD в .env}"
       VTX_DIARIZATION: "${DIARIZATION:-0}"
     # Lets host.docker.internal reach a service on the Docker host (Linux too).
     extra_hosts:
@@ -66,12 +74,19 @@ services:
     # postgres:16-alpine, совместим — это та же мажорная версия 16, формат
     # данных не менялся; расширение подключается само (CREATE EXTENSION IF
     # NOT EXISTS vector) при первом включении эмбеддингов, без миграций.
+    # ⚠️ Но alpine — это musl, а pgvector/pgvector — Debian (glibc): порядок
+    # строк локали en_US.utf8 у них разный, и текстовые индексы тома,
+    # созданного на alpine, на glibc становятся неверными (поиск по ключу
+    # может не найти строку). scripts/update.sh это видит (datcollversion
+    # пуст) и делает REINDEX DATABASE до запуска приложения.
     image: pgvector/pgvector:pg16
     container_name: linux-voise-db
     restart: unless-stopped
     environment:
       POSTGRES_USER: "${POSTGRES_USER:-voise}"
       # Без умолчания: предсказуемый пароль «voise» уезжал на каждый сервер.
+      # ⚠️ Postgres берёт его ТОЛЬКО при создании тома pgdata. Сменить пароль
+      # в .env у работающей базы — не значит сменить пароль роли (README).
       POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?задайте POSTGRES_PASSWORD в .env}"
       POSTGRES_DB: "${POSTGRES_DB:-voise}"
     # A Docker-managed named volume (NOT under ./data) — the app container's
