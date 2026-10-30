@@ -15,7 +15,8 @@
     # 3. Всё остальное
     docker compose exec -u app app python scripts/sort_cloud_archive.py --user ЛОГИН --apply
 
-`--user` — логин владельца команды (настройки облака общие на команду).
+`--user` — логин владельца команды или её участника: архив всегда
+раскладывается для КОМАНДЫ (настройки облака и карточки серий — общие).
 `--only "Встреча с ОО"` — только одна серия.
 
 ⚠️ Ссылки на файлы уже стоят в задачах Weeek. Яндекс.Диск переносится через
@@ -226,17 +227,25 @@ def main(argv=None) -> int:
     ap.add_argument("--only", default="", help="только встреча с этим названием")
     args = ap.parse_args(argv)
 
+    from app import security
     from app.automation import settings as auto_settings
-    cfg = auto_settings.load(args.user)
+    # Всё — по КОМАНДЕ, а не по логину из --user: настройки облака, папка
+    # локального облака и карточки серий ключуются командой. С логином
+    # участника скрипт читал чужую (пустую) папку `data/recordings/<логин>` и
+    # писал размещения в карточки серий, которых нет (второй раунд ревью 30.10).
+    team = security.team_of(args.user)
+    if team != security.normalize_username(args.user):
+        print(f"«{args.user}» — участник команды «{team}»: раскладываю архив команды.")
+    cfg = auto_settings.load(team)
     if not cloud_folders.enabled(cfg):
         print("Раскладка по папкам выключена («Облако» → «Раскладка по встречам»). "
               "Включите её — иначе новые файлы снова лягут плоско.")
         return 2
-    cloud = backend_for(cfg, args.user)
+    cloud = backend_for(cfg, team)
     print(f"Облако: {cloud.label}. Папка встреч: {cloud.root}")
     print("Читаю: " + ", ".join(cloud.sources))
     files, skipped = collect(cloud)
-    groups = plan(args.user, cfg, cloud, files, args.only)
+    groups = plan(team, cfg, cloud, files, args.only)
     print(f"Файлов встреч: {len(files)}, названий: {len(groups)}"
           + (f", пропущено (не файлы встреч): {len(skipped)}" if skipped else ""))
     total = print_plan(groups)
@@ -248,7 +257,7 @@ def main(argv=None) -> int:
         print("Переносить нечего.")
         return 0
     print("\nПереношу…")
-    res = apply(args.user, cloud, groups, args.limit)
+    res = apply(team, cloud, groups, args.limit)
     print(f"\nПеренесено: {res['moved']}, не удалось: {len(res['failed'])}.")
     if res["stopped"]:
         print("!! " + res["stopped"])
