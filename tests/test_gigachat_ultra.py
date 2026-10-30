@@ -205,7 +205,9 @@ class TestTLS:
         return urllib.error.URLError(ssl.SSLCertVerificationError("self signed"))
 
     def test_без_сертификата_минцифры_откат_на_непроверенное(self, fake, monkeypatch):
+        # Откат — только явным решением (ревью 30.10, P1-4).
         monkeypatch.setattr(llm.GigaChatProvider, "_strict", False)
+        monkeypatch.setenv("VTX_GIGACHAT_INSECURE_TLS", "1")
         fake.errors = [self._cert_error()]
         llm.GigaChatProvider(api_key="a2V5").complete("x")
         ctxs = [c for _, c in fake.calls]
@@ -215,6 +217,7 @@ class TestTLS:
 
     def test_с_сертификатом_минцифры_отката_нет(self, fake, monkeypatch):
         monkeypatch.setattr(llm.GigaChatProvider, "_strict", True)
+        monkeypatch.setenv("VTX_GIGACHAT_INSECURE_TLS", "1")
         fake.errors = [self._cert_error()]
         with pytest.raises(RuntimeError, match="Не удалось подключиться"):
             llm.GigaChatProvider(api_key="a2V5").complete("x")

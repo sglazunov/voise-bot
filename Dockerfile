@@ -43,16 +43,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Корневой сертификат Минцифры («Russian Trusted Root CA»): им подписаны
-# api.giga.chat и ngw.devices.sberbank.ru (GigaChat). Без него приложение
-# ходит к Сберу БЕЗ проверки сертификата и пишет об этом предупреждение при
-# каждой встрече. Сбой скачивания сборку не роняет — остаётся прежнее
-# поведение (без проверки, с предупреждением), но об этом говорится в логе
-# сборки. Свой файл — через VTX_GIGACHAT_CA.
+# api.giga.chat и ngw.devices.sberbank.ru (GigaChat). Без него GigaChat
+# НЕДОСТУПЕН: соединение без проверки сертификата приложение больше не
+# открывает (ревью 30.10, P1-4), аварийный откат — VTX_GIGACHAT_INSECURE_TLS=1.
+# Сбой скачивания сборку не роняет — остальные движки работают, — но об этом
+# говорится в логе сборки. Свой файл — через VTX_GIGACHAT_CA.
 RUN curl -fsSL --max-time 30 -o /usr/local/share/ca-certificates/russian_trusted_root_ca.crt \
         https://gu-st.ru/content/lending/russian_trusted_root_ca_pem.crt \
     && grep -q 'BEGIN CERTIFICATE' /usr/local/share/ca-certificates/russian_trusted_root_ca.crt \
     && update-ca-certificates \
-    || { echo "ПРЕДУПРЕЖДЕНИЕ: сертификат Минцифры не скачан — GigaChat пойдёт без проверки TLS"; \
+    || { echo "ПРЕДУПРЕЖДЕНИЕ: сертификат Минцифры не скачан — GigaChat будет недоступен (или VTX_GIGACHAT_INSECURE_TLS=1)"; \
          rm -f /usr/local/share/ca-certificates/russian_trusted_root_ca.crt; }
 
 WORKDIR /app
