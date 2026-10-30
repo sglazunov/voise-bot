@@ -2288,8 +2288,31 @@ def _dedup_chunks(rows: list[dict]) -> list[dict]:
     return picked
 
 
-def retrieve_meetings(team: str, question: str, limit: int = _ASK_ALL_LIMIT) -> list[dict]:
-    """Куски встреч команды под вопрос (без модели)."""
+_RRF_K = 60                  # сглаживание Reciprocal Rank Fusion (стандартное)
+
+
+def _chunk_key(r: dict):
+    return r.get("id") or (r.get("doc_id"), r.get("kind"), int(r.get("idx") or 0))
+
+
+def _rrf_merge(lists: list[list[dict]], k: int = _RRF_K) -> list[dict]:
+    """Слить несколько ранжированных списков кусков в один: Reciprocal Rank
+    Fusion — очки куска = сумма 1/(k + позиция) по спискам, где он есть.
+    Оценки полнотекста (ts_rank_cd) и вектора (косинус) несравнимы между
+    собой, а позиции — сравнимы; кусок, найденный обоими способами, всплывает.
+    Дубли по id схлопываются, при равных очках порядок первого списка."""
+    scores: dict = {}
+    rows: dict = {}
+    for lst in lists:
+        for pos, r in enumerate(lst):
+            key = _chunk_key(r)
+            scores[key] = scores.get(key, 0.0) + 1.0 / (k + pos + 1)
+            rows.setdefault(key, r)
+    return [rows[key] for key in sorted(scores, key=lambda key: -scores[key])]
+
+
+def _fts_rows(team: str, question: str, limit: int) -> list[dict]:
+    """Полнотекст: первый непустой ответ по запросам от строгого к мягкому."""
     from . import db
     for q in _fts_queries(question):
         try:
@@ -2299,8 +2322,36 @@ def retrieve_meetings(team: str, question: str, limit: int = _ASK_ALL_LIMIT) -> 
                                              exc_info=True)
             rows = []
         if rows:
-            return _dedup_chunks(rows)
+            return rows
     return []
+
+
+def _vector_rows(team: str, question: str, limit: int) -> list[dict]:
+    """Ближайшие по смыслу куски (эмбеддинги + pgvector). Пусто — выключено,
+    вектор вопроса не посчитался или база без pgvector: тогда остаётся один
+    полнотекст, как до фазы 1."""
+    from . import db, embeddings
+    if not embeddings.enabled():
+        return []
+    vec = embeddings.embed_query(team, question)
+    if not vec or not db.vector_ready(len(vec)):
+        return []
+    try:
+        return db.chunks_vector_search(team, vec, limit=limit)
+    except Exception:  # noqa: BLE001 — векторный поиск не роняет ответ
+        logs.get("vtx.analyze").warning("Векторный поиск по встречам не удался",
+                                         exc_info=True)
+        return []
+
+
+def retrieve_meetings(team: str, question: str, limit: int = _ASK_ALL_LIMIT) -> list[dict]:
+    """Куски встреч команды под вопрос (без модели): полнотекст, а при
+    включённых эмбеддингах — гибрид полнотекста и векторного поиска (RRF)."""
+    fts = _fts_rows(team, question, limit)
+    vec = _vector_rows(team, question, limit)
+    if not vec:
+        return _dedup_chunks(fts) if fts else []
+    return _dedup_chunks(_rrf_merge([fts, vec]))[:limit]
 
 
 def _chunk_label(r: dict) -> str:
