@@ -1054,8 +1054,10 @@ async def create_job(
     ext = Path(file.filename or "").suffix.lower()
     if ext not in ALLOWED_EXT:
         raise HTTPException(400, f"Неподдерживаемый формат: {ext or '?'}")
-    # Задача Weeek для доставки — только на доске команды (под замком). До
-    # приёма файла: отказ не должен стоить загрузки гигабайта.
+    # Задача Weeek для доставки — только на доске команды (под замком).
+    # Тело запроса Starlette к этому моменту уже принял (файл лежит во
+    # временном SpooledTemporaryFile), так что загрузку отказ не экономит —
+    # он не даёт создать задачу и скопировать файл в uploads.
     from .api_automation import guard_delivery_task
     await run_in_threadpool(guard_delivery_task, user, deliver_weeek_task)
 
@@ -1487,7 +1489,11 @@ def reanalyze_job(job_id: str, body: ReanalyzeBody, user: str = Depends(current_
     """Пересобрать протокол по той же расшифровке — без повторного распознавания."""
     _require_owned(job_id, user)
     from .api_automation import guard_delivery_task
-    guard_delivery_task(user, body.deliver_weeek_task or "")
+    # Без поля в запросе доставка уйдёт в СОХРАНЁННУЮ задачу — её и проверяем:
+    # задачу могли перенести на доску другого клиента после создания.
+    task = (body.deliver_weeek_task if body.deliver_weeek_task is not None
+            else (store.get(job_id).deliver_weeek_task or ""))
+    guard_delivery_task(user, task or "")
     try:
         job = store.reanalyze(job_id, provider=body.provider,
                               instructions=body.instructions,
@@ -1720,6 +1726,10 @@ def redeliver_job(job_id: str, user: str = Depends(current_user)):
     """Re-attempt the protocol DELIVERY only (cloud upload + Weeek link) — for
     when the protocol built fine but the upload/attach failed. No LLM re-run."""
     _require_owned(job_id, user)
+    # Сохранённая задача доставки — на доске команды и сейчас (ревью 30.10,
+    # второй раунд): её могли перенести к другому клиенту общего воркспейса.
+    from .api_automation import guard_delivery_task
+    guard_delivery_task(user, store.get(job_id).deliver_weeek_task or "")
     res = store.redeliver(job_id)
     if res == "delivered":
         return {"ok": True, "detail": "Протокол выгружен и прикреплён к задаче Weeek."}

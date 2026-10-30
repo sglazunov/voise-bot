@@ -98,7 +98,15 @@ def automation_save(body: AutomationSettings, team: str = "",
     # None отбрасываем — так фронт помечает «поле не трогали». Пустая строка
     # при этом ЗНАЧИМА: ею очищают поле (проект Weeek, фильтры, папка).
     values = {k: v for k, v in body.known().items() if v is not None}
-    keep, dropped = auto_settings.writable(user, auto_settings.load(target), values)
+    cfg = auto_settings.load(target)
+    keep, dropped = auto_settings.writable(user, cfg, values)
+    # Папку протоколов команда менять вправе — отказ по ней не замок, а
+    # неверное значение (путь на диске сервера): молча его не глотаем, иначе
+    # «Сохранить» отвечало 200, а папка не менялась.
+    if "protocol_folder" in dropped and "protocol_folder" not in auto_settings.locked_keys(user, cfg):
+        raise HTTPException(400, "Папка протоколов — путь на диске сервера. Укажите "
+                            "папку облака: «disk:/Протоколы» или «/Протоколы» для "
+                            "Яндекс.Диска, идентификатор папки для Google Drive.")
     if dropped:
         log.info("Настройки команды %s: %s не может менять %s — оставляю как есть",
                  target, user, ", ".join(dropped))
@@ -133,9 +141,8 @@ def _managed_guard(user: str, cfg: dict) -> bool:
 
 
 def _allowed_boards(cfg: dict) -> set[str]:
-    return {str(b).strip() for b in (cfg.get("weeek_board_id"),
-                                     cfg.get("weeek_tasks_board_id"))
-            if b not in (None, "") and str(b).strip()}
+    from .automation import weeek
+    return weeek.team_boards(cfg)
 
 
 def _guard_task(user: str, cfg: dict, token: str, task_id: str) -> None:
@@ -511,8 +518,11 @@ def automation_login_action(body: LoginAction, user: str = Depends(current_user)
         raise HTTPException(409, "Сессия входа не запущена.")
     if body.kind == "goto" and not browser._allowed_login_url(body.url or ""):
         raise HTTPException(400, "Переход разрешён только на страницы входа Яндекса.")
-    ses.send(body.kind, x=body.x, y=body.y, text=body.text,
-             key=body.key, dy=body.dy, url=body.url)
+    try:
+        ses.send(body.kind, x=body.x, y=body.y, text=body.text,
+                 key=body.key, dy=body.dy, url=body.url)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     return {"ok": True}
 
 

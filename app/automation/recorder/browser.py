@@ -2205,6 +2205,9 @@ LOGIN_MAX_SEC = float(os.getenv("VTX_LOGIN_MAX_SEC", "900"))
 # Окна разных команд работают параллельно (профили разные), но не без счёта:
 # каждое — свой Chromium.
 LOGIN_MAX_WINDOWS = int(os.getenv("VTX_LOGIN_MAX_WINDOWS", "3"))
+# Ввод текста в окно — логин, пароль, код. Длиннее не бывает, а `type` идёт по
+# 25 мс на символ: мегабайт текста держал поток окна часами, мимо тайм-аутов.
+LOGIN_MAX_TEXT = int(os.getenv("VTX_LOGIN_MAX_TEXT", "256"))
 
 
 class _LoginSession:
@@ -2271,6 +2274,9 @@ class _LoginSession:
 
     def send(self, kind: str, **kw) -> None:
         """Клик/ввод/навигация. Выполняется в потоке браузера."""
+        if kind == "type" and len(str(kw.get("text") or "")) > LOGIN_MAX_TEXT:
+            raise ValueError(f"Текст длиннее {LOGIN_MAX_TEXT} символов — "
+                             f"в окно входа такой не вводится.")
         self._cmds.put((kind, kw))
 
     def close(self, wait: float = 10.0) -> None:
@@ -2352,7 +2358,7 @@ class _LoginSession:
             page.mouse.move(x, y)
             page.mouse.click(x, y)
         elif kind == "type":
-            page.keyboard.type(str(kw.get("text", "")), delay=25)
+            page.keyboard.type(str(kw.get("text", ""))[:LOGIN_MAX_TEXT], delay=25)
         elif kind == "key":
             page.keyboard.press(str(kw.get("key", "Enter")))
         elif kind == "scroll":
@@ -2421,8 +2427,16 @@ def login_open(cfg: dict, team: str = "") -> "_LoginSession":
             return ses
         if ses is not None:
             ses.close(wait=5)
+            if ses.alive():
+                # Просроченное окно застряло в длинной команде и Chromium ещё
+                # держит профиль: второй Chromium на том же каталоге не встанет.
+                raise RuntimeError("Прежнее окно входа ещё закрывается. "
+                                   "Попробуйте через минуту.")
         new = _LoginSession(cfg)
-        others = [s for t, s in login_sessions.items() if t != team and _live(s)]
+        # Считаем по ЖИВОМУ ПОТОКУ, а не по `_live`: просроченное окно, которое
+        # застряло и ещё не закрылось, — это по-прежнему запущенный Chromium на
+        # своём профиле (ревью 30.10, второй раунд).
+        others = [s for t, s in login_sessions.items() if t != team and s.alive()]
         if any(s.profile == new.profile for s in others):
             raise RuntimeError("Окно входа на этом профиле браузера уже открыто "
                                "другой командой. Попробуйте через несколько минут.")
