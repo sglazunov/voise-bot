@@ -67,6 +67,11 @@ class MeetingState:
     # Служебный путь файла в облаке (disk:/…): нужен поздней дозагрузке, чтобы
     # ОПУБЛИКОВАТЬ уже лежащий файл, а не заливать гигабайт заново.
     cloud_path: str | None = None
+    # Прежние части встречи (повторный заход), чьё видео облако так и не
+    # приняло: {out_path, cloud_path, job_id, upload_error}. Карточка и снапшот
+    # описывают ПОСЛЕДНЮЮ часть, и без этого списка застрявшая первая часть
+    # после перезапуска не дозаливалась, а через двое суток её удаляла уборка.
+    parts: list = field(default_factory=list)
     # Чем кончилась запись: silence | max_duration | chat_stop | call_ended |
     # left_call | nobody_joined | thinned_out | stopped | error. Рекордер
     # возвращает это в результате, а планировщик раньше выбрасывал — и
@@ -276,24 +281,35 @@ class Scheduler:
         # только их (см. set_decision).
         self._poll_ids: dict[str, set[str]] = {}
         self._boot_time = 0.0  # session start; meetings older than this are missed
+        # start() зовут и запуск приложения, и «Обновить из Weeek»: проверка
+        # «цикл уже идёт» и запуск — под одним локом, а восстановление после
+        # перезапуска — ровно один раз за процесс (ревью 30.10: две дозаливки
+        # и два комментария в Weeek).
+        self._start_lock = threading.Lock()
+        self._resumed = False
+        # Файлы, которые сейчас дозаливаются в облако: одна дозаливка на файл.
+        self._late_uploads: set[str] = set()
 
     # -- lifecycle ----------------------------------------------------------
     def start(self) -> None:
-        if self._thread and self._thread.is_alive():
-            return
-        self._boot_time = time.time()  # don't auto-join meetings already past now
-        # Первая уборка записей — через час, а не сразу: после перезапуска
-        # прерванные задачи ещё в «ошибке», пока _resume_pending не вернёт их
-        # в очередь, и карточки встреч ещё не восстановлены из снапшотов.
-        self._last_sweep = time.time()
-        self._stop.clear()
-        self._thread = threading.Thread(target=self._loop, daemon=True,
-                                        name="vtx-scheduler")
-        self._thread.start()
+        with self._start_lock:
+            if self._thread and self._thread.is_alive():
+                return
+            self._boot_time = time.time()  # don't auto-join meetings already past now
+            # Первая уборка записей — через час, а не сразу: после перезапуска
+            # прерванные задачи ещё в «ошибке», пока _resume_pending не вернёт их
+            # в очередь, и карточки встреч ещё не восстановлены из снапшотов.
+            self._last_sweep = time.time()
+            self._stop.clear()
+            self._thread = threading.Thread(target=self._loop, daemon=True,
+                                            name="vtx-scheduler")
+            self._thread.start()
+            resume, self._resumed = not self._resumed, True
         # A restart killed the previous process's delivery threads; pick their
         # meetings back up so Weeek links don't silently get lost on deploys.
-        threading.Thread(target=self._resume_pending, daemon=True,
-                         name="vtx-resume").start()
+        if resume:
+            threading.Thread(target=self._resume_pending, daemon=True,
+                             name="vtx-resume").start()
 
     def status(self, user: str) -> dict:
         user = security.team_of(user)   # members see the team's meetings
@@ -1043,10 +1059,28 @@ class Scheduler:
             # записи с тем же именем (видео удалили, а живая расшифровка
             # осталась) подмешали бы в новую встречу чужие сегменты.
             store_drop_sidecars(out)
-            # Persist the file path BEFORE recording starts: if the process dies
-            # mid-meeting, the restart scan (_resume_pending) finds the fMP4 by
-            # this path and queues it for processing instead of losing it.
-            st.out_path = out
+            # Повторный заход: карточка переходит на НОВУЮ часть, и всё, что
+            # описывало облачную копию прежней, сбрасывается. Путь и ссылка
+            # первой части у второй приводили к потере записи: неудачная
+            # выгрузка второй оставляла путь первой, дозаливка «публиковала»
+            # его, получала ok и удаляла локальный файл второй части; а при
+            # падении посреди второй части восстановление видело ссылку и не
+            # выгружало её вовсе (ревью 30.10). Прежняя часть, которую облако
+            # так и не приняло, уходит в `parts` — её дозаливка продолжается и
+            # переживает перезапуск.
+            prev = st.out_path
+            stuck = bool(prev and prev != out and st.upload_error
+                         and not st.cloud_url and Path(prev).exists())
+            with self._lock:
+                if stuck and all(p.get("out_path") != prev for p in st.parts):
+                    st.parts.append({"out_path": prev, "cloud_path": st.cloud_path,
+                                     "job_id": st.job_id,
+                                     "upload_error": st.upload_error})
+                st.cloud_url = st.cloud_path = st.upload_error = None
+                # Persist the file path BEFORE recording starts: if the process
+                # dies mid-meeting, the restart scan (_resume_pending) finds the
+                # fMP4 by this path and queues it instead of losing it.
+                st.out_path = out
             snapshots.save(st)
 
             # Д10: pseudo-live transcript — the fMP4 is readable while being
@@ -1227,9 +1261,7 @@ class Scheduler:
             # The cloud didn't take the video: keep retrying in the background
             # until it does — recordings must not be stored on this server.
             if not up.get("ok"):
-                threading.Thread(target=self._late_upload,
-                                 args=(user, st, cfg, out),
-                                 daemon=True, name="vtx-late-upload").start()
+                self._start_late_upload(user, st, cfg, out)
 
             # Post the cloud link back to Weeek (protocol is produced later).
             if cfg.get("post_back_to_weeek") and st.cloud_url:
@@ -1265,7 +1297,13 @@ class Scheduler:
         5 min, up to 4 h): on success fill the Weeek field/comment exactly like
         the normal path would have, then get rid of the local copy — videos are
         not stored on this server. `first_delay` — пауза перед ПЕРВОЙ попыткой
-        (после перезапуска сервиса облако уже могло ожить)."""
+        (после перезапуска сервиса облако уже могло ожить).
+
+        Поток отвечает за ФАЙЛ `out`, а не за карточку: после повторного захода
+        карточка описывает уже вторую часть. Если `out` больше не её текущая
+        запись, это прежняя часть из `st.parts` — у неё свой путь в облаке и
+        своя задача, а поле «Видео встречи» и ссылку карточки она не трогает
+        (там вторая часть)."""
         deadline = time.time() + 4 * 3600
         delay = first_delay
         while time.time() < deadline and not self._stop.is_set():
@@ -1275,34 +1313,53 @@ class Scheduler:
                 return            # аккаунт удалён — заливать нечего и некуда
             if not Path(out).exists():
                 return  # purged (retention) — nothing left to deliver
+            with self._lock:
+                current = st.out_path == out
+                part = None if current else next(
+                    (p for p in st.parts if p.get("out_path") == out), None)
+                cloud_path = st.cloud_path if current else (part or {}).get("cloud_path")
             place = _meeting_place(st, cfg, None, out)
-            up = delivery.publish_or_upload(out, cfg, st.cloud_path, lambda *_: None,
+            up = delivery.publish_or_upload(out, cfg, cloud_path, lambda *_: None,
                                             subfolder=place["sub"] or None,
                                             owner=st.owner)
             cloud_folders.placed(st.owner, st.title, place, up, "recording")
-            st.cloud_path = up.get("path") or st.cloud_path
-            if not up.get("ok"):
-                st.upload_error = up.get("error") or "облако недоступно"
+            cloud_path = up.get("path") or cloud_path
+            url = up.get("url") if up.get("ok") else None
+            error = None if up.get("ok") else (up.get("error") or "облако недоступно")
+            with self._lock:
+                # Карточка могла перейти на новую часть, пока шла выгрузка.
+                current = st.out_path == out
+                if current:
+                    st.cloud_path, st.upload_error = cloud_path, error
+                    if url:
+                        st.cloud_url = url
+                elif error and part is not None:
+                    part.update(cloud_path=cloud_path, upload_error=error)
+                elif not error:
+                    st.parts = [p for p in st.parts if p.get("out_path") != out]
+            if error:
                 snapshots.save(st)
                 continue
-            st.cloud_url = up.get("url")
-            st.upload_error = None
             token = cfg.get("weeek_token")
             field = (cfg.get("weeek_video_field") or "").strip()
             weeek_ok = bool(token) and not is_adhoc(st.task_id)  # по ссылке — некуда
-            if weeek_ok and cfg.get("weeek_set_video_field", True) and st.cloud_url and field:
+            if (current and weeek_ok and cfg.get("weeek_set_video_field", True)
+                    and url and field):
                 delivery.write_weeek_field(
-                    token, st.task_id, field, st.cloud_url, lambda *_: None,
+                    token, st.task_id, field, url, lambda *_: None,
                     protected=cfg.get("weeek_protected_fields"))
-            if weeek_ok and cfg.get("post_back_to_weeek") and st.cloud_url:
+            if weeek_ok and cfg.get("post_back_to_weeek") and url:
                 weeek.add_comment(token, st.task_id,
-                                  f"🎥 Запись встречи: {st.cloud_url}")
+                                  f"🎥 Запись встречи: {url}" if current else
+                                  f"🎥 Запись встречи (прежняя часть): {url}")
             snapshots.save(st)  # the late-delivered cloud link survives restarts
-            # Запись всё-таки уехала — строка исхода переписывается уже без
-            # upload_error. Иначе «осталось на сервере» в метрике оставалось бы
-            # навсегда, хотя облако приняло видео получасом позже.
-            self._record_outcome(st, "recorded")
-            job = store.get(st.job_id) if st.job_id else None
+            jid = st.job_id if current else (part or {}).get("job_id")
+            if current:
+                # Запись всё-таки уехала — строка исхода переписывается уже без
+                # upload_error. Иначе «осталось на сервере» в метрике оставалось
+                # бы навсегда, хотя облако приняло видео получасом позже.
+                self._record_outcome(st, "recorded")
+            job = store.get(jid) if jid else None
             # Протокол той же встречи мог упасть на ТОЙ ЖЕ публикации — теперь,
             # когда облако отвечает, прикрепляем и его.
             if job is not None and job.status == "done" and getattr(job, "delivery_error", None):
@@ -1510,11 +1567,6 @@ class Scheduler:
                 task_id = parts[1] if len(parts) > 1 else None
                 if not task_id:
                     continue
-                # Команда без Weeek — это «бот по ссылке»: её встречи тоже
-                # восстанавливаются (раньше команда пропускалась целиком).
-                # Встреча из Weeek без токена — восстанавливать нечем.
-                if not has_weeek and not is_adhoc(task_id):
-                    continue
                 try:
                     start = (datetime.fromisoformat(parts[2])
                              if len(parts) > 2 else None)
@@ -1524,38 +1576,49 @@ class Scheduler:
                 # перезапуска НЕ дозаливалось — фоновую дозаливку запускал
                 # только живой _run, — и через двое суток уборка удаляла его.
                 # Касается и готовых встреч: протокол есть, а видео — нет.
+                # Задача распознавания и токен Weeek дозаливке НЕ нужны: у
+                # команд «только запись» задачи нет вовсе, а без токена
+                # пропускается лишь запись ссылки в Weeek (проверка 30.10).
                 out_path = snap.get("out_path")
                 video_stuck = bool(
-                    jid and out_path and snap.get("upload_error")
+                    out_path and snap.get("upload_error")
                     and not snap.get("cloud_url") and Path(out_path).exists())
-                if snap.get("state") not in pending:
-                    if video_stuck:
-                        self._resume_video(team, key, task_id, start, snap, cfg)
+                # Прежние части встречи (повторный заход), так и не уехавшие.
+                left = [p for p in (snap.get("parts") or [])
+                        if p.get("out_path") and Path(p["out_path"]).exists()]
+                # Команда без Weeek — это «бот по ссылке»: её встречи тоже
+                # восстанавливаются (раньше команда пропускалась целиком).
+                # Встрече из Weeek без токена доставлять протокол некуда —
+                # только видео.
+                weeek_ok = has_weeek or is_adhoc(task_id)
+                if snap.get("state") not in pending or not weeek_ok:
+                    if video_stuck or left:
+                        self._resume_video(team, key, task_id, start, snap, cfg,
+                                           video_stuck)
                     continue
 
                 # Д8: the process died DURING the recording — no job yet, but
                 # the fMP4 on disk is readable up to the crash. Queue it for the
                 # normal transcribe→protocol→deliver pipeline.
-                out_path = snap.get("out_path")
                 if not jid and out_path and Path(out_path).exists() \
                         and Path(out_path).stat().st_size > 0:
-                    st = MeetingState(
-                        key=key, task_id=task_id,
-                        title=snap.get("title") or Path(out_path).stem,
-                        url="", start=start, owner=team, state="transcribing",
-                        detail="", out_path=out_path,
-                        cloud_url=snap.get("cloud_url"),
-                        live_notes=str(snap.get("live_notes") or ""),
-                        do_protocol=bool(cfg.get("do_protocol", True)))
-                    with self._lock:
-                        st = self._states.setdefault(key, st)
+                    st = self._revive(team, key, task_id, start, snap,
+                                      state="transcribing", detail="",
+                                      do_protocol=bool(cfg.get("do_protocol", True)))
+                    self._resume_parts(team, st, cfg)
                     self._finalize_orphan(st, cfg, out_path)
                     continue
 
                 if not jid:
+                    if video_stuck or left:
+                        self._resume_video(team, key, task_id, start, snap, cfg,
+                                           video_stuck)
                     continue
                 job = store.get(jid)
                 if job is None:
+                    if video_stuck or left:
+                        self._resume_video(team, key, task_id, start, snap, cfg,
+                                           video_stuck)
                     continue    # job already purged by retention — nothing left
                 # Д8: the restart interrupted the RECOGNITION itself (worker died
                 # mid-transcription). The source file is still there — requeue it
@@ -1568,25 +1631,12 @@ class Scheduler:
                     except Exception:  # noqa: BLE001
                         _LOG.warning("Не удалось перезапустить задачу %s после "
                                     "рестарта", jid, exc_info=True)
-                st = MeetingState(
-                    key=key, task_id=task_id,
-                    title=snap.get("title") or Path(job.filename).stem,
-                    url="", start=start, owner=team,
-                    state=snap.get("state") or "transcribing",
-                    detail=snap.get("detail") or "", job_id=jid,
-                    cloud_url=snap.get("cloud_url"),
-                    out_path=snap.get("out_path"),
-                    live_notes=str(snap.get("live_notes") or ""),
-                    do_protocol=bool(snap.get("do_protocol")),
-                    upload_error=snap.get("upload_error"),
-                    cloud_path=snap.get("cloud_path"),
-                    stop_reason=snap.get("stop_reason"),
-                    screenshot=snap.get("screenshot"),
-                    rec_bytes=int(snap.get("rec_bytes") or 0))
-                with self._lock:
-                    st = self._states.setdefault(key, st)
+                st = self._revive(team, key, task_id, start, snap,
+                                  title=snap.get("title") or Path(job.filename).stem,
+                                  state=snap.get("state") or "transcribing")
                 if video_stuck:
-                    self._start_late_upload(team, st, cfg, out_path)
+                    self._start_late_upload(team, st, cfg, out_path, first_delay=30)
+                self._resume_parts(team, st, cfg)
                 if not (st.do_protocol and cfg.get("upload_protocol", True)):
                     continue
                 try:
@@ -1600,35 +1650,82 @@ class Scheduler:
                     args=(st, jid, cfg),
                     daemon=True).start()
 
-    def _start_late_upload(self, team: str, st: MeetingState, cfg: dict,
-                           out: str) -> None:
-        _LOG.info("Видео встречи «%s» не в облаке — дозаливаю после перезапуска",
-                  st.title)
-        threading.Thread(target=self._late_upload, args=(team, st, cfg, out),
-                         kwargs={"first_delay": 30}, daemon=True,
-                         name="vtx-late-upload").start()
+    def _revive(self, team: str, key: str, task_id: str, start, snap: dict,
+                **over) -> MeetingState:
+        """Карточка встречи из снапшота — или уже существующая, дополненная им.
 
-    def _resume_video(self, team: str, key: str, task_id: str, start,
-                      snap: dict, cfg: dict) -> None:
-        """Готовая (или упавшая) встреча, у которой видео так и не уехало в
-        облако: поднять карточку из снапшота и запустить дозаливку."""
-        out = snap["out_path"]
-        st = MeetingState(
-            key=key, task_id=task_id, title=snap.get("title") or Path(out).stem,
-            url="", start=start,
-            owner=team, state=snap.get("state") or "done",
+        Карточку мог раньше создать опрос Weeek (`_poll` → `_restore_snapshot`):
+        её не подменяем (на ней ссылка комнаты, время, решения), а только
+        дописываем то, чего не хватает дозаливке, — путь записи, путь в облаке,
+        прежние части. Иначе первая неудачная попытка сохраняла снапшот без
+        пути, и после следующего перезапуска видео не дозаливалось вовсе."""
+        out = snap.get("out_path")
+        kw = dict(
+            key=key, task_id=task_id,
+            title=snap.get("title") or (Path(out).stem if out else ""),
+            url="", start=start, owner=team,
+            state=snap.get("state") or "done",
             detail=snap.get("detail") or "", job_id=snap.get("job_id"),
-            cloud_url=None, out_path=out,
+            cloud_url=snap.get("cloud_url"), out_path=out,
             live_notes=str(snap.get("live_notes") or ""),
             do_protocol=bool(snap.get("do_protocol")),
             upload_error=snap.get("upload_error"),
             cloud_path=snap.get("cloud_path"),
+            parts=[dict(p) for p in (snap.get("parts") or [])],
             stop_reason=snap.get("stop_reason"),
             screenshot=snap.get("screenshot"),
             rec_bytes=int(snap.get("rec_bytes") or 0))
+        kw.update(over)
+        fresh = MeetingState(**kw)
         with self._lock:
-            st = self._states.setdefault(key, st)
-        self._start_late_upload(team, st, cfg, out)
+            st = self._states.setdefault(key, fresh)
+            if st is not fresh:
+                if not st.out_path:
+                    st.out_path = fresh.out_path
+                if st.out_path == fresh.out_path:
+                    st.cloud_path = st.cloud_path or fresh.cloud_path
+                    st.upload_error = st.upload_error or fresh.upload_error
+                if not st.parts:
+                    st.parts = fresh.parts
+        return st
+
+    def _start_late_upload(self, team: str, st: MeetingState, cfg: dict,
+                           out: str, first_delay: int = 300) -> bool:
+        """Фоновая дозаливка файла `out` — не больше одной на файл: повторный
+        вызов (второе восстановление, запись и восстановление разом) ждал бы
+        того же облака и писал бы второй комментарий в Weeek."""
+        with self._lock:
+            if out in self._late_uploads:
+                return False
+            self._late_uploads.add(out)
+
+        def run() -> None:
+            try:
+                self._late_upload(team, st, cfg, out, first_delay=first_delay)
+            finally:
+                with self._lock:
+                    self._late_uploads.discard(out)
+
+        _LOG.info("Видео встречи «%s» не в облаке — дозаливаю в фоне (%s)",
+                  st.title, Path(out).name)
+        threading.Thread(target=run, daemon=True, name="vtx-late-upload").start()
+        return True
+
+    def _resume_parts(self, team: str, st: MeetingState, cfg: dict) -> None:
+        """Дозаливка прежних частей встречи после перезапуска."""
+        for p in list(st.parts):
+            out = p.get("out_path")
+            if out and Path(out).exists():
+                self._start_late_upload(team, st, cfg, out, first_delay=30)
+
+    def _resume_video(self, team: str, key: str, task_id: str, start,
+                      snap: dict, cfg: dict, video_stuck: bool = True) -> None:
+        """Готовая (или упавшая) встреча, у которой видео так и не уехало в
+        облако: поднять карточку из снапшота и запустить дозаливку."""
+        st = self._revive(team, key, task_id, start, snap)
+        if video_stuck:
+            self._start_late_upload(team, st, cfg, snap["out_path"], first_delay=30)
+        self._resume_parts(team, st, cfg)
 
     def _finalize_orphan(self, st: MeetingState, cfg: dict, out: str) -> None:
         """A recording the crash orphaned: run the same post-recording pipeline
@@ -1653,18 +1750,19 @@ class Scheduler:
                                             subfolder=place["sub"] or None,
                                             owner=st.owner)
             cloud_folders.placed(st.owner, st.title, place, up, "recording")
+            st.cloud_path = up.get("path") or st.cloud_path
             if up.get("ok"):
                 st.cloud_url = up.get("url")
+                st.upload_error = None
                 field = (cfg.get("weeek_video_field") or "").strip()
-                if cfg.get("weeek_set_video_field", True) and st.cloud_url and field:
+                if (cfg.get("weeek_set_video_field", True) and st.cloud_url and field
+                        and cfg.get("weeek_token") and not is_adhoc(st.task_id)):
                     delivery.write_weeek_field(
                         cfg.get("weeek_token"), st.task_id, field, st.cloud_url,
                         log, protected=cfg.get("weeek_protected_fields"))
             else:
                 st.upload_error = up.get("error") or "облако недоступно"
-                threading.Thread(target=self._late_upload,
-                                 args=(st.owner, st, cfg, out),
-                                 daemon=True, name="vtx-late-upload").start()
+                self._start_late_upload(st.owner, st, cfg, out)
         if not do_transcribe:
             self._set(st, "done", "Готово после перезапуска: запись "
                       + ("в облаке" if st.cloud_url else "локально")
@@ -1709,6 +1807,11 @@ class Scheduler:
         st.do_protocol = bool(snap.get("do_protocol"))
         st.upload_error = snap.get("upload_error")
         st.cloud_path = snap.get("cloud_path")
+        # Путь записи и прежние части: без них карточка опроса, попавшая в
+        # дозаливку после перезапуска, сохраняла снапшот уже без пути — и
+        # после следующего перезапуска видео не дозаливалось (ревью 30.10).
+        st.out_path = snap.get("out_path") or st.out_path
+        st.parts = [dict(p) for p in (snap.get("parts") or [])]
         st.stop_reason = snap.get("stop_reason")
         st.screenshot = snap.get("screenshot")
         st.rec_bytes = int(snap.get("rec_bytes") or 0)

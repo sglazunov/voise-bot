@@ -56,6 +56,9 @@ def of_state(st) -> dict:
             # работала — по полю, которого в снапшоте не было.
             "upload_error": st.upload_error,
             "cloud_path": getattr(st, "cloud_path", None),
+            # Прежние части встречи, чьё видео облако ещё не приняло
+            # (повторный заход): без них после перезапуска не дозалить.
+            "parts": [dict(p) for p in (getattr(st, "parts", None) or [])],
             "stop_reason": st.stop_reason,
             "screenshot": getattr(st, "screenshot", None),
             "rec_bytes": int(getattr(st, "rec_bytes", 0) or 0),

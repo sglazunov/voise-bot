@@ -57,6 +57,9 @@ _DUE_CUES = re.compile(
     r"(?:\bдо|\bк|\bко|\bчерез|не позднее|не позже|срок|дедлайн|сдать|готов)\b", re.I)
 
 
+_VERSION_BEFORE = re.compile(r"(?:верси\w*|релиз\w*|сборк\w*|\bv)\s*$", re.I)
+
+
 def _month_num(word: str) -> int | None:
     w = word.lower().replace("ё", "е")
     for stem, n in _MONTHS.items():
@@ -86,8 +89,18 @@ def parse_due(text: str, base: date,
         return None, None
     low = text.lower().replace("ё", "е")
 
-    for m in re.finditer(r"(?<!\d)(\d{1,2})[./](\d{1,2})(?:[./](\d{2,4}))?(?!\d)", low):
+    # Номер версии после «до» — не срок (ревью 30.10): «до версии 2.4.1» давало
+    # 2 апреля, «обновить до 3.2» — 3 февраля. Число не должно продолжаться
+    # ещё одной точкой с цифрой (`(?![./]\d)`, `(?<![\d./])`), перед ним не
+    # должно стоять «версия»/«v»/«релиз», а «Д.М» без года из двух ОДНОЗНАЧНЫХ
+    # чисел — это версия: дату так не пишут («до 5.11», «до 05.02» — пишут).
+    for m in re.finditer(
+            r"(?<![\d./])(\d{1,2})[./](\d{1,2})(?:[./](\d{2,4}))?(?!\d)(?![./]\d)", low):
         if explicit and not _cue_before(low, m.start()):
+            continue
+        if _VERSION_BEFORE.search(low[max(0, m.start() - 12):m.start()]):
+            continue
+        if not m.group(3) and len(m.group(1)) == 1 and len(m.group(2)) == 1:
             continue
         d, mo, y = int(m.group(1)), int(m.group(2)), m.group(3)
         year = base.year if not y else (int(y) if len(y) == 4 else 2000 + int(y))

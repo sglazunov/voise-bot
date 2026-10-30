@@ -226,6 +226,10 @@ CREATE TABLE IF NOT EXISTS meetings (
 -- существовала, поэтому ошибка проявлялась только при установке с нуля.
 ALTER TABLE meetings ADD COLUMN IF NOT EXISTS out_path TEXT;
 ALTER TABLE meetings ADD COLUMN IF NOT EXISTS live_notes TEXT;
+-- Остальные поля снапшота (название, ошибка выгрузки, путь в облаке, прежние
+-- части…). Без них на Postgres дозаливка видео после перезапуска не
+-- срабатывала НИКОГДА: признак «облако не приняло» сюда не доезжал (30.10).
+ALTER TABLE meetings ADD COLUMN IF NOT EXISTS extra JSONB;
 -- One row per finished meeting/recording. Job rows are purged by retention
 -- (VTX_RETENTION_HOURS), so the business numbers are recorded here to survive it.
 CREATE TABLE IF NOT EXISTS meeting_stats (
@@ -643,16 +647,22 @@ def creds_save(user: str, raw: dict) -> None:
 def meetings_load(user: str) -> dict:
     with _conn() as conn, _cur(conn) as cur:
         cur.execute("SELECT meeting_key, state, detail, job_id, cloud_url, "
-                    "out_path, live_notes, do_protocol, saved_at "
+                    "out_path, live_notes, do_protocol, saved_at, extra "
                     "FROM meetings WHERE username=%s",
                     (user,))
-        return {r["meeting_key"]: {"state": r.get("state"), "detail": r.get("detail"),
+        return {r["meeting_key"]: {**(r.get("extra") or {}),
+                                   "state": r.get("state"), "detail": r.get("detail"),
                                    "job_id": r.get("job_id"), "cloud_url": r.get("cloud_url"),
                                    "out_path": r.get("out_path"),
                                    "live_notes": r.get("live_notes"),
                                    "do_protocol": bool(r.get("do_protocol")),
                                    "saved_at": r.get("saved_at")}
                 for r in cur.fetchall()}
+
+
+# Поля снапшота со своей колонкой; всё остальное едет в `extra`.
+_MEETING_COLS = ("state", "detail", "job_id", "cloud_url", "out_path",
+                 "live_notes", "do_protocol", "saved_at")
 
 
 
@@ -665,17 +675,19 @@ def meeting_upsert(user: str, key: str, snap: dict) -> None:
         cur.execute(
             """INSERT INTO meetings
                  (username, meeting_key, state, detail, job_id, cloud_url,
-                  out_path, live_notes, do_protocol, saved_at)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                  out_path, live_notes, do_protocol, saved_at, extra)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                ON CONFLICT (username, meeting_key) DO UPDATE SET
                  state=EXCLUDED.state, detail=EXCLUDED.detail,
                  job_id=EXCLUDED.job_id, cloud_url=EXCLUDED.cloud_url,
                  out_path=EXCLUDED.out_path,
                  live_notes=EXCLUDED.live_notes,
-                 do_protocol=EXCLUDED.do_protocol, saved_at=EXCLUDED.saved_at""",
+                 do_protocol=EXCLUDED.do_protocol, saved_at=EXCLUDED.saved_at,
+                 extra=EXCLUDED.extra""",
             (user, key, snap.get("state"), snap.get("detail"), snap.get("job_id"),
              snap.get("cloud_url"), snap.get("out_path"), snap.get("live_notes"),
-             bool(snap.get("do_protocol")), snap.get("saved_at")))
+             bool(snap.get("do_protocol")), snap.get("saved_at"),
+             _json({k: v for k, v in snap.items() if k not in _MEETING_COLS})))
 
 
 def meetings_trim(user: str, keep: int = 200) -> None:
