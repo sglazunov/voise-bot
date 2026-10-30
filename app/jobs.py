@@ -523,7 +523,9 @@ class JobStore:
             _key, series = meeting_series.find(job.owner, title)
             job.weeek_tasks = weeek_tasks.prepare(
                 job.id, job.analysis, cfg,
-                weeek_tasks.meeting_date_of(title, job.created_at),
+                # День — из начала имени файла записи, как у видео и протокола
+                # (meeting_series.meeting_day), а не из названия встречи.
+                weeek_tasks.meeting_date_of(job.filename, job.created_at),
                 members=members, previous=job.weeek_tasks, series=series)
         except Exception:  # noqa: BLE001 — черновики не должны ломать протокол
             log.warning("Черновики задач Weeek не подготовлены (%s)", job.id, exc_info=True)
@@ -541,12 +543,15 @@ class JobStore:
         if not txt_path.exists():
             raise ValueError("Нет расшифровки для перегенерации.")
         from .analyze import regen_topic_details
+        # Расход — и при сбое: см. _protocol_pass.
         with usage.collect() as acc:
-            detailed[index] = regen_topic_details(
-                txt_path.read_text(encoding="utf-8"), detailed[index],
-                provider=provider or job.provider, keys=_owner_keys(job.owner),
-                user_notes=job.user_notes)
-        self._add_usage(job, acc, rerun=True)
+            try:
+                detailed[index] = regen_topic_details(
+                    txt_path.read_text(encoding="utf-8"), detailed[index],
+                    provider=provider or job.provider, keys=_owner_keys(job.owner),
+                    user_notes=job.user_notes)
+            finally:
+                self._add_usage(job, acc, rerun=True)
         a["detailed"] = detailed
         a.pop("verification", None)   # indexes may shift meaning — cleared
         a["_edited"] = True
@@ -566,10 +571,12 @@ class JobStore:
         # Вопрос по встрече — тоже вызов модели и тоже деньги команды:
         # расшифровка уходит в запрос целиком или большими окнами.
         with usage.collect() as acc:
-            answer = ask_meeting(txt_path.read_text(encoding="utf-8"), question,
-                                 provider=job.provider, keys=_owner_keys(job.owner),
-                                 user_notes=job.user_notes)
-        self._add_usage(job, acc)
+            try:
+                answer = ask_meeting(txt_path.read_text(encoding="utf-8"), question,
+                                     provider=job.provider, keys=_owner_keys(job.owner),
+                                     user_notes=job.user_notes)
+            finally:
+                self._add_usage(job, acc)
         return answer
 
     def index_search(self, job: Job) -> None:
@@ -723,6 +730,30 @@ class JobStore:
             from . import stats
             stats.record(job)
 
+    def _protocol_pass(self, job: Job, txt: str, context: str,
+                       rerun: bool = False) -> dict:
+        """Сборка протокола и проверка цитат — с учётом расхода.
+
+        ⚠️ Расход доливается в `finally`: токены тратятся и тогда, когда
+        сборку отменили или она упала на середине (карта прошла, сведение —
+        нет). Раньше `_add_usage` стоял ПОСЛЕ блока и при исключении не
+        вызывался — самые дорогие встречи (длинные, с ретраями) выпадали из
+        учёта (ревью 30.10)."""
+        from .analyze import analyze_transcript
+        with usage.collect() as acc:
+            try:
+                result = analyze_transcript(
+                    txt, provider=job.provider,
+                    extra_instructions=self._preset_extra(job),
+                    custom_prompt=job.analysis_prompt,
+                    on_progress=self._on_analysis(job.id),
+                    cancel_check=lambda: self._control.get(job.id, {}).get("cancel"),
+                    keys=_owner_keys(job.owner),
+                    user_notes=job.user_notes, context=context)
+                return self._maybe_verify(job, result, txt)
+            finally:
+                self._add_usage(job, acc, rerun=rerun)
+
     def _maybe_verify(self, job: Job, result: dict, transcript: str) -> dict:
         """Д5: grounding pass over the fresh protocol (strict mode, on by
         default; per-team switch «strict_verify» in automation settings). Never
@@ -762,20 +793,10 @@ class JobStore:
         self._analysis[job.id] = {"stage": "Готовлю анализ…", "text": "", "chars": 0}
         self._set(job, status=STATUS_ANALYZING, analysis_error=None)
         try:
-            from .analyze import analyze_transcript, AnalysisCancelled
+            from .analyze import AnalysisCancelled
             from .docx_export import generate_report
 
-            with usage.collect() as acc:
-                result = analyze_transcript(
-                    txt, provider=job.provider,
-                    extra_instructions=self._preset_extra(job),
-                    custom_prompt=job.analysis_prompt,
-                    on_progress=self._on_analysis(job.id),
-                    cancel_check=lambda: self._control.get(job.id, {}).get("cancel"),
-                    keys=_owner_keys(job.owner),
-                    user_notes=job.user_notes, context=context)
-                result = self._maybe_verify(job, result, txt)
-            self._add_usage(job, acc, rerun=True)
+            result = self._protocol_pass(job, txt, context, rerun=True)
             result = self._enforce_participants(job, result)
             self._remember_series(job, result)
             job.analysis = result
@@ -873,11 +894,12 @@ class JobStore:
                     place = {"sub": "", "kind": "flat"}
                 if place["sub"]:
                     up = clouds.upload(str(docx_path), f"{base} - протокол.docx", cfg,
-                                       subfolder=place["sub"])
+                                       subfolder=place["sub"], owner=job.owner)
                     cloud_folders.placed(job.owner, title, place, up, "protocol")
                 else:
                     up = clouds.upload(str(docx_path), f"{base} - протокол.docx", cfg,
-                                       folder=(cfg.get("protocol_folder") or "").strip() or None)
+                                       folder=(cfg.get("protocol_folder") or "").strip() or None,
+                                       owner=job.owner)
                 if up.get("ok") and not up.get("url") and up.get("path"):
                     # Лёг в облако, но публикация не прошла (17.09): пробуем
                     # опубликовать ещё раз, не заливая файл заново.
@@ -1416,21 +1438,11 @@ class JobStore:
                 self._set_stage(job.id, "")     # дальше стадии показывает анализ
                 self._set(job, status=STATUS_ANALYZING, persist=True)
                 try:
-                    from .analyze import analyze_transcript, AnalysisCancelled
+                    from .analyze import AnalysisCancelled
                     from .docx_export import generate_report
 
-                    with usage.collect() as acc:
-                        analysis_result = analyze_transcript(
-                            analysis_input, provider=job.provider,
-                            extra_instructions=self._preset_extra(job),
-                            custom_prompt=job.analysis_prompt,
-                            on_progress=self._on_analysis(job.id),
-                            cancel_check=lambda: self._control.get(job.id, {}).get("cancel"),
-                            keys=_owner_keys(job.owner),
-                            user_notes=job.user_notes, context=analysis_context)
-                        analysis_result = self._maybe_verify(
-                            job, analysis_result, analysis_input)
-                    self._add_usage(job, acc)
+                    analysis_result = self._protocol_pass(
+                        job, analysis_input, analysis_context)
                     analysis_result = self._enforce_participants(job, analysis_result)
                     self._remember_series(job, analysis_result)
                     job.analysis = analysis_result

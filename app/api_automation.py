@@ -139,7 +139,8 @@ def automation_clouds_test(backend: str | None = None,
         f.write("voice-transcriber cloud test\n")
         tmp = f.name
     try:
-        res = clouds.upload(tmp, f"vtx-test-{stamp}.txt", cfg, backend=backend)
+        res = clouds.upload(tmp, f"vtx-test-{stamp}.txt", cfg, backend=backend,
+                            owner=security.team_of(user))
     finally:
         try:
             os.unlink(tmp)

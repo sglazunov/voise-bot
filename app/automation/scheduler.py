@@ -682,8 +682,9 @@ class Scheduler:
                         st.state, st.detail = "no_time", "В задаче не указано время встречи."
                     # A restart wipes the in-memory states; without this, a
                     # meeting the PREVIOUS process already recorded would come
-                    # back as «пропущена». Restore its real outcome from disk.
-                    self._restore_snapshot(st)
+                    # back as «пропущена». Restore its real outcome from disk —
+                    # из снапшотов, прочитанных ДО лока (V20, ревью 30.10).
+                    self._restore_snapshot(st, snaps_for_dedup)
                     self._states[key] = st
                 elif st.state == "scheduled":
                     st.url, st.title, st.start = m.url, m.title, m.start
@@ -876,17 +877,41 @@ class Scheduler:
                 break  # all slots busy — the rest wait for the next tick
             # Claim atomically BEFORE spawning, so the next tick/poller sees it's
             # taken and never starts a second browser for the same meeting.
+            # Комнату проверяем ЕЩЁ РАЗ, под тем же локом, что и захват:
+            # `busy_rooms` снят до записи снапшотов и взятия слота, и за это
+            # время «Бот по ссылке» (`_launch_manual`) мог зайти в ту же
+            # комнату — без перепроверки на звонке оказывались два бота
+            # (ревью 30.10).
             claimed = False
+            busy_now = None
             with self._lock:
                 if chosen.state == "scheduled":
-                    chosen.state, chosen.detail = "recording", "Бот заходит на встречу…"
-                    chosen.stop_flag = False
-                    claimed = True
+                    busy_now = self._recording_in_room(user, chosen)
+                    if busy_now is None:
+                        chosen.state, chosen.detail = "recording", "Бот заходит на встречу…"
+                        chosen.stop_flag = False
+                        claimed = True
             if not claimed:
                 recorder.release_slot(slot)
+                if busy_now is not None:
+                    busy_rooms[room_key(chosen.url)] = busy_now
+                    busy_urls.add(room_key(chosen.url))
+                    self._room_busy(chosen, busy_now,
+                                    same_task=self._same_meeting(busy_now, chosen),
+                                    due=now >= start)
                 continue
             busy_urls.add(room_key(chosen.url))
             threading.Thread(target=self._run, args=(chosen, slot), daemon=True).start()
+
+    def _recording_in_room(self, team: str, st: MeetingState) -> "MeetingState | None":
+        """Идущая запись команды в комнате `st` (кроме самой `st`). Звать
+        под `self._lock` — вместе с захватом, иначе проверка устаревает."""
+        if not st.url:
+            return None
+        rk = room_key(st.url)
+        return next((s for s in self._states.values()
+                     if s.owner == team and s.key != st.key and s.url
+                     and s.state == "recording" and room_key(s.url) == rk), None)
 
     @staticmethod
     def _same_meeting(busy: "MeetingState | None", chosen: MeetingState) -> bool:
@@ -1091,7 +1116,8 @@ class Scheduler:
                     _LOG.warning("Запуск следующей встречи после передачи комнаты "
                                  "сорвался — подхватит цикл", exc_info=True)
             place = _meeting_place(st, cfg, log, out)
-            up = delivery.upload_with_retry(out, cfg, log, subfolder=place["sub"] or None)
+            up = delivery.upload_with_retry(out, cfg, log, subfolder=place["sub"] or None,
+                                            owner=st.owner)
             cloud_folders.placed(st.owner, st.title, place, up, "recording")
             st.cloud_path = up.get("path") or st.cloud_path
             if up.get("ok"):
@@ -1238,7 +1264,8 @@ class Scheduler:
                 return  # purged (retention) — nothing left to deliver
             place = _meeting_place(st, cfg, None, out)
             up = delivery.publish_or_upload(out, cfg, st.cloud_path, lambda *_: None,
-                                            subfolder=place["sub"] or None)
+                                            subfolder=place["sub"] or None,
+                                            owner=st.owner)
             cloud_folders.placed(st.owner, st.title, place, up, "recording")
             st.cloud_path = up.get("path") or st.cloud_path
             if not up.get("ok"):
@@ -1610,7 +1637,8 @@ class Scheduler:
         if not st.cloud_url:
             place = _meeting_place(st, cfg, log, out)
             up = delivery.upload_with_retry(out, cfg, log, attempts=1,
-                                            subfolder=place["sub"] or None)
+                                            subfolder=place["sub"] or None,
+                                            owner=st.owner)
             cloud_folders.placed(st.owner, st.title, place, up, "recording")
             if up.get("ok"):
                 st.cloud_url = up.get("url")
@@ -1652,9 +1680,15 @@ class Scheduler:
                 args=(st, job.id, cfg),
                 daemon=True).start()
 
-    def _restore_snapshot(self, st: MeetingState) -> None:
-        """Fill a freshly discovered MeetingState from its saved outcome."""
-        snap = snapshots.load(st.owner).get(st.key)
+    def _restore_snapshot(self, st: MeetingState, snaps: dict | None = None) -> None:
+        """Fill a freshly discovered MeetingState from its saved outcome.
+
+        `snaps` — снапшоты команды, прочитанные заранее. ⚠️ Под `self._lock`
+        звать только с ними: иначе это запрос к базе на каждую новую карточку,
+        а под локом стоят status(), «Стоп» и `_set()` потоков записи (V20)."""
+        if snaps is None:
+            snaps = snapshots.load(st.owner)
+        snap = snaps.get(st.key)
         if not snap:
             return
         st.job_id = snap.get("job_id")
@@ -1974,9 +2008,7 @@ class Scheduler:
             if st.state == "recording":
                 recorder.release_slot(slot)
                 return {"ok": False, "error": "Эта встреча уже записывается."}
-            if st.url and any(room_key(s.url) == room_key(st.url)
-                              and s.state == "recording" and s.key != st.key
-                              for s in self._states.values() if s.owner == team):
+            if self._recording_in_room(team, st) is not None:
                 recorder.release_slot(slot)
                 return {"ok": False, "error": "Бот уже в этом звонке — эта "
                         "ссылка сейчас записывается. Второй бот в ту же комнату "

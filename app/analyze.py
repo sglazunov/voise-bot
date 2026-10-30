@@ -1540,7 +1540,9 @@ def _speech_lines(text: str) -> tuple[list[str], list[set[str]]]:
 #
 # ⚠️ Поднимать при ЛЮБОМ изменении `_SUPPORT_MIN`, `_APPROX_RATIO`, `_STEM_LEN`,
 # `_find_support`, `_Fragment.match` и размера окна поиска опоры.
-VERIFY_VERSION = "2026-09-14"
+# 2026-10-30: опора `_find_support` больше не входит в `confirmed` (она
+# `support="mechanical"`, счёт — в `stats.mechanical`) — доля упадёт.
+VERIFY_VERSION = "2026-10-30"
 
 _SUPPORT_MIN = 0.6
 _TIME_HINT_MIN = 0.35
@@ -1912,15 +1914,22 @@ def verify_protocol(result: dict, transcript_text: str, user_notes: str = "",
 
     # Модель цитату не нашла или переврала — ищем опору сами, по основам слов
     # в окне из трёх реплик. Иначе честно сказанное уходит в «требуют проверки».
+    # ⚠️ Это НЕ подтверждение (ревью 30.10): совпадение ≥60 % основ слов —
+    # механика, а не цитата. Пункт остаётся в протоколе с местом в разговоре,
+    # но помечен `support="mechanical"`: Word и интерфейс не пишут
+    # «подтверждено», Weeek не заводит такую задачу сам, а в долю
+    # подтверждённых она не входит (`stats.mechanical` — отдельно).
+    mechanical = 0
     if not ver.get("error"):
         for n in list(pending):
             key, idx, ptext, _owner = pending[n]
             hit = _find_support(ptext, text)
             if hit:
                 pending.pop(n)
+                mechanical += 1
                 ver[key][idx] = {"ok": True, "quote": hit["quote"], "t": None,
                                  "source": "transcript", "owner_ok": False,
-                                 "match": "approx"}
+                                 "match": "approx", "support": "mechanical"}
         _refine_tasks(result, ver, text)
 
     # Время — одной функцией и ровно один раз (Т11): ПОСЛЕ _refine_tasks,
@@ -1929,7 +1938,9 @@ def verify_protocol(result: dict, transcript_text: str, user_notes: str = "",
     # До него индексы списков успевали устареть.
     _apply_transcript_times(result, ver, text, weak=not ver.get("error"))
 
-    ver["stats"] = {"checked": len(points), "confirmed": len(points) - len(pending),
+    ver["stats"] = {"checked": len(points),
+                    "confirmed": len(points) - len(pending) - mechanical,
+                    "mechanical": mechanical,
                     "calls": calls, "failed_calls": failed_calls,
                     "version": VERIFY_VERSION}
     # Acceptance rule: no owner without verbatim grounds. Unverified point →
