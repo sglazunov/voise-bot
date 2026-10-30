@@ -755,7 +755,8 @@ class JobStore:
                     on_progress=self._on_analysis(job.id),
                     cancel_check=lambda: self._control.get(job.id, {}).get("cancel"),
                     keys=_owner_keys(job.owner),
-                    user_notes=job.user_notes, context=context)
+                    user_notes=job.user_notes, context=context,
+                    retrieve=_related_retriever(job, txt))
                 return self._maybe_verify(job, result, txt)
             finally:
                 self._add_usage(job, acc, rerun=rerun)
@@ -1566,6 +1567,31 @@ def _context_block(job: "Job") -> str:
     except Exception:
         log.debug("Контекст серии не собран", exc_info=True)
     return "".join("\n\n" + p for p in parts)
+
+
+def _related_retriever(job: "Job", txt: str):
+    """Хук похожих обсуждений на прошлых встречах для analyze_transcript —
+    или None, когда памяти встреч нет (файловый режим). Команда, серия и
+    документ — те же, что у index_job: куски этой встречи, если она уже
+    индексировалась (пересборка), исключаются по job.id."""
+    try:
+        from . import meeting_index
+        if not meeting_index.enabled():
+            return None
+    except Exception:  # noqa: BLE001 — справка не должна мешать сборке
+        log.debug("Память встреч недоступна — похожие обсуждения не ищутся", exc_info=True)
+        return None
+    team = _team(job.owner)
+    key = meeting_series.series_key(job.filename)
+
+    def retrieve(queries):
+        # None — одиночный проход: заметок карты нет, темы берутся из слов
+        # самой расшифровки.
+        if queries is None:
+            queries = meeting_index.salient_queries(txt)
+        return meeting_index.related_block(team, key, list(queries or []),
+                                           exclude_doc=job.id)
+    return retrieve
 
 
 _name_key = names.key      # общий ключ дедупликации, см. app/names.py

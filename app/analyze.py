@@ -23,6 +23,7 @@ import math
 import os
 import re
 import time
+from typing import Callable
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -376,7 +377,8 @@ def _with_extra(prompt: str, extra: str) -> str:
 # So the gate measures ONLY the speech, with those blocks stripped out.
 _INJECTED_BLOCK_RE = re.compile(
     r"\n*===\s*(УЧАСТНИКИ ЗВОНКА|ПОСТОЯННЫЙ КОНТЕКСТ|ТЕКСТ С ЭКРАНА"
-    r"|КОНТЕКСТ СЕРИИ ВСТРЕЧ|ПРОШЛАЯ ВСТРЕЧА ЭТОЙ СЕРИИ|РАНЬШЕ В ЭТОЙ СЕРИИ)"
+    r"|КОНТЕКСТ СЕРИИ ВСТРЕЧ|ПРОШЛАЯ ВСТРЕЧА ЭТОЙ СЕРИИ|РАНЬШЕ В ЭТОЙ СЕРИИ"
+    r"|ПОХОЖИЕ ОБСУЖДЕНИЯ НА ПРОШЛЫХ ВСТРЕЧАХ)"
     r"[\s\S]*?(?=\n\s*===|\Z)", re.IGNORECASE)
 
 
@@ -411,6 +413,54 @@ def _context_for_map(context: str) -> str:
             b = b[:_CTX_MAP_BLOCK_CHARS].rsplit("\n", 1)[0] + "\n…"
         out.append(b)
     return "\n\n".join(out)
+
+
+# Похожие обсуждения на прошлых встречах (фаза 2 RAG, п. 7): блок подбирается
+# ПО СОДЕРЖАНИЮ встречи и потому не может быть собран заранее вместе с
+# `context` — для длинной встречи темы известны только после карты. Хук
+# `retrieve` зовётся ровно один раз за сборку, и его текст идёт ТОЛЬКО в тот
+# запрос, который пишет протокол: одиночный проход или сведение. В карту он
+# не попадает: там контекст одинаков у всех кусков и кэшируется (см.
+# «Расход на вход срезан на треть»), а блок, помноженный на число кусков,
+# стоил бы дороже самой встречи.
+_RELATED_MAX_QUERIES = 12
+
+
+def _retrieved_block(retrieve, queries: list[str] | None) -> str:
+    """Текст хука похожих обсуждений или "" — осечка хука не роняет протокол."""
+    if retrieve is None:
+        return ""
+    try:
+        return str(retrieve(queries) or "").strip()
+    except Exception:  # noqa: BLE001 — справка, а не сам протокол
+        _LOG.warning("Похожие обсуждения не подобраны — собираю без них", exc_info=True)
+        return ""
+
+
+def _notes_queries(maps: list[dict], limit: int = _RELATED_MAX_QUERIES) -> list[str]:
+    """Формулировки для поиска по прошлым встречам из заметок карты: названия
+    тем, решения и задачи — первые `limit` строк в порядке встречи."""
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def add(s) -> None:
+        s = re.sub(r"\s+", " ", str(s or "")).strip()[:120]
+        if s and s.lower() not in seen:
+            seen.add(s.lower())
+            out.append(s)
+
+    for m in maps:
+        if not isinstance(m, dict):
+            continue
+        for t in m.get("topics") or []:
+            add(t.get("topic") if isinstance(t, dict) else t)
+        for d in m.get("decisions") or []:
+            add(d.get("text") if isinstance(d, dict) else d)
+        for t in m.get("tasks") or []:
+            add(t.get("task") if isinstance(t, dict) else t)
+    return out[:limit]
+
+
 # Timecodes are structure, not content: "[00:12]" must not count as speech.
 _TIMECODE_RE = re.compile(r"\[\d{1,2}:\d{2}(?::\d{2})?\]")
 # Minimum genuinely spoken words before a protocol may be generated. A meeting
@@ -663,12 +713,18 @@ def _protocol_from(backend, prompt: str, on_progress, stage: str,
 def analyze_transcript(transcript_text: str, provider: str | None = None,
                        extra_instructions: str = "", custom_prompt: str = "",
                        on_progress=None, cancel_check=None, keys: dict | None = None,
-                       user_notes: str = "", context: str = "") -> dict:
+                       user_notes: str = "", context: str = "",
+                       retrieve: Callable[[list[str] | None], str] | None = None) -> dict:
     """Send the transcript to the chosen LLM provider and return structured analysis.
 
     `context` — служебные блоки (участники звонка, постоянный контекст,
     карточка серии, итоги прошлой встречи): ставятся ПЕРЕД текстом в каждом
     запросе, в речи не считаются и цитатами для проверки не служат.
+    `retrieve(queries)` — хук похожих обсуждений на прошлых встречах
+    (meeting_index.related_block): перед одиночным проходом зовётся с None
+    (хук сам берёт ключевые слова расшифровки), перед сведением длинной
+    встречи — со списком тем из заметок карты. Возвращённый блок добавляется
+    в контекст ТОЛЬКО этого запроса, после остальных блоков, перед текстом.
 
     `provider` is one of "ollama" | "groq" | "gemini" | "yandex" | "gigachat" |
     "anthropic" | "auto" | None.
@@ -713,6 +769,8 @@ def analyze_transcript(transcript_text: str, provider: str | None = None,
     ctx_full = _ctx_prefix(context)
     ctx_map = _ctx_prefix(_context_for_map(context))
     if len(text) <= _MAX_CHARS:
+        # Заметок карты нет — похожие встречи подбираются по словам расшифровки.
+        ctx_full += _ctx_prefix(_retrieved_block(retrieve, None))
         if custom:
             prompt = _with_notes(custom + "\n\n" + ctx_full + "Транскрипция:\n" + text,
                                  user_notes)
@@ -795,6 +853,9 @@ def analyze_transcript(transcript_text: str, provider: str | None = None,
 
         notes = _notes_blob(maps)
         _ck()  # cancel before the final merge
+        # Темы встречи известны — похожие обсуждения ищутся по ним и идут
+        # только в сведение (карта уже прошла и блок в ней не нужен).
+        ctx_full += _ctx_prefix(_retrieved_block(retrieve, _notes_queries(maps)))
         if custom:
             prompt = _with_notes(
                 custom + "\n\n" + ctx_full

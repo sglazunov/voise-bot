@@ -360,3 +360,190 @@ def analysis_from_parsed(parsed: dict) -> dict:
                        for d in (parsed.get("done") or [])],
         "detailed": list(parsed.get("topics") or []),
     }
+
+
+# --------------------------------------------------------------------------- #
+# Похожие обсуждения на прошлых встречах — справка для сборки протокола
+# --------------------------------------------------------------------------- #
+# Фаза 2 плана RAG (п. 7): до этого в промпт шли только ПОСЛЕДНИЕ встречи
+# серии по дате («раньше в этой серии»). Если бюджет сайта обсуждали два
+# месяца назад или на встрече ДРУГОЙ серии, модель об этом не знала. Здесь
+# прошлые протоколы подбираются ПО СОДЕРЖАНИЮ текущей встречи: по темам из
+# заметок карты (длинная встреча) или по ключевым словам расшифровки
+# (короткая, где заметок ещё нет). Бюджет жёсткий — это справка, а не вторая
+# расшифровка: лишний килобайт в сведении стоит денег на каждой встрече.
+RELATED_HEADER = "=== ПОХОЖИЕ ОБСУЖДЕНИЯ НА ПРОШЛЫХ ВСТРЕЧАХ"
+_RELATED_MAX_DOCS = 4          # встреч в блоке — больше модель не свяжет
+_RELATED_PER_DOC = 2           # кусков на встречу
+_RELATED_SNIPPET = 400         # символов куска в строке блока
+_RELATED_MAX_QUERIES = 8       # запросов к базе на одну сборку
+_RELATED_SEARCH_LIMIT = 8      # кусков на один запрос
+_RELATED_MIN_SERIES_DOCS = 2   # меньше встреч своей серии — ищем по всей команде
+
+# Слова-паразиты устной речи: длинные, частые и ни о чём. Без этого списка
+# «наверное» и «соответственно» вытесняли из ключевых слов названия проектов.
+_SPEECH_FILLERS = frozenset("""
+наверное поэтому сейчас вообще например потому можно нужно просто давайте
+смотрите смотри понятно получается соответственно короче допустим собственно
+конечно именно практически естественно действительно наверно какой-то
+какие-то какую-то какая-то который которые которая которую сегодня завтра
+вчера хорошо спасибо пожалуйста давай ладно правильно неправильно насчет
+насчёт вопрос вопросы момент моменты человек люди ребята коллеги минуту
+секунду слушай слушайте скажи скажите думаю думаем кажется честно
+нормально понял поняла поняли знаю знаете знаем будет будут будем будете
+может можем могут хочу хотим хотят также тогда всегда никогда опять снова
+только очень много мало больше меньше дальше потом после перед между
+""".split())
+_LATIN_WORD_RE = re.compile(r"^[A-Za-z][A-Za-z0-9.\-]{1,}$")
+_CYR_WORD_RE = re.compile(r"^[А-Яа-яЁё][А-Яа-яЁё\-]+$")
+_CAPITAL_RE = re.compile(r"^[А-ЯЁ][а-яё]{2,}$")
+# «500 тысяч», «3 млн», «20 %», «две недели» не ловим — только цифры с
+# единицей: именно такие числа запоминаются и отличают обсуждение.
+_NUM_UNIT_RE = re.compile(
+    r"(?<![\d:\[])(\d{1,3}(?:[ \u00a0]?\d{3})*(?:[.,]\d+)?)\s?"
+    r"(тыс\w*|млн\w*|млрд\w*|руб\w*|₽|%|процент\w*|час(?:а|ов)?|дн(?:я|ей)|"
+    r"недел\w*|мес(?:яц\w*)?|штук\w*|шт\.?|человек\w*|\$|€|евро|доллар\w*)(?![\w:])",
+    re.IGNORECASE)
+_SENT_END_RE = re.compile(r"[.!?…]$")
+_MIN_LONG_WORD = 7
+
+
+def salient_queries(transcript: str, limit: int = 6) -> list[str]:
+    """Ключевые слова встречи БЕЗ модели — для короткой встречи, где заметок
+    карты ещё нет. Кандидаты: латиница (названия систем — Weeek, CRM, API),
+    слова с заглавной буквы не в начале предложения (имена, проекты), числа с
+    единицей («500 тысяч»), длинные слова. Ранжирование по частоте с весом
+    за вид кандидата; служебные блоки, таймкоды, подписи говорящих, стоп-слова
+    и слова-паразиты не считаются."""
+    from .analyze import _ASK_GENERIC, _ASK_STOPWORDS, _INJECTED_BLOCK_RE, _strip_labels
+    text = _strip_labels(_INJECTED_BLOCK_RE.sub(" ", transcript or ""))
+    scores: dict[str, float] = {}
+    shown: dict[str, str] = {}
+
+    def add(key: str, weight: float, show: str) -> None:
+        scores[key] = scores.get(key, 0.0) + weight
+        shown.setdefault(key, show)
+
+    for m in _NUM_UNIT_RE.finditer(text):
+        phrase = re.sub(r"\s+", " ", m.group(0)).strip()
+        add(phrase.lower(), 2.0, phrase)
+    for line in text.splitlines():
+        prev = ""
+        for raw in line.split():
+            w = raw.strip(".,;:!?()[]«»\"'“”—–-")
+            if not w:
+                prev = raw
+                continue
+            low = w.lower().replace("ё", "е")
+            if low in _ASK_STOPWORDS or low in _ASK_GENERIC or low in _SPEECH_FILLERS:
+                prev = raw
+                continue
+            if _LATIN_WORD_RE.match(w) and len(w) >= 2:
+                add(low, 3.0, w)
+            elif _CYR_WORD_RE.match(w):
+                mid = bool(prev) and not _SENT_END_RE.search(prev)
+                if _CAPITAL_RE.match(w) and mid:
+                    add(low, 2.0, w)
+                elif len(low) >= _MIN_LONG_WORD:
+                    add(low, 1.0, low)
+            prev = raw
+    ranked = sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))
+    return [shown[k] for k, _s in ranked[:max(int(limit), 0)]]
+
+
+def _fts_query(phrase: str) -> str:
+    """Формулировка темы → запрос к полнотекстовому индексу по образцу
+    analyze._fts_queries: значимые слова через «or» («Бюджет сайта и сроки
+    редизайна» → «бюджет or сайта or сроки or редизайна»)."""
+    from .analyze import _ASK_GENERIC, _ASK_STOPWORDS, _norm_for_match
+    words = [w for w in _norm_for_match(phrase).split()
+             if w not in _ASK_STOPWORDS and w not in _ASK_GENERIC
+             and w not in _SPEECH_FILLERS and len(w) >= 2]
+    return " or ".join(dict.fromkeys(words))
+
+
+def _related_rows(db, team: str, series_key: str, q: str,
+                  exclude_doc: str | None) -> list[dict]:
+    """Куски протоколов под один запрос: сначала своя серия, потом вся
+    команда, если в серии нашлось меньше двух встреч (тема могла звучать на
+    встрече другой серии — «бюджет сайта» обсуждают и лидеры, и проект)."""
+    rows = []
+    if series_key:
+        rows = db.chunks_search(team, q, limit=_RELATED_SEARCH_LIMIT,
+                                series_key=series_key, kinds=(KIND_PROTOCOL,))
+        rows = [r for r in rows if r.get("doc_id") != exclude_doc]
+    if len({r.get("doc_id") for r in rows}) < _RELATED_MIN_SERIES_DOCS:
+        more = db.chunks_search(team, q, limit=_RELATED_SEARCH_LIMIT,
+                                kinds=(KIND_PROTOCOL,))
+        rows += [r for r in more if r.get("doc_id") != exclude_doc]
+    return rows
+
+
+def related_block(team: str, series_key: str, queries: list[str],
+                  exclude_doc: str | None = None, budget_chars: int = 2500) -> str:
+    """Блок «ПОХОЖИЕ ОБСУЖДЕНИЯ НА ПРОШЛЫХ ВСТРЕЧАХ» для промпта сборки.
+
+    По каждой формулировке — поиск по протоколам команды; результаты
+    сливаются: кусок, найденный несколькими запросами, выше; при равном
+    ранге свежая встреча предпочтительнее. Не больше `_RELATED_MAX_DOCS`
+    встреч, `_RELATED_PER_DOC` кусков на встречу, текущая встреча
+    (`exclude_doc`) исключается. Пусто → "". Любая ошибка базы → "" и
+    предупреждение в лог: справка не должна ронять протокол."""
+    from . import db
+    qs: list[str] = []
+    for raw in queries or []:
+        q = _fts_query(str(raw or ""))
+        if q and q not in qs:
+            qs.append(q)
+    qs = qs[:_RELATED_MAX_QUERIES]
+    if not qs or not team:
+        return ""
+    # (doc_id, idx) → {row, hits, rank}
+    found: dict[tuple, dict] = {}
+    try:
+        for q in qs:
+            for r in _related_rows(db, team, series_key or "", q, exclude_doc):
+                key = (r.get("doc_id"), int(r.get("idx") or 0))
+                rec = found.setdefault(key, {"row": r, "hits": 0, "rank": 0.0})
+                rec["hits"] += 1
+                rec["rank"] += float(r.get("rank") or 0.0)
+    except Exception:  # noqa: BLE001 — кривой tsquery или база недоступна
+        log.warning("Похожие обсуждения не собраны (команда %s)", team, exc_info=True)
+        return ""
+    if not found:
+        return ""
+
+    def _ts(rec: dict) -> float:
+        return float(rec["row"].get("meeting_ts") or 0.0)
+
+    ordered = sorted(found.values(),
+                     key=lambda rec: (-rec["hits"], -rec["rank"], -_ts(rec)))
+    by_doc: dict[str, list[dict]] = {}
+    for rec in ordered:
+        doc = str(rec["row"].get("doc_id") or "")
+        if doc not in by_doc:
+            if len(by_doc) >= _RELATED_MAX_DOCS:
+                continue
+            by_doc[doc] = []
+        if len(by_doc[doc]) < _RELATED_PER_DOC:
+            by_doc[doc].append(rec)
+    lines = [f"{RELATED_HEADER} (справка для понимания, НЕ переноси в "
+             "решения/задачи этой встречи) ==="]
+    used = len(lines[0])
+    # Встречи идут по убыванию релевантности, куски внутри встречи — по
+    # порядку разделов протокола. Бюджет кончился — дальше не смотрим: менее
+    # релевантная встреча не должна влезать за счёт более короткой строки.
+    picked = [rec for recs in by_doc.values()
+              for rec in sorted(recs, key=lambda x: int(x["row"].get("idx") or 0))]
+    for rec in picked:
+        r = rec["row"]
+        snippet = re.sub(r"\s+", " ", str(r.get("text") or "")).strip()
+        if len(snippet) > _RELATED_SNIPPET:
+            snippet = snippet[:_RELATED_SNIPPET].rsplit(" ", 1)[0] + "…"
+        line = (f"• {r.get('title') or 'встреча'}, "
+                f"{r.get('meeting_date') or '?'}: {snippet}")
+        if used + len(line) + 1 > budget_chars:
+            break
+        lines.append(line)
+        used += len(line) + 1
+    return "\n".join(lines) if len(lines) > 1 else ""
