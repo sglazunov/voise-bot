@@ -495,3 +495,29 @@ class TestСтопИзТелеграма:
         assert "555" not in telegram._RECOVER_WAIT
         texts = [m["text"] for m in tg.sent()]
         assert any("отменена" in t for t in texts) and "Останавливаю" in texts[-1]
+
+    # Второй раунд ревью 30.10 (§5, регресс): брошенный /recover, срок которого
+    # истёк, глотал следующий «стоп» — ожидание не чистилось, срок не
+    # проверялся. Истёкшее ожидание — это «ожидания нет».
+    def test_истёкший_recover_не_глотает_стоп(self, client, tg, monkeypatch):
+        from app.automation.scheduler import scheduler
+        calls = []
+        monkeypatch.setattr(scheduler, "stop_recording",
+                            lambda user, task_id=None: (calls.append(user),
+                                                        {"ok": True, "detail": "Останавливаю запись (1)…"})[1])
+        self._linked(client, tg)
+        telegram.handle_update(_msg(555, "/recover"))
+        telegram._RECOVER_WAIT["555"] = time.time() - 1          # бросили и забыли
+        telegram.handle_update(_msg(555, "стоп"))
+        assert calls == ["alice"]
+        assert "555" not in telegram._RECOVER_WAIT
+        assert "Останавливаю" in tg.sent()[-1]["text"]
+
+    def test_истёкший_recover_и_отмена_молчит(self, client, tg):
+        self._linked(client, tg)
+        telegram.handle_update(_msg(555, "/recover"))
+        telegram._RECOVER_WAIT["555"] = time.time() - 1
+        n = len(tg.sent())
+        telegram.handle_update(_msg(555, "/cancel"))
+        assert len(tg.sent()) == n                    # отменять нечего
+        assert "555" not in telegram._RECOVER_WAIT
