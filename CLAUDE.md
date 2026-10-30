@@ -2972,6 +2972,30 @@ LLM-ключи (`user_creds`), задачи и протоколы (`owner` = к�
   при батче 50 откат на полный фрагмент из-за одного пункта без якорей
   может быть частым, смотреть `window_share` на бою.
 
+**Фаза 1 — эмбеддинги и гибридный поиск (`VTX_EMBED_PROVIDER`, по
+умолчанию пусто = выключено):** `app/embeddings.py` — Yandex
+(text-search-doc/query, 256), Gemini (gemini-embedding-001, 768 через
+outputDimensionality), Ollama (`/api/embed`, nomic-embed-text), один
+интерфейс `embed_texts(texts, kind)`; ключи как у движков (команда →
+`.env`); ошибка провайдера = пустой вектор и warning `vtx.embeddings`, после
+первой ошибки пачка дальше не шлётся. ⚠️ Векторная часть базы НАРОЧНО вне
+`_SCHEMA` (`db.vector_ready(dim)`: CREATE EXTENSION / ADD COLUMN
+`embedding vector(dim)` / hnsw один раз на процесс, в try/except — общая
+схема выполняется одним `execute`, и на образе без pgvector упала бы
+целиком). Образ `db` в compose теперь `pgvector/pgvector:pg16` (том pgdata
+совместим — та же мажорная версия). Смена провайдера/размерности — только
+через `DROP COLUMN embedding` и `scripts/embed_backfill.py`, `vector_ready`
+это обнаруживает и пишет подсказку. Векторы считаются в
+`meeting_index.store_doc` (задача и индексатор архива, best-effort, после
+статуса `done` и вне лока `_set`) и досчитываются `embed_backfill.py --user
+ЛОГИН [--apply --limit N]`. `analyze.retrieve_meetings` = полнотекст +
+`chunks_vector_search` через Reciprocal Rank Fusion (k=60); без векторов —
+ровно прежний полнотекст. ⚠️ HTTP провайдеров и SQL pgvector живьём не
+проверены: первый `embed_backfill.py --apply --limit 50` на бою и есть
+проверка (`select count(*), count(embedding) from meeting_chunks`).
+Тесты фазы 1–2 — `test_embeddings` (31), `test_hybrid_retrieval` (12),
+`test_verify_windows` (15), `test_related_retrieval` (25); всего 1231.
+
 ## Особенности, которые легко нарушить
 - **Регистрация открыта всем**, кто знает адрес (создаётся отдельная пустая
   команда). Ограничение — только на уровне прокси/VPN; переключателя в приложении
