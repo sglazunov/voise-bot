@@ -74,12 +74,12 @@ describe("страницы основателя передают выбранн�
     expect(post.body.yandex_disk.token).toBeUndefined();
   });
 
-  it("Облако: 403 на выбранную команду — откат на свою", async () => {
+  it.each([["Облако", Cloud], ["Weeek", Weeek]])("%s: 403 на выбранную команду — откат на свою", async (_, Page) => {
     sessionStorage.setItem("vtx.manage-team", "bob");
     const calls = mockFetch((url) => (url.includes("team=bob")
       ? reply({ detail: "Только основатель сервера." }, 403)
       : reply({ ...SETTINGS, team: "own", can_manage_teams: false })));
-    show(<Cloud />);
+    show(<Page />);
     await waitFor(() => expect(calls.some((c) => c.url === "/api/automation/settings")).toBe(true));
     expect(sessionStorage.getItem("vtx.manage-team")).toBeNull();
   });

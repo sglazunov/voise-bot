@@ -2105,7 +2105,8 @@ class _LoginSession:
         return bool(self._thread and self._thread.is_alive())
 
     def touch(self) -> None:
-        """Окном пользуются: запрос экрана или действие."""
+        """Окном пользуются: запрос экрана или действие. Зовёт `login_get` —
+        через неё идёт каждый запрос интерфейса к окну."""
         self._touched = time.time()
 
     def expired(self, now: float | None = None) -> str:
@@ -2118,7 +2119,6 @@ class _LoginSession:
         return ""
 
     def screenshot(self) -> bytes | None:
-        self.touch()
         return self._shot
 
     def error(self) -> str:
@@ -2126,7 +2126,6 @@ class _LoginSession:
 
     def send(self, kind: str, **kw) -> None:
         """Клик/ввод/навигация. Выполняется в потоке браузера."""
-        self.touch()
         self._cmds.put((kind, kw))
 
     def close(self, wait: float = 10.0) -> None:
