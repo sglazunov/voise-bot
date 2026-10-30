@@ -275,6 +275,13 @@ class Scheduler:
         # Фильтр (проект, доска), которым отобраны карточки команды на прошлом
         # опросе: его смена убирает карточки прежней доски (_poll).
         self._poll_scope: dict[str, tuple[str, str]] = {}
+        # Удаление аккаунта (forget_team → forget_done): команды, которые
+        # сейчас удаляются, их забытые карточки (вернуть, если удаление
+        # сорвалось) и счётчик удалений — идущий опрос сверяет его и не
+        # воскрешает карточки удалённой команды.
+        self._forgetting: set[str] = set()
+        self._forgotten: dict[str, list] = {}
+        self._forget_epoch: dict[str, int] = {}
         self._boot_time = 0.0  # session start; meetings older than this are missed
 
     # -- lifecycle ----------------------------------------------------------
@@ -663,6 +670,7 @@ class Scheduler:
             return timezone.utc
 
     def _poll(self, user: str, cfg: dict) -> None:
+        epoch = self._forget_epoch.get(user, 0)
         meetings = weeek.upcoming_meetings(
             cfg.get("weeek_token"), cfg.get("weeek_project_id"),
             board_id=cfg.get("weeek_board_id"), local_tz=self._tz(cfg))
@@ -680,6 +688,11 @@ class Scheduler:
         # записи. Держать их на время запроса к БД незачем.
         snaps_for_dedup = snapshots.load(user)
         with self._lock:
+            if user in self._forgetting or self._forget_epoch.get(user, 0) != epoch:
+                # Аккаунт удаляют (или удалили), пока шёл запрос к Weeek: его
+                # выдача вернула бы карточки удалённой команды, и в той же
+                # итерации _maybe_trigger мог запустить запись.
+                return
             for m in meetings:
                 # The Weeek «Запись встречи» checkbox (True=record, False=skip,
                 # None=field absent → fall back to filters). Re-read every poll so
@@ -1134,6 +1147,11 @@ class Scheduler:
             place = _meeting_place(st, cfg, log, out)
             up = delivery.upload_with_retry(out, cfg, log, subfolder=place["sub"] or None,
                                             owner=st.owner)
+            if st.forgotten:
+                # Выгрузка идёт минутами, и аккаунт могли удалить за это время:
+                # проверки сразу после записи мало (адверсариальное ревью 30.10).
+                store_drop_sidecars(out, with_media=True)
+                return
             cloud_folders.placed(st.owner, st.title, place, up, "recording")
             st.cloud_path = up.get("path") or st.cloud_path
             if up.get("ok"):
@@ -1177,6 +1195,9 @@ class Scheduler:
             do_protocol = (bool(st.do_protocol) if is_adhoc(st.task_id)
                            else _protocol_wanted(cfg, user, st.title, log))
             job = None
+            if st.forgotten:
+                store_drop_sidecars(out, with_media=True)
+                return
             if do_transcribe:
                 stage = ("Распознаю речь и собираю протокол…" if do_protocol
                          else "Распознаю речь…")
@@ -1208,6 +1229,12 @@ class Scheduler:
                     live_path=self._live_path_if_any(out, log),
                     delete_audio_when_done=delivered_elsewhere,
                     owner=user)
+                if st.forgotten:
+                    # Удаление пришло между проверкой и созданием задачи: она
+                    # уже в хранилище и досталась бы следующему владельцу логина.
+                    store.discard(job.id)
+                    store_drop_sidecars(out, with_media=True)
+                    return
                 st.job_id = job.id
                 snapshots.save(st)  # remember the job across restarts
                 # Строка исхода уже записана до создания задачи — дописываем в
@@ -1284,6 +1311,8 @@ class Scheduler:
                                             owner=st.owner)
             cloud_folders.placed(st.owner, st.title, place, up, "recording")
             st.cloud_path = up.get("path") or st.cloud_path
+            if st.forgotten:
+                return            # удалили, пока шла выгрузка — Weeek не трогаем
             if not up.get("ok"):
                 st.upload_error = up.get("error") or "облако недоступно"
                 snapshots.save(st)
@@ -1362,6 +1391,11 @@ class Scheduler:
         alive_states = ("queued", "running", "paused", "analyzing")
         deadline = time.time() + 2 * 3600
         while True:
+            if st.forgotten:
+                # Аккаунт удалён вместе с задачей: это не «пропала после
+                # перезапуска», и писать в Weeek и Telegram удалённой команды
+                # нечего (адверсариальное ревью 30.10).
+                return
             job = store.get(job_id)
             if job is None:
                 report("⚠ Протокол не прикреплён: задача распознавания пропала "
@@ -1376,7 +1410,7 @@ class Scheduler:
             time.sleep(5)
 
         job = store.get(job_id)
-        if not job:
+        if not job or st.forgotten:
             return
         where = "в облаке" if st.cloud_url else "локально"
         provs = getattr(job, "docx_providers", None)
@@ -1732,8 +1766,11 @@ class Scheduler:
         Отдельно от строки задачи распознавания: встреча, на которую бот не
         пришёл, задачи не порождает вовсе, а «явка бота» считается именно от
         запланированных встреч (docs/ТЗ-МЕТРИКИ.md И36, §14.2).
+        Карточка удалённой команды строки не пишет: её унаследовал бы
+        следующий владелец логина.
         """
-        stats.record_meeting(st, outcome)
+        if not st.forgotten:
+            stats.record_meeting(st, outcome)
 
     def _set(self, st: MeetingState, state: str, detail: str) -> None:
         with self._lock:
@@ -1940,14 +1977,31 @@ class Scheduler:
         же логином видел бы чужие встречи на странице «Встречи»."""
         n = 0
         with self._lock:
+            self._forgetting.add(team)
+            self._forget_epoch[team] = self._forget_epoch.get(team, 0) + 1
+            gone = self._forgotten.setdefault(team, [])
             for key, st in list(self._states.items()):
                 if st.owner != team:
                     continue
                 st.stop_flag = True
                 st.forgotten = True
                 self._states.pop(key, None)
+                gone.append(st)
                 n += 1
         return n
+
+    def forget_done(self, team: str, restore: bool = False) -> None:
+        """Удаление аккаунта закончилось. `restore=True` — сорвалось, аккаунт
+        остался: карточки возвращаются (идущая запись уже остановлена, но
+        дальше сохраняется и обрабатывается как обычно). Иначе логин свободен
+        и опрос Weeek снова работает — уже для нового владельца."""
+        with self._lock:
+            self._forgetting.discard(team)
+            gone = self._forgotten.pop(team, [])
+            if restore:
+                for st in gone:
+                    st.forgotten = False
+                    self._states.setdefault(st.key, st)
 
     def stop_recording(self, user: str | None = None, task_id=None) -> dict:
         """Stop recording(s) in progress. With `task_id` — just that meeting;

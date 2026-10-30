@@ -582,7 +582,7 @@ class JobStore:
     def index_search(self, job: Job) -> None:
         """Д14: (re)index this job's transcript + protocol for full-text search.
         Postgres-only (file backend searches by scanning); best-effort."""
-        if not db.enabled():
+        if not db.enabled() or job.id not in self._jobs:
             return
         try:
             parts = []
@@ -710,6 +710,8 @@ class JobStore:
         """
         if not acc or not acc.get("calls"):
             return
+        if job.id not in self._jobs:
+            return        # задачу удалили вместе с аккаунтом — расход не пишем
         # Поимённый список вызовов уезжает в журнал событий, а в задаче остаются
         # только итоги. ⚠️ Хранить его ещё и в `Job.llm_usage` нельзя: это
         # JSONB-колонка, которую переписывает КАЖДОЕ обновление задачи, а список
@@ -1011,14 +1013,46 @@ class JobStore:
         owner = str(owner or "")
         if not owner:
             return 0
-        doomed = [j for j in list(self._jobs.values()) if j.owner == owner]
+        return self._drop([j for j in list(self._jobs.values()) if j.owner == owner])
+
+    def discard(self, job_id: str) -> None:
+        """Удалить одну задачу с файлами — задачу удалённой команды, которую
+        планировщик успел создать в момент удаления аккаунта."""
+        job = self._jobs.get(job_id)
+        if job is not None:
+            self._drop([job])
+
+    def _drop(self, doomed: list) -> int:
+        """Остановить и удалить задачи. Порядок важен (адверсариальное ревью
+        30.10): сначала отмена, потом запись хранилища, и только после неё —
+        файлы. Хранилище не приняло запись — задачи возвращаются в память и
+        исключение уходит наверх: аккаунт не удаляется, повтор найдёт их снова
+        (иначе строки в базе пережили бы аккаунт навсегда)."""
+        if not doomed:
+            return 0
         for job in doomed:
+            # `_control` — словарь флагов, а не объект: прежний `ctl.cancel()`
+            # падал с AttributeError, ошибка глушилась, и задача доделывалась на
+            # ключах удалённой команды. Приостановленная крутилась вечно и при
+            # одном воркере останавливала распознавание ВСЕХ команд. Флаги
+            # ставятся в ТОТ ЖЕ словарь, что держит воркер, и словарь остаётся
+            # в _control: сборка протокола спрашивает отмену через него.
             ctl = self._control.get(job.id)
             if ctl is not None:
-                try:
-                    ctl.cancel()
-                except Exception:  # noqa: BLE001
-                    pass
+                ctl["cancel"] = True
+                ctl["pause"] = False
+        with self._lock:
+            for job in doomed:
+                self._jobs.pop(job.id, None)
+            try:
+                # Без аргумента _save переписывает набор целиком: на Postgres
+                # строки задач, которых нет в памяти, удаляются (db.jobs_save).
+                self._save()
+            except Exception:
+                for job in doomed:
+                    self._jobs[job.id] = job
+                raise
+        for job in doomed:
             self._delete_job_files(job)
             if db.enabled():
                 try:
@@ -1026,15 +1060,21 @@ class JobStore:
                 except Exception:  # noqa: BLE001
                     log.warning("Не удалось убрать задачу %s из индекса", job.id,
                                 exc_info=True)
-            self._jobs.pop(job.id, None)
             self._partial.pop(job.id, None)
-            self._control.pop(job.id, None)
-        if doomed:
-            # Без аргумента _save переписывает набор целиком: на Postgres
-            # строки задач, которых нет в памяти, удаляются (db.jobs_save).
-            with self._lock:
-                self._save()
+            if job.id in self._control and job.status not in (
+                    STATUS_RUNNING, STATUS_PAUSED, STATUS_ANALYZING):
+                self._control.pop(job.id, None)   # воркера нет — флаги не нужны
         return len(doomed)
+
+    def _finalise_gone(self, job: Job) -> None:
+        """Воркер дошёл до конца задачи, которую удалили, пока она шла: всё,
+        что он успел дописать (расшифровка, протокол), не должно остаться на
+        диске — убрать это потом уже некому."""
+        self._delete_job_files(job)
+        self._partial.pop(job.id, None)
+        self._control.pop(job.id, None)
+        self._analysis.pop(job.id, None)
+        self._stage.pop(job.id, None)
 
     def _delete_job_files(self, job: Job) -> None:
         for fmt in ("txt", "plain", "srt", "json", "docx", "screen.txt"):
@@ -1074,7 +1114,11 @@ class JobStore:
         # ⚠️ Отменённая задача тоже пишется в метрики. Раньше условие ловило
         # только done/error, и отменённая встреча исчезала бесследно — даже
         # как отказ (И2 в docs/ТЗ-МЕТРИКИ.md).
-        if kw.get("status") in (STATUS_DONE, STATUS_ERROR, STATUS_CANCELLED):
+        # ⚠️ Задачу удалили вместе с аккаунтом, а воркер дописывает её статус:
+        # строка метрики с названием встречи и индекс поиска создались бы снова
+        # и достались следующему владельцу логина (адверсариальное ревью 30.10).
+        if (kw.get("status") in (STATUS_DONE, STATUS_ERROR, STATUS_CANCELLED)
+                and job.id in self._jobs):
             from . import stats
             stats.record(job)
             if kw.get("status") == STATUS_DONE:
@@ -1511,6 +1555,8 @@ class JobStore:
         finally:
             if post_locked:
                 self._post_lock.release()
+            if job.id not in self._jobs:
+                self._finalise_gone(job)
             # Исходник удаляем ТОЛЬКО у успешно завершённой задачи. finally
             # срабатывает и на ветке except, а карточка упавшей задачи прямым
             # текстом обещает «Запись цела — нажмите «Повторить»»: без исходника
