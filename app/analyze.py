@@ -2125,6 +2125,91 @@ def refill_empty_topics(result: dict, transcript_text: str,
     return result
 
 
+# Служебные слова, по которым искать бессмысленно: «что решили?» нашло бы «что»
+# в каждом окне. Короткие слова (2-3 буквы) ищутся ЦЕЛИКОМ — это названия
+# проектов и аббревиатуры: «ОД», «CRM», «ИИ», «API».
+_ASK_STOPWORDS = frozenset("""
+а и в во на не ни но да ну же бы ли то это эта этот эти тот та те как так там тут
+где кто что чем чем чего кому кем о об обо от до за из к ко с со у по под над без
+при про для или если тоже уже еще все вся весь был была были было есть
+быть мы вы он она они оно я ты его ее их им ими нас вас мне тебе себе сам сама
+сами свой своя свои свое мой моя мои наш наша наши ваш ваша ваши
+когда куда зачем почему сколько какой какая какие каких который которая которые
+the a an of to in on is are was were be and or
+""".split())
+# Слова про саму встречу: искать по ним нельзя («решили» есть в каждом окне),
+# но они говорят, что вопрос ОБЩИЙ («о чём говорили?», «что решили?») — тогда
+# модели нужна вся расшифровка, а не просьба уточнить.
+_ASK_GENERIC = frozenset("""
+решили решено решение решения решений обсуждали обсуждалось обсудили говорили
+сказали сказал итог итоги вывод выводы кратко коротко резюме суть
+встреча встрече встречи встречу разговор разговора
+""".split())
+
+
+def _ask_terms(question: str) -> tuple[set[str], set[str], bool]:
+    """(основы длинных слов, короткие слова целиком, есть ли общие слова) из
+    вопроса. `_norm_for_match` уже свёл «ё» к «е» и снял регистр."""
+    stems: set[str] = set()
+    whole: set[str] = set()
+    generic = False
+    for w in _norm_for_match(question).split():
+        if w in _ASK_STOPWORDS or len(w) < 2:
+            continue
+        if w in _ASK_GENERIC:
+            generic = True
+        elif len(w) >= 4:
+            stems.add(w[:5])
+        else:
+            whole.add(w)
+    return stems, whole, generic
+
+
+def _pick_windows(text: str, question: str, budget_chars: int,
+                  win: int = 40) -> tuple[list[str], str]:
+    """Окна расшифровки под вопрос и исход поиска.
+
+    Исход: ``hit`` — нашлись окна по словам вопроса (отдаются только они);
+    ``miss`` — слова есть, совпадений нет: отдаётся расшифровка ЦЕЛИКОМ в
+    бюджет, и модель сама решает — общий вопрос («о чём говорили?») получает
+    ответ, вопрос про отсутствующую тему — честное «не обсуждалось»;
+    ``empty`` — искать не по чему (одни служебные слова), окон нет.
+
+    Было: при нулевом совпадении в промпт попадало ПЕРВОЕ окно (проверка
+    «ничего не нашли» стояла после добавления), и модель отвечала по
+    случайному началу встречи; слова короче четырёх букв отбрасывались, так
+    что «что по ОД?» не находило ничего (ревью RAG 30.10).
+    """
+    stems, whole, generic = _ask_terms(question)
+    if not stems and not whole:
+        if generic:                     # «о чём говорили?» — вся встреча
+            return ([text[:budget_chars]] if text else []), "miss"
+        return [], "empty"
+    lines = text.splitlines()
+    windows: list[tuple[float, int, str]] = []
+    for i in range(0, max(len(lines), 1), win // 2):
+        chunk = "\n".join(lines[i:i + win])
+        if not chunk.strip():
+            continue
+        words = _norm_for_match(chunk).split()
+        cs = {w[:5] for w in words if len(w) >= 4}
+        hits = len(stems & cs) + len(whole & set(words))
+        if hits:
+            windows.append((hits / (len(stems) + len(whole)), i, chunk))
+    if not windows:
+        return ([text[:budget_chars]] if text else []), "miss"
+    windows.sort(key=lambda x: (-x[0], x[1]))
+    picked, used = [], 0
+    for _score, _i, chunk in windows:
+        if used + len(chunk) > budget_chars:
+            continue
+        picked.append(chunk)
+        used += len(chunk)
+        if used >= budget_chars * 0.9:
+            break
+    return picked, "hit"
+
+
 def ask_meeting(transcript_text: str, question: str,
                 provider: str | None = None, keys: dict | None = None,
                 user_notes: str = "") -> str:
@@ -2134,30 +2219,18 @@ def ask_meeting(transcript_text: str, question: str,
     budget_chars = max(int(0.6 * _ctx_budget(backend)) * 3, 8000)
     text = (transcript_text or "").strip()
 
-    # Cheap retrieval: score ~40-line windows by stem overlap with the question.
-    lines = text.splitlines()
-    win = 40
-    q_stems = {w[:5] for w in _norm_for_match(question).split() if len(w) >= 4}
-    windows: list[tuple[float, str]] = []
-    for i in range(0, max(len(lines), 1), win // 2):
-        chunk = "\n".join(lines[i:i + win])
-        if not chunk.strip():
-            continue
-        cs = {w[:5] for w in _norm_for_match(chunk).split() if len(w) >= 4}
-        score = len(q_stems & cs) / (len(q_stems) or 1)
-        windows.append((score, chunk))
-    windows.sort(key=lambda x: -x[0])
-    picked, used = [], 0
-    for score, chunk in windows:
-        if used + len(chunk) > budget_chars:
-            continue
-        if score <= 0 and picked:
-            break
-        picked.append(chunk)
-        used += len(chunk)
-        if used >= budget_chars * 0.9:
-            break
-    fragments = "\n\n---\n\n".join(picked) or text[:budget_chars]
+    picked, how = _pick_windows(text, question, budget_chars)
+    if how == "empty":
+        return ("Уточните вопрос: по каким словам искать в расшифровке? "
+                "Например: «что решили по оплате?» или «срок по сайту?».")
+    fragments = "\n\n---\n\n".join(picked)
+    note = ""
+    if how == "miss":
+        note = ("Ключевые слова вопроса в расшифровке не нашлись, поэтому ниже "
+                "она целиком" + (" (начало — всё не влезло)"
+                                 if len(text) > budget_chars else "")
+                + ". Если вопрос общий — ответь по всему разговору; если про "
+                "конкретную тему, которой здесь нет, — так и скажи.\n\n")
 
     prompt = (
         "Ниже — фрагменты расшифровки ОДНОЙ рабочей встречи (реплики с "
@@ -2168,7 +2241,7 @@ def ask_meeting(transcript_text: str, question: str,
         "ОБЯЗАТЕЛЬНО укажи таймкод(ы) [мм:сс] мест, на которых основан ответ. "
         "Если в расшифровке ответа нет — прямо скажи «на встрече это не "
         "обсуждалось» и ничего не выдумывай.\n\n"
-        + _with_notes("", user_notes)
+        + _with_notes("", user_notes) + note
         + f"Фрагменты расшифровки:\n{fragments}\n\nВопрос: {question}")
     with usage.stage(usage.ASK):
         return _stream_complete(backend, prompt, 1500, None, "Ищу ответ…",
