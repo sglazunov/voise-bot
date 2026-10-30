@@ -3,6 +3,7 @@
 
     docker compose config --format json | python3 scripts/check_compose_config.py [--fresh]
     docker compose config --format json | python3 scripts/check_compose_config.py --alter-role-sql
+    docker compose config --format json | python3 scripts/check_compose_config.py --db-mode
 
 `docker compose config -q` ловит только синтаксис и незаданные `${…:?}`. Ошибку
 P0-1 ревью 30.10 он пропускал: compose валиден, а приложение не входит в базу —
@@ -21,6 +22,17 @@ P0-1 ревью 30.10 он пропускал: compose валиден, а при
 установке удалять нельзя, см. README «Пароль базы на старой установке»), а с
 `--fresh` (чистая установка, CI) — ошибка. Настоящий вход проверяет
 `scripts/update.sh` — пробным подключением из контейнера app.
+
+Внешний Postgres (`VTX_EXTERNAL_DB=1` в `.env` вместе с `DATABASE_URL` на
+чужой хост): сверка с сервисом `db` пропускается — явный отказ от неё, а не
+молчаливый; адрес должен разбираться, вести НЕ в `db` и нести пароль сам
+(`PGPASSWORD` у app — пароль локального `db`, libpq взял бы его). `--db-mode`
+печатает `external` или `compose` — так `scripts/update.sh` решает, у какой
+базы спрашивать о занятости и делать ли REINDEX.
+
+`$` в значениях. `compose config` печатает его экранированным (`$$`) — вывод
+должен снова читаться compose, — а в контейнер уходит одиночный `$`. Поэтому
+окружение сервисов читается через `service_env`, который возвращает `$`.
 
 Ещё проверяется профиль `https`, если он включён: файл Caddyfile, который
 монтирует caddy, существует, а команда caddy без `DOMAIN` выходит с ошибкой,
@@ -124,6 +136,18 @@ def libpq_uri(url: str) -> dict:
     return out
 
 
+def service_env(cfg: dict, name: str) -> dict:
+    """Окружение сервиса таким, каким его увидит контейнер: `compose config`
+    экранирует `$` как `$$`, в контейнер уходит одиночный `$`."""
+    env = ((cfg.get("services") or {}).get(name) or {}).get("environment") or {}
+    return {k: v.replace("$$", "$") if isinstance(v, str) else v for k, v in env.items()}
+
+
+def is_external(app_env: dict) -> bool:
+    """Явный отказ от сверки с сервисом db: VTX_EXTERNAL_DB=1 в .env."""
+    return str(app_env.get("VTX_EXTERNAL_DB") or "").strip().lower() in ("1", "true", "yes")
+
+
 def _effective(url: str, env: dict) -> dict:
     """С чем libpq реально подключится: части адреса, а чего в адресе нет —
     из переменных PG* окружения app (docker-compose передаёт PGPASSWORD, чтобы
@@ -142,8 +166,8 @@ def _effective(url: str, env: dict) -> dict:
 def problems(cfg: dict, fresh: bool = False) -> tuple[list[str], list[str]]:
     """(ошибки, предупреждения)."""
     services = cfg.get("services") or {}
-    app_env = (services.get("app") or {}).get("environment") or {}
-    db_env = (services.get("db") or {}).get("environment") or {}
+    app_env = service_env(cfg, "app")
+    db_env = service_env(cfg, "db")
     errs: list[str] = []
     warns: list[str] = []
     url = app_env.get("DATABASE_URL") or ""
@@ -153,6 +177,18 @@ def problems(cfg: dict, fresh: bool = False) -> tuple[list[str], list[str]]:
         eff = _effective(url, app_env)
     except ValueError as e:
         return [f"DATABASE_URL не разбирается libpq: {e}"], warns
+    if is_external(app_env):
+        own = libpq_uri(url)
+        if eff.get("host") in (None, "", "db"):
+            errs.append("VTX_EXTERNAL_DB=1, а DATABASE_URL ведёт в сервис db (или без "
+                        "хоста) — уберите VTX_EXTERNAL_DB или укажите внешний хост")
+        elif not own.get("password"):
+            errs.append("VTX_EXTERNAL_DB=1: пароля нет в самом DATABASE_URL — libpq "
+                        "взял бы PGPASSWORD, а это пароль ЛОКАЛЬНОГО db")
+        else:
+            warns.append(f"внешний Postgres (VTX_EXTERNAL_DB=1, хост {eff['host']!r}): "
+                         "сверка с сервисом db пропущена; вход проверит update.sh")
+        return errs + _caddy_problems(services.get("caddy")), warns
     want = {
         "хост": ("db", eff.get("host")),
         "порт": ("5432", eff.get("port")),
@@ -230,7 +266,7 @@ def alter_role_sql(cfg: dict) -> str:
     оболочки пароля нет. Кавычки удваиваются; при standard_conforming_strings
     (умолчание Postgres) обратная косая внутри '…' — обычный символ, а psql
     не подставляет переменные внутри кавычек."""
-    db_env = ((cfg.get("services") or {}).get("db") or {}).get("environment") or {}
+    db_env = service_env(cfg, "db")
     user, pw = db_env.get("POSTGRES_USER"), db_env.get("POSTGRES_PASSWORD")
     if not user or not pw:
         raise ValueError("у сервиса db нет POSTGRES_USER или POSTGRES_PASSWORD")
@@ -248,6 +284,9 @@ def main(argv: list[str] | None = None) -> int:
         except ValueError as e:
             print(f"compose: {e}", file=sys.stderr)
             return 1
+        return 0
+    if "--db-mode" in argv:
+        print("external" if is_external(service_env(cfg, "app")) else "compose")
         return 0
     fresh = "--fresh" in argv
     errs, warns = problems(cfg, fresh=fresh)

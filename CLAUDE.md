@@ -3565,6 +3565,65 @@ task_id)` (встреча по ссылке, нет токена, чужая д�
 доске вашей команды»), `_late_upload`, `_finalize_orphan`, комментарии
 ожидателя протокола (`report`). Тесты — `tests/test_weeek_board_writes_3010.py`.
 
+## Ревью 30.10, второй раунд, §1 «Деплой и CI»: закрыто (2026-10-30)
+Отчёт — `docs/АДВЕРСАРИАЛЬНОЕ-РЕВЮ-2026-10-30-2.md`. Каждая находка — тест,
+падавший на `4fc23c0`; мутанты проверены в одноразовых копиях.
+- **К: первая раскатка шла по СТАРОМУ `update.sh`.** bash читает скрипт по
+  ходу и после `git merge` дочитывает прежний текст (git кладёт новый файл,
+  старый остаётся открытым) — старый хвост делал `up -d app` → `depends_on`
+  пересоздавал db на pgvector (glibc) без REINDEX. Теперь `SELF_SUM=cksum` в
+  начале; после удачного слияния изменившийся скрипт перезапускается
+  `exec bash scripts/update.sh "$@"` с `VTX_UPDATE_REEXEC=1` (новая версия
+  сеть не трогает и себя второй раз не перезапускает). ⚠️ Это работает со
+  СЛЕДУЮЩЕЙ раскатки: на сервере сейчас старый скрипт, поэтому для ЭТОГО
+  релиза — README, «Разово: первое обновление после 30.10.2026»: `git pull
+  --ff-only` руками, затем `bash scripts/update.sh`; до этого никакого
+  `docker compose up -d`. Строку `DATABASE_URL=…voise:voise…` в `.env` прода
+  НЕ трогать. README больше не советует голый `up -d`/`up -d app` для правок
+  `.env`: только `up -d --no-deps app` (не трогает db). «Модель на лету»
+  (`VTX_MODEL=… docker compose up -d`) не работала вовсе: переменная берётся
+  из `env_file`, не из оболочки.
+- **`_load` писал «Прервано» из любого процесса.** `JobStore` создаётся при
+  импорте `app.jobs`; `compare_models.py` («ничего не сохраняет») переписывал
+  живые задачи сервиса в error/done, update.sh видел 0 занятых. Теперь
+  записывает только процесс с `VTX_SERVICE_PROCESS=1` — его ставит
+  `docker/run.sh` прямо перед `exec uvicorn`. ⚠️ НЕ переносить в Dockerfile/
+  compose/.env: `docker compose exec app python …` унаследовал бы флаг (тест
+  это проверяет). Локальный `uvicorn` без run.sh прерванные в базу не пишет —
+  как до 30.10.
+- **Внешний Postgres** обновляется: `VTX_EXTERNAL_DB=1` в `.env` — явный отказ
+  от сверки с сервисом db (`check_compose_config.py`: адрес не в `db` и с
+  паролем в самом URL, иначе libpq взял бы `PGPASSWORD` локального db).
+  `--db-mode` печатает `external|compose`; update.sh тогда спрашивает о
+  занятости внешнюю базу из контейнера app (`BUSY_PY`) и REINDEX не делает.
+- **Проба входа**: коды 3 (пароль) и 5 (нет базы/роли, кривой адрес, НЕИЗВЕСТНАЯ
+  ошибка) — стоп; 4 — только известные временные (refused, timeout, DNS,
+  «starting up», «too many clients»). Раньше «database does not exist» → 4 →
+  перезапуск в цикл падений.
+- **`$` в `compose config`** печатается как `$$`: `check_compose_config.service_env`
+  и `PROBE_PY` возвращают `$` (иначе `--alter-role-sql` поставил бы роли пароль
+  `p$$word`, а проба отвергла бы верный). README: пароль с `$`/`#` — в
+  одинарных кавычках, «любые символы» убрано.
+- **Флаги**: `--skip-jobs-check` (база лежит — задачи не спрашиваем, ЗАПИСЬ
+  проверяется); `--force` — всё, включая запись, и так и написано в советах.
+  Ошибка `git status` (dubious ownership) — стоп, а не «чистое дерево».
+- **Бэкапы** в README — в `~/voise-backups` (chmod 700); `backup*.sql`,
+  `.env.bak*` в `.gitignore` и `.dockerignore`.
+- **Lock против полного дерева**: CI job `lock` — `pip install --dry-run
+  --ignore-installed --only-binary=:all: --report … -r requirements.txt -c
+  requirements.lock.txt` на ubuntu/3.12 + `scripts/check_lock.py` (пакет
+  без пина, расхождение версии, лишний пин). Противоречивый/несуществующий пин
+  роняет сам резолв. Локально на Windows тот же резолв с `--platform` даёт два
+  ложных расхождения по маркерам (`colorama` есть, `uvloop` нет) — норма.
+- **Тесты**: `tests/test_update_sh.py` (+19; шим psql честно возвращает 0 на
+  ошибку SQL без `ON_ERROR_STOP=1`, git-шим при слиянии кладёт новый
+  update.sh новым inode), `tests/test_check_compose_config.py` (+10, из них
+  2 — настоящий compose), `tests/test_deploy_round2_3010.py` (README, ignore-
+  файлы, `ARG VTX_BUILD` только в последней стадии, `check_lock`, подпроцессы
+  `compare_models.py`/импорт `gen_api_table.py`, и CI-шаг «compose config на
+  вариантах .env» запускается ПО-НАСТОЯЩЕМУ — с мутантом checker'а он обязан
+  упасть).
+
 ## Особенности, которые легко нарушить
 - **Регистрация открыта всем**, кто знает адрес (создаётся отдельная пустая
   команда). Ограничение — только на уровне прокси/VPN; переключателя в приложении

@@ -10,3 +10,7 @@ docs
 README.md
 .env
 .env.example
+# Бэкапы с секретами — не в контекст сборки
+backup*.sql
+.env.bak*
+logs

@@ -233,3 +233,82 @@ class TestНастоящийCompose:
                                        "DOMAIN=ci.example.com", "COMPOSE_PROFILES=https"])
         assert "caddy" in cfg["services"]
         assert ccc.problems(cfg, fresh=True) == ([], [])
+
+
+# ---- Второй раунд ревью 30.10: выжившие мутанты и внешний Postgres ----------
+
+class TestВыжившиеМутанты:
+    def test_порт_сравнивается(self):
+        errs, _ = ccc.problems(_cfg("postgresql://voise@db:5433/voise", pgpassword="s3cret"))
+        assert any("порт" in e for e in errs), errs
+
+    def test_база_по_умолчанию_равна_пользователю(self):
+        # libpq: нет базы в адресе — база = пользователь.
+        assert ccc.problems(_cfg("postgresql://voise@db:5432", pgpassword="s3cret")) == ([], [])
+        errs, _ = ccc.problems(_cfg("postgresql://vtxuser@db:5432", user="vtxuser", db="vtxdb",
+                                    pgpassword="s3cret"))
+        assert any("база" in e for e in errs), errs
+
+    def test_нулевой_байт_запрещён(self):
+        with pytest.raises(ValueError):
+            ccc.libpq_uri("postgresql://voise:a%00b@db/voise")
+        errs, _ = ccc.problems(_cfg("postgresql://voise:s3cret%00@db:5432/voise"))
+        assert errs and "не разбирается" in errs[0]
+
+
+EXT_URL = "postgresql://vtx:extpw@pg.example.com:5432/vtx"
+
+
+def _ext(url=EXT_URL, flag="1"):
+    cfg = _cfg(url, pgpassword="s3cret")
+    if flag is not None:
+        cfg["services"]["app"]["environment"]["VTX_EXTERNAL_DB"] = flag
+    return cfg
+
+
+class TestВнешнийPostgres:
+    def test_с_флагом__сверка_с_db_пропускается(self):
+        errs, warns = ccc.problems(_ext(), fresh=True)
+        assert errs == [] and any("внешн" in w.lower() for w in warns)
+
+    def test_без_флага__ошибка_хоста(self):
+        errs, _ = ccc.problems(_ext(flag=None))
+        assert any("хост" in e for e in errs)
+
+    def test_флаг_но_адрес_в_сервис_db(self):
+        errs, _ = ccc.problems(_ext("postgresql://voise:s3cret@db:5432/voise"))
+        assert errs and "VTX_EXTERNAL_DB" in errs[0]
+
+    def test_флаг_но_пароля_в_адресе_нет(self):
+        # PGPASSWORD у app — пароль ЛОКАЛЬНОГО db; libpq взял бы его.
+        errs, _ = ccc.problems(_ext("postgresql://vtx@pg.example.com:5432/vtx"))
+        assert errs and "парол" in errs[0]
+
+    def test_режим_для_update_sh(self, monkeypatch, capsys):
+        for cfg, want in ((_ext(), "external"), (_ext(flag=None), "compose"),
+                          (_ext(flag="0"), "compose")):
+            monkeypatch.setattr(sys, "stdin", _Stdin(json.dumps(cfg)))
+            assert ccc.main(["--db-mode"]) == 0
+            assert capsys.readouterr().out.strip() == want
+
+
+@needs_compose
+class TestНастоящийComposeРаунд2:
+    def test_внешний_postgres_из_env(self, tmp_path):
+        cfg = _compose_json(tmp_path, ["POSTGRES_PASSWORD=0123456789abcdef",
+                                       "VTX_EXTERNAL_DB=1", f"DATABASE_URL={EXT_URL}"])
+        errs, warns = ccc.problems(cfg, fresh=True)
+        assert errs == [] and warns
+
+    def test_доллар_в_пароле__только_в_одинарных_кавычках(self, tmp_path):
+        # README: «$» compose подставляет как переменную; в '…' — буквально.
+        # `compose config` печатает его экранированным «$$» — скрипт обязан
+        # вернуть «$», иначе ALTER ROLE поставил бы роли пароль «p$$word».
+        cfg = _compose_json(tmp_path, ["POSTGRES_PASSWORD='p$word'"])
+        assert ccc.service_env(cfg, "db")["POSTGRES_PASSWORD"] == "p$word"
+        assert "'p$word'" in ccc.alter_role_sql(cfg)
+        assert ccc.problems(cfg, fresh=True) == ([], [])
+        other = tmp_path / "unquoted"
+        other.mkdir()
+        cfg = _compose_json(other, ["POSTGRES_PASSWORD=p$word"])
+        assert ccc.service_env(cfg, "db")["POSTGRES_PASSWORD"] != "p$word"
