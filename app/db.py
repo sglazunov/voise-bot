@@ -874,6 +874,127 @@ def chunks_count(team: str) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# meeting_chunks.embedding — векторы кусков (pgvector), фаза 1 памяти встреч
+# --------------------------------------------------------------------------- #
+# ⚠️ Векторная часть НАРОЧНО не в _SCHEMA: общая схема выполняется одним
+# cur.execute при открытии пула, и на образе без pgvector (postgres:16-alpine)
+# «CREATE EXTENSION vector» уронил бы ВСЮ схему — то есть приложение целиком.
+# Здесь же неудача означает только «эмбеддинги выключены»: предупреждение
+# один раз на процесс, память встреч продолжает работать полнотекстом.
+_vector_state = {"tried": False, "ready": False, "dim": 0}
+_vector_lock = threading.Lock()
+
+
+def vector_ready(dim: int) -> bool:
+    """Расширение, колонка `embedding vector(dim)` и индекс hnsw — один раз
+    на процесс. False — pgvector недоступен, база выключена или колонка уже
+    создана с ДРУГОЙ размерностью (сменили провайдера или VTX_EMBED_DIM:
+    тогда колонку надо снести и пересчитать — `scripts/embed_backfill.py`)."""
+    dim = int(dim or 0)
+    if not enabled() or dim <= 0:
+        return False
+    with _vector_lock:
+        if _vector_state["tried"]:
+            return _vector_state["ready"] and _vector_state["dim"] == dim
+        _vector_state["tried"] = True
+        _vector_state["dim"] = dim
+        from . import logs
+        log = logs.get("vtx.db")
+        try:
+            with _conn() as conn, _cur(conn) as cur:
+                cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
+                cur.execute("ALTER TABLE meeting_chunks "
+                            f"ADD COLUMN IF NOT EXISTS embedding vector({dim})")
+                # typmod у типа vector — это и есть размерность колонки.
+                cur.execute(
+                    """SELECT atttypmod AS dim FROM pg_attribute
+                       WHERE attrelid = 'meeting_chunks'::regclass
+                         AND attname = 'embedding' AND NOT attisdropped""")
+                r = cur.fetchone() or {}
+                have = int(r.get("dim") or 0)
+                if have > 0 and have != dim:
+                    log.warning("Колонка meeting_chunks.embedding создана на %d "
+                                "измерений, а провайдер эмбеддингов даёт %d — "
+                                "векторный поиск выключен. Снести колонку "
+                                "(ALTER TABLE meeting_chunks DROP COLUMN embedding) "
+                                "и пересчитать: scripts/embed_backfill.py", have, dim)
+                    return False
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_meeting_chunks_embedding "
+                    "ON meeting_chunks USING hnsw (embedding vector_cosine_ops)")
+            _vector_state["ready"] = True
+        except Exception:  # noqa: BLE001 — нет pgvector/прав: только выключить
+            log.warning("pgvector недоступен — эмбеддинги памяти встреч выключены, "
+                        "поиск идёт полнотекстом (образ базы должен быть "
+                        "pgvector/pgvector:pg16)", exc_info=True)
+            _vector_state["ready"] = False
+        return _vector_state["ready"]
+
+
+def _vec_literal(vec) -> str:
+    """Вектор строкой «[0.1,0.2,…]» — так pgvector принимает параметр через
+    `%s::vector`, без адаптера типов в драйвере."""
+    return "[" + ",".join(repr(float(x)) for x in vec) + "]"
+
+
+def chunks_set_embeddings(pairs: list[tuple[str, list]]) -> int:
+    """Записать векторы кускам по id. Пары с пустым вектором пропускаются."""
+    rows = [(_vec_literal(v), i) for i, v in pairs if v]
+    if not rows:
+        return 0
+    with _conn() as conn, _cur(conn) as cur:
+        cur.executemany("UPDATE meeting_chunks SET embedding=%s::vector WHERE id=%s",
+                        rows)
+    return len(rows)
+
+
+def chunks_without_embedding(team: str, limit: int = 200) -> list[dict]:
+    """Куски команды без вектора — свежие встречи первыми: [{id, text}]."""
+    with _conn() as conn, _cur(conn) as cur:
+        cur.execute(
+            """SELECT id, text FROM meeting_chunks
+               WHERE team=%s AND embedding IS NULL
+               ORDER BY meeting_ts DESC NULLS LAST, doc_id, idx LIMIT %s""",
+            (team, int(limit)))
+        return [dict(r) for r in cur.fetchall()]
+
+
+def chunks_embedding_stats(team: str) -> dict:
+    """Сколько кусков команды с вектором и без (для плана досчёта)."""
+    with _conn() as conn, _cur(conn) as cur:
+        cur.execute(
+            """SELECT count(*) AS chunks,
+                      count(embedding) AS embedded
+               FROM meeting_chunks WHERE team=%s""", (team,))
+        r = cur.fetchone() or {}
+        return {"chunks": int(r.get("chunks") or 0),
+                "embedded": int(r.get("embedded") or 0)}
+
+
+def chunks_vector_search(team: str, vec: list, limit: int = 24,
+                         kinds: tuple[str, ...] | None = None) -> list[dict]:
+    """Ближайшие по косинусу куски команды: строки как у chunks_search плюс
+    `dist` (0 — совпадение). Фильтр по команде ОБЯЗАТЕЛЕН; куски без
+    вектора (ещё не досчитанные) не участвуют. ORDER BY повторяет выражение
+    из SELECT, а не псевдоним: по нему планировщик берёт индекс hnsw."""
+    lit = _vec_literal(vec)
+    sql = """SELECT id, doc_id, series_key, title, meeting_date, meeting_ts,
+                    kind, idx, ts, text, is_draft, source,
+                    embedding <=> %s::vector AS dist
+             FROM meeting_chunks
+             WHERE team=%s AND embedding IS NOT NULL"""
+    params: list = [lit, team]
+    if kinds:
+        sql += " AND kind = ANY(%s)"
+        params.append(list(kinds))
+    sql += " ORDER BY embedding <=> %s::vector LIMIT %s"
+    params += [lit, int(limit)]
+    with _conn() as conn, _cur(conn) as cur:
+        cur.execute(sql, params)
+        return [dict(r) for r in cur.fetchall()]
+
+
+# --------------------------------------------------------------------------- #
 # search_docs — full-text index over the team's transcripts + protocols (Д14)
 # --------------------------------------------------------------------------- #
 _EVENT_COLS = ["id", "team", "kind", "job_id", "actor", "source", "at", "extra"]

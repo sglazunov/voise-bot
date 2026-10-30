@@ -166,8 +166,9 @@ def index_one(team: str, item: dict, cloud, tmp: Path) -> int:
         transcript=parsed.get("transcript") or "",
         analysis=meeting_index.analysis_from_parsed(parsed),
         is_draft=bool(parsed.get("is_draft")), source=item["path"])
-    db.chunks_replace(item["doc_id"], rows)
-    return len(rows)
+    # Общий шаг с задачей распознавания: куски в таблицу + векторы (если
+    # эмбеддинги включены) — см. meeting_index.store_doc.
+    return meeting_index.store_doc(item["doc_id"], team, rows)
 
 
 def main(argv=None) -> int:
