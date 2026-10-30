@@ -19,6 +19,7 @@ from __future__ import annotations
 import bisect
 import difflib
 import json
+import math
 import os
 import re
 import time
@@ -1118,6 +1119,7 @@ _MIN_QUOTE_CHARS = 10
 # батч поднят вместе с потолком (`_verify_max_tokens`), а на случай, если
 # ответ всё-таки не поместился, батч разрезается пополам и повторяется
 # (`_VERIFY_MIN_BATCH`) — вместо прежнего «сорвалась проверка целиком».
+# Второй рычаг — не слать весь фрагмент вовсе: `_VERIFY_WINDOWS` ниже.
 _VERIFY_BATCH = max(1, int(os.getenv("VTX_VERIFY_BATCH", "50")))
 # Меньше этого не дробим: дальше дело не в размере ответа.
 _VERIFY_MIN_BATCH = 8
@@ -1128,6 +1130,29 @@ _VERIFY_MAX_TOKENS = max(1000, int(os.getenv("VTX_VERIFY_MAX_TOKENS", "8000")))
 
 def _verify_max_tokens(n_points: int) -> int:
     return min(_VERIFY_MAX_TOKENS, 150 * n_points + 300)
+
+
+# Оконный режим проверки (фаза 2, п. 6 плана RAG). Каждый батч нёс ВЕСЬ
+# фрагмент расшифровки (замер выше: 3,7× текста встречи, 31–57 % входа).
+# При `VTX_VERIFY_WINDOWS=1` модель видит только окна вокруг строк, где
+# лежат якорные слова пунктов батча (`_verify_windows`). Всё, что идёт ПОСЛЕ
+# ответа модели — сверка цитаты, её уместность, восстановление времени,
+# противоречие, прошедшее время — работает по ПОЛНОМУ фрагменту, как и
+# раньше: окна лишь ограничивают то, что видит модель.
+#
+# ⚠️ Выключено по умолчанию: эффект на качество (`facts_coverage` в
+# tests/eval) не измерен — для этого нужен живой ключ и реальные встречи.
+_VERIFY_WINDOWS = os.getenv("VTX_VERIFY_WINDOWS", "0").strip().lower() in ("1", "true", "yes")
+# Строк речи в каждую сторону от якорной строки.
+_VERIFY_WINDOW_LINES = max(1, int(os.getenv("VTX_VERIFY_WINDOW_LINES", "12")))
+# Окна покрыли больше этой доли фрагмента — отдать полный: экономии нет, а
+# риск потерять основание есть.
+_VERIFY_WINDOW_MAX_SHARE = 0.7
+# Порог взвешенного покрытия основ пункта, чтобы строка стала якорем. Ниже
+# `_SUPPORT_MIN`: окно — не подтверждение, а место, куда СМОТРЕТЬ; дословную
+# цитату там ищет модель, и лучше показать ей лишнюю страницу, чем спрятать
+# нужную. Тот же порог, что у ориентира времени (`_TIME_HINT_MIN`).
+_VERIFY_WINDOW_MIN = 0.35
 # Мягкая дословность: цитата, в которой модель «починила» ошибку распознавания
 # или пропустила метку говорящего между репликами, — всё ещё цитата.
 _APPROX_RATIO = 0.85
@@ -1646,6 +1671,108 @@ def _find_support(point_text: str, text: str,
     return {"quote": _strip_labels(lines[li]).strip()[:300]}
 
 
+# (фрагмент, «основа → строки в окне ±2», «строка → шапка блока выше»)
+_WINDOW_CACHE: tuple | None = None
+
+
+def _window_index(fragment: str) -> tuple[list[str], dict[str, frozenset[int]], list[int | None]]:
+    """Индекс для поиска окон: строки речи фрагмента, память дилатированных
+    множеств строк по основе (строка i покрыта основой x, если x есть хоть в
+    одной из строк i-2…i+2 — то же окно, что у `_find_support`) и номер
+    ближайшей шапки блока говорящего не ниже строки. Память живёт рядом с
+    `_LINES_CACHE`: батчи одного фрагмента идут подряд и делят общие основы."""
+    global _WINDOW_CACHE
+    lines, _ = _speech_lines(fragment)
+    cached = _WINDOW_CACHE
+    if cached is not None and cached[0] == fragment:
+        return lines, cached[1], cached[2]
+    last_hdr: list[int | None] = []
+    cur: int | None = None
+    for j, ln in enumerate(lines):
+        if _LINE_T_RE.match(ln):
+            cur = j
+        last_hdr.append(cur)
+    dilated: dict[str, frozenset[int]] = {}
+    _WINDOW_CACHE = (fragment, dilated, last_hdr)
+    return lines, dilated, last_hdr
+
+
+def _dilated_lines(x: str, fragment: str, dilated: dict[str, frozenset[int]], n: int) -> frozenset[int]:
+    hit = dilated.get(x)
+    if hit is None:
+        acc: set[int] = set()
+        for j in _stem_lines(x, fragment):
+            acc.update(range(max(0, j - 2), min(n, j + 3)))
+        hit = dilated[x] = frozenset(acc)
+    return hit
+
+
+def _verify_windows(point_texts: list[str], fragment: str) -> tuple[str, float] | None:
+    """Окна расшифровки для батча пунктов — то, что увидит модель вместо
+    полного фрагмента. `None` — отдать фрагмент целиком.
+
+    Поиск без модели, по уже готовым индексам основ (`_stem_lines`): для
+    каждого пункта — строки, где взвешенное покрытие его основ не ниже
+    `_VERIFY_WINDOW_MIN`. Вес основы — её редкость во фрагменте (idf): слово
+    «конструктор» в одной реплике значит больше, чем «сделать» в каждой
+    десятой. Окна ±`_VERIFY_WINDOW_LINES` строк вокруг якорей сливаются,
+    порядок — по тексту, между несмежными окнами стоит «…», у окна без шапки
+    говорящего шапка дописывается сверху — иначе модель не видит ни метки
+    времени, ни имени и не может поставить `t`/`owner_ok`.
+
+    Полный фрагмент возвращается в двух случаях, оба — ради качества:
+    * хоть у одного пункта батча якорей нет — иначе такой пункт теряет
+      подтверждение заведомо (модель ищет только там, где показали);
+    * окна покрывают больше `_VERIFY_WINDOW_MAX_SHARE` фрагмента — экономии
+      нет, а риск спрятать нужную реплику остаётся.
+    Вторая часть результата — доля символов окон от полного фрагмента.
+    """
+    lines, dilated, last_hdr = _window_index(fragment)
+    n = len(lines)
+    if n == 0 or not fragment:
+        return None
+    anchors: set[int] = set()
+    for ptext in point_texts:
+        pw = _stems(ptext)
+        if not pw:
+            return None
+        hits = {x: _dilated_lines(x, fragment, dilated, n) for x in pw}
+        weights = {x: math.log(1.0 + n / (1.0 + len(_stem_lines(x, fragment)))) for x in pw}
+        total = sum(weights.values())
+        if total <= 0:
+            return None
+        cover = [0.0] * n
+        for x, js in hits.items():
+            w = weights[x]
+            for i in js:
+                cover[i] += w
+        need = _VERIFY_WINDOW_MIN * total
+        found = [i for i in range(n) if cover[i] >= need]
+        if not found:
+            return None
+        anchors.update(found)
+    half = _VERIFY_WINDOW_LINES
+    spans: list[list[int]] = []
+    for i in sorted(anchors):
+        a, b = max(0, i - half), min(n, i + half + 1)
+        if spans and a <= spans[-1][1]:
+            spans[-1][1] = max(spans[-1][1], b)
+        else:
+            spans.append([a, b])
+    parts: list[str] = []
+    for a, b in spans:
+        chunk = lines[a:b]
+        hdr = last_hdr[a]
+        if hdr is not None and hdr < a:
+            chunk = [lines[hdr]] + chunk
+        parts.append("\n".join(chunk))
+    shown = "\n…\n".join(parts)
+    share = len(shown) / len(fragment)
+    if share > _VERIFY_WINDOW_MAX_SHARE:
+        return None
+    return shown, share
+
+
 def _lines_after(text: str, quote: str, k: int = 3) -> list[str]:
     """k реплик после той, где стоит цитата (по первым словам цитаты)."""
     qn = _norm_for_match(_strip_labels(quote))
@@ -1847,6 +1974,9 @@ def verify_protocol(result: dict, transcript_text: str, user_notes: str = "",
         sources.append(("transcript", text[i:i + budget_chars]))
     pending = {i: p for i, p in enumerate(points, 1)}
     calls = failed_calls = 0
+    # Доля символов отправленного текста от полного фрагмента по каждому
+    # вызову — на бою по ней видно экономию оконного режима (`window_share`).
+    shares: list[float] = []
     for si, (src_name, fragment) in enumerate(sources, 1):
         if not pending or ver.get("error"):
             break
@@ -1868,7 +1998,18 @@ def verify_protocol(result: dict, transcript_text: str, user_notes: str = "",
             listing = "\n".join(
                 f"{n}) [{key}] {text}" + (f" (ответственный: {owner})" if owner else "")
                 for n, (key, idx, text, owner) in batch)
-            prompt = _VERIFY_TEMPLATE.format(points=listing, fragment=fragment)
+            # Оконный режим: модели — только окна вокруг якорей пунктов батча.
+            # Заметки участника не режем: они короткие и уже его словами.
+            # Сверка ответа ниже идёт по ПОЛНОМУ фрагменту (`frag`, `fragment`).
+            shown, share = fragment, 1.0
+            if _VERIFY_WINDOWS and src_name == "transcript":
+                win = _verify_windows([p[2] for _n, p in batch], fragment)
+                if win is not None:
+                    shown = ("(отрывки расшифровки; «…» — пропущенные места)\n"
+                             + win[0])
+                    share = win[1]
+            shares.append(share)
+            prompt = _VERIFY_TEMPLATE.format(points=listing, fragment=shown)
             stage = (f"Проверяю протокол по расшифровке ({si}/{len(sources)}, "
                      f"пункты {batch[0][0]}–{batch[-1][0]})…")
             calls += 1
@@ -1942,7 +2083,13 @@ def verify_protocol(result: dict, transcript_text: str, user_notes: str = "",
                     "confirmed": len(points) - len(pending) - mechanical,
                     "mechanical": mechanical,
                     "calls": calls, "failed_calls": failed_calls,
-                    "version": VERIFY_VERSION}
+                    # Суффикс «+windows» — чтобы в метриках доля подтверждённых
+                    # оконного режима не смешивалась с обычным: правила сверки
+                    # те же (VERIFY_VERSION не поднят), но модель видит меньше.
+                    "version": VERIFY_VERSION + ("+windows" if _VERIFY_WINDOWS else ""),
+                    "windowed": bool(_VERIFY_WINDOWS),
+                    "window_share": (round(sum(shares) / len(shares), 3)
+                                     if shares else None)}
     # Acceptance rule: no owner without verbatim grounds. Unverified point →
     # flagged; verified point whose quote doesn't support the owner → owner «—».
     #
