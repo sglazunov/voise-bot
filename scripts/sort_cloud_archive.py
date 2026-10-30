@@ -35,7 +35,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app import cloud_folders, config, meeting_series  # noqa: E402
+from app import cloud_folders, meeting_series  # noqa: E402
 
 # Только файлы, которые кладёт сам бот: видео встречи и документы протокола.
 _MEETING_FILE_RE = re.compile(r"\.(mp4|mkv|webm|docx|txt)$", re.IGNORECASE)
@@ -79,9 +79,13 @@ class Yandex:
 class Local:
     label = "локальный диск"
 
-    def __init__(self, cfg: dict):
-        raw = (cfg.get("local_dir") or "").strip()
-        self.root = str(Path(raw) if raw else (config.DATA_DIR / "recordings"))
+    def __init__(self, cfg: dict, user: str = ""):
+        # Папка по умолчанию у каждой команды своя (`data/recordings/<команда>`,
+        # ревью 30.10): читать общий корень значило не видеть новых файлов и
+        # с --apply раскладывать файлы ЧУЖИХ команд по плану этой.
+        from app.automation import clouds
+        from app.automation.clouds import local
+        self.root = str(local.base_dir(clouds._backend_cfg(cfg, "local", user)))
         proto = (cfg.get("protocol_folder") or "").strip()
         proto = proto if Path(proto).is_absolute() else str(Path(self.root) / "protocols")
         self.sources = [self.root, proto,
@@ -107,12 +111,12 @@ class Local:
         return {"ok": True, "path": str(d), "url": d.as_uri()}
 
 
-def backend_for(cfg: dict):
+def backend_for(cfg: dict, user: str = ""):
     kind = cfg.get("cloud") or "local"
     if kind == "yandex_disk":
         return Yandex(cfg)
     if kind == "local":
-        return Local(cfg)
+        return Local(cfg, user)
     raise SystemExit(f"Облако «{kind}» скрипт не поддерживает (только Яндекс.Диск и "
                      "локальный диск).")
 
@@ -228,7 +232,7 @@ def main(argv=None) -> int:
         print("Раскладка по папкам выключена («Облако» → «Раскладка по встречам»). "
               "Включите её — иначе новые файлы снова лягут плоско.")
         return 2
-    cloud = backend_for(cfg)
+    cloud = backend_for(cfg, args.user)
     print(f"Облако: {cloud.label}. Папка встреч: {cloud.root}")
     print("Читаю: " + ", ".join(cloud.sources))
     files, skipped = collect(cloud)
