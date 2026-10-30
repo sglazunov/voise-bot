@@ -37,8 +37,12 @@ fi
 FORCE=0
 [ "${1:-}" = "--force" ] && FORCE=1
 
-PGUSER_="${POSTGRES_USER:-voise}"
-PGDB_="${POSTGRES_DB:-voise}"
+# Пользователь и база — из .env, как у compose. Раньше брались из окружения
+# оболочки (обычно пустого), и при своём POSTGRES_USER проверка занятости
+# молча отвечала «0 задач» — обновление шло поверх работающего распознавания.
+env_val() { { sed -n "s/^$1=//p" .env 2>/dev/null || true; } | tail -1 | tr -d '\r"'"'"; }
+PGUSER_="${POSTGRES_USER:-$(env_val POSTGRES_USER)}"; PGUSER_="${PGUSER_:-voise}"
+PGDB_="${POSTGRES_DB:-$(env_val POSTGRES_DB)}"; PGDB_="${PGDB_:-voise}"
 
 busy_jobs() {
   docker compose exec -T db psql -U "$PGUSER_" -d "$PGDB_" -tA -c \
@@ -52,7 +56,8 @@ busy_recorders() {
     | tr -dc '0-9' || true
 }
 
-if [ "$FORCE" -eq 0 ]; then
+refuse_if_busy() {
+  [ "$FORCE" -eq 0 ] || return 0
   jobs_n="$(busy_jobs)"; jobs_n="${jobs_n:-0}"
   rec_n="$(busy_recorders)"; rec_n="${rec_n:-0}"
   if [ "$jobs_n" -gt 0 ] || [ "$rec_n" -gt 0 ]; then
@@ -60,11 +65,22 @@ if [ "$FORCE" -eq 0 ]; then
     [ "$jobs_n" -gt 0 ] && echo "  • задач в работе: $jobs_n (распознавание или сборка протокола)"
     [ "$rec_n" -gt 0 ] && echo "  • идёт запись встречи (процессов ffmpeg: $rec_n)"
     echo
-    echo "Пересборка прервёт их, и работа начнётся заново."
+    echo "$1"
     echo "Дождитесь окончания либо запустите: bash scripts/update.sh --force"
     exit 1
   fi
-  echo "==> Сервис свободен, обновляюсь."
+}
+
+refuse_if_busy "Пересборка прервёт их, и работа начнётся заново."
+[ "$FORCE" -eq 0 ] && echo "==> Сервис свободен, обновляюсь."
+
+# Изменённые отслеживаемые файлы попадут в образ как есть. Так однажды чуть не
+# уехал compose с DATABASE_URL без хоста db (ревью 30.10, P0-1): контейнер
+# просто перезапускался бы по кругу, не достучавшись до базы.
+if [ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]; then
+  echo "!!  В рабочей копии есть НЕЗАКОММИЧЕННЫЕ правки — они попадут в образ:"
+  git status --short --untracked-files=no | sed 's/^/      /'
+  echo "    Если это случайность: git checkout -- <файл> и запустите снова."
 fi
 
 echo "==> Забираю изменения (IPv4, с повторами)…"
@@ -88,7 +104,15 @@ fi
 echo "==> Собираю образ (несколько минут)…"
 # Хэш коммита вшивается в образ: после сборки видно, из чего собран контейнер.
 export VTX_BUILD="$(git rev-parse --short HEAD 2>/dev/null || echo dev)"
-docker compose up -d --build app
+docker compose build app
+# Сборка идёт минуты, и за это время могла начаться встреча — проверяем ещё
+# раз прямо перед перезапуском: `up -d` убил бы и её.
+refuse_if_busy "За время сборки началась работа. Образ собран — запустите обновление позже, пересборка будет быстрой (кэш)."
+if ! docker compose config -q; then
+  echo "!!  docker compose config не проходит — контейнер НЕ перезапускаю."
+  exit 1
+fi
+docker compose up -d app
 echo "==> Контейнер поднят. Убираю старые образы (бывает до пары минут, вывода нет)…"
 # Каждая сборка оставляет прежний образ «висячим» (несколько ГБ) — за месяц
 # обновлений они и забивают диск. Убираем только безымянные образы, работающий

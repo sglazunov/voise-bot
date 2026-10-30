@@ -252,7 +252,9 @@ class TestОдинаковыеСтопИВремя:
         import datetime as dt
         b = TestРегистрИПрокрутка._bot(self)
         day = dt.datetime(2026, 10, 30, *map(int, joined.split(":")))
-        b._clock = lambda: day.timestamp()        # «сейчас» для бота (дата!)
+        # «Сейчас» — через полтора часа после входа: сообщения при боте не
+        # должны выглядеть пришедшими «из будущего» (ревью 30.10, п.4).
+        b._clock = lambda: day.timestamp() + 90 * 60
         b._chat_since_min = day.hour * 60 + day.minute   # с какой минуты следим
         return b
 
@@ -323,6 +325,9 @@ class TestВремяСообщения:
         b = TestРегистрИПрокрутка._bot(self)
         h, m = since.split(":")
         b._chat_since_min = int(h) * 60 + int(m)
+        # Часы бота — фиксированные (29.10, 12:30): иначе тест зависел бы от
+        # времени суток прогона — «стоп 11:54» в 11:30 выглядит «из будущего».
+        b._clock = lambda: __import__("datetime").datetime(2026, 10, 29, 12, 30).timestamp()
         return b
 
     HISTORY = ["21 июля", "Зоя Р.", "стоп", "11:05", "15 сентября", "Иван Р.",
@@ -444,3 +449,46 @@ class TestДырыРевью3010:
         b._chat_since_min = 23 * 60 + 50
         assert self._feed(b, ["Вчера", "Сергей Беск", "стоп", "23:40",
                               "Сегодня", "Сергей Беск", "стоп", "00:05"]) is True
+
+
+class TestСводноеРевью3010:
+    """Сводное ревью 30.10, §6 п.4 и п.5."""
+
+    _feed = TestРегистрИПрокрутка._feed
+
+    def _bot(self, joined="11:00", now="11:30"):
+        import datetime as dt
+        b = TestРегистрИПрокрутка._bot(self)
+        h, m = map(int, now.split(":"))
+        b._clock = lambda: dt.datetime(2026, 10, 30, h, m).timestamp()
+        jh, jm = map(int, joined.split(":"))
+        b._chat_since_min = jh * 60 + jm
+        return b
+
+    def test_сообщение_из_будущего_не_команда(self):
+        """Под «Сегодня» время позже «сейчас» — рассинхрон часов или чужой
+        часовой пояс, а не команда этой встречи."""
+        b = self._bot()
+        assert self._feed(b, ["Сегодня", "Сергей Беск", "стоп", "23:40"]) is False
+
+    def test_дата_в_боковой_панели_не_делает_историю_сегодняшней(self):
+        """Оболочка Мессенджера: в главном документе (список чатов) стоит
+        «30 октября», а чат встречи во фрейме — история с «стоп 11:39» от
+        18.09. Разделитель дня действует только внутри СВОЕГО фрейма."""
+        from app.automation.recorder.browser import TelemostBot
+        sep = TelemostBot._FRAME_SEP
+        shell = ["Чаты", "Иван Р.", "30 октября", "Иван Р.", "добрый день"]
+        chat = ["18 сентября", "Сергей Беск", "стоп", "11:39"]
+        b = self._bot()
+        assert self._feed(b, shell + [sep] + chat) is False
+        assert self._feed(b, shell + [sep] + chat) is False
+
+    def test_команда_во_фрейме_под_своим_разделителем_ловится(self):
+        from app.automation.recorder.browser import TelemostBot
+        sep = TelemostBot._FRAME_SEP
+        shell = ["Чаты", "Иван Р.", "11:05"]
+        chat = ["18 сентября", "Сергей Беск", "стоп", "11:39"]
+        b = self._bot()
+        assert self._feed(b, shell + [sep] + chat) is False
+        assert self._feed(b, shell + [sep] + chat + ["Сегодня", "Сергей Беск",
+                                                     "стоп", "11:26"]) is True

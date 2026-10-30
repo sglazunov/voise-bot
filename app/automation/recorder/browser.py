@@ -1476,7 +1476,13 @@ class TelemostBot:
                     parts.append(t)
             except Exception:
                 continue
-        return "\n".join(parts) if parts else None
+        return ("\n" + self._FRAME_SEP + "\n").join(parts) if parts else None
+
+    # Строка-граница между текстами фреймов. Разделитель дня действует только
+    # внутри СВОЕГО фрейма: «30 октября» из списка чатов оболочки (главный
+    # документ) не делает сегодняшней историю чата встречи во фрейме (ревью
+    # 30.10). Символы невидимые — в тексте страницы такой строки не бывает.
+    _FRAME_SEP = "\u2063frame\u2063"
 
     _TIME_RE = re.compile(r"(?<!\d)([01]?\d|2[0-3]):([0-5]\d)(?!\d)")
 
@@ -1508,7 +1514,7 @@ class TelemostBot:
             if headers == 1 or i == 0:
                 continue
             prev = lines[i - 1]
-            if cls._is_day_header(prev) or not prev.strip():
+            if cls._is_day_header(prev) or not prev.strip() or prev == cls._FRAME_SEP:
                 continue
             if cls._bare_time(prev):
                 after += 1
@@ -1555,9 +1561,11 @@ class TelemostBot:
         if not (0 <= hh < 24 and 0 <= mm < 60):
             return False
         msg = hh * 60 + mm
+        # «Из будущего» (позже «сейчас» больше чем на 5 минут) — рассинхрон
+        # часов или чужой часовой пояс, а не команда этой встречи (ревью 30.10).
         if cur_min < since_min:          # запись перешла через полночь
             return msg > since_min or msg <= cur_min + 5
-        return msg > since_min
+        return since_min < msg <= cur_min + 5
 
     @staticmethod
     def _is_stop_line(line: str, word: str) -> bool:
@@ -1761,11 +1769,25 @@ class TelemostBot:
         разделом текущего дня; всё выше — история. Разделителя нет (старая
         вёрстка) — берём всё, как раньше."""
         markers = cls._today_markers(now)
-        idx = None
-        for i, ln in enumerate(lines):
-            if ln.strip().lower() in markers:
-                idx = i
-        return lines[idx + 1:] if idx is not None else lines
+        frames: list[list[str]] = [[]]
+        for ln in lines:
+            if ln == cls._FRAME_SEP:
+                frames.append([])
+            else:
+                frames[-1].append(ln)
+        out: list[str] = []
+        found = False
+        for fr in frames:
+            idx = None
+            for i, ln in enumerate(fr):
+                if ln.strip().lower() in markers:
+                    idx = i
+            if idx is not None:
+                found = True
+                out.extend(fr[idx + 1:])
+        # Срез всегда короче исходного (строка-разделитель в него не входит) —
+        # по этому maybe_chat_stop и узнаёт область «сегодня».
+        return out if found else lines
 
     def wait_until_end(self, should_stop, max_sec: int, alone_sec: int,
                        min_participants: int = 1, chat_stop_word: str = "") -> str:

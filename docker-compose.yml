@@ -92,8 +92,16 @@ services:
       - "80:80"       # нужен Let's Encrypt для проверки домена
       - "443:443"
       - "443:443/udp" # HTTP/3
+    # Пустой DOMAIN проверяется ЗДЕСЬ, при запуске caddy, а не интерполяцией
+    # compose: `${DOMAIN:?…}` compose проверяет даже у выключенного профиля, и
+    # чистая установка без домена не поднимала вообще ничего — ни app, ни db
+    # (ревью 30.10, проверено на Compose 2.40). С заданным DOMAIN команда та же,
+    # что у образа по умолчанию.
+    command: >-
+      sh -c 'test -n "$$DOMAIN" || { echo "caddy: укажите DOMAIN в .env"; exit 1; };
+      exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile'
     environment:
-      DOMAIN: "${DOMAIN:?укажите DOMAIN в .env}"
+      DOMAIN: "${DOMAIN:-}"
       ACME_EMAIL: "${ACME_EMAIL:-}"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro

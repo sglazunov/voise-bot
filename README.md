@@ -42,7 +42,9 @@ sudo usermod -aG docker "$USER"     # затем перелогиньтесь (�
 ```bash
 git clone https://github.com/sglazunov/linux-voise.git
 cd linux-voise
-cp .env.example .env                # можно оставить как есть для локального теста
+cp .env.example .env
+# пароль базы обязателен — без него compose не стартует
+sed -i "s/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=$(openssl rand -hex 16)/" .env
 docker compose up -d --build
 ```
 
@@ -58,10 +60,13 @@ docker compose up -d --build
 ## Раскатка на сервере
 
 1. Поставьте Docker (см. выше) и склонируйте репозиторий на сервер.
-2. Создайте `.env` и задайте **свой** ключ шифрования секретов:
+2. Создайте `.env` и задайте **свой** ключ шифрования секретов и пароль базы
+   (без пароля `docker compose` не стартует; `DATABASE_URL` compose собирает
+   сам из `POSTGRES_*` — в `.env` его не задавайте):
    ```bash
    cp .env.example .env
    sed -i "s/^VTX_SECRET_KEY=.*/VTX_SECRET_KEY=$(openssl rand -hex 32)/" .env
+   sed -i "s/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=$(openssl rand -hex 16)/" .env
    ```
 3. Запустите:
    ```bash
@@ -74,8 +79,10 @@ docker compose up -d --build
 5. Зайдите на `http://<IP-сервера>:8000`, зарегистрируйте админа.
 
 Контейнер поднимается с `restart: unless-stopped` — сам стартует после перезагрузки
-сервера. Данные (загрузки, результаты, записи, настройки/токены, аккаунты) лежат в
-`./data` на хосте и переживают пересоздание контейнера — **бэкапьте эту папку**.
+сервера. Состояние лежит в ДВУХ местах, и бэкапить нужно оба:
+- **база Postgres** (том `pgdata`) — аккаунты, сессии, задачи, настройки, токены,
+  ключи, карточки встреч: `docker compose exec -T db pg_dump -U voise voise > backup.sql`;
+- **папка `./data`** на хосте — файлы: загрузки, результаты, записи.
 
 > Для публичного домена дальше нужен HTTPS-прокси — см. «Домен и HTTPS».
 
@@ -205,7 +212,7 @@ git pull                      # забрать изменения
 docker compose up -d --build  # пересобрать и перезапустить
 ```
 - Логи: `docker compose logs -f app` (уровень — `VTX_LOG_LEVEL`)
-- Бэкап: сохраняйте папку `./data` (там всё состояние).
+- Бэкап: `pg_dump` базы (том `pgdata`) **и** папка `./data` — см. «Раскатка на сервере».
 - Модель на лету: `VTX_MODEL=medium docker compose up -d` (первый запрос докачает её).
 
 ---

@@ -1210,14 +1210,18 @@ class Scheduler:
 
     # -- Weeek custom-field writes (retried; stale links wiped) --------------
 
-    def _late_upload(self, user: str, st: MeetingState, cfg: dict, out: str) -> None:
+    def _late_upload(self, user: str, st: MeetingState, cfg: dict, out: str,
+                     first_delay: int = 300) -> None:
         """The cloud refused the video at recording time. Keep retrying (every
         5 min, up to 4 h): on success fill the Weeek field/comment exactly like
         the normal path would have, then get rid of the local copy — videos are
-        not stored on this server."""
+        not stored on this server. `first_delay` — пауза перед ПЕРВОЙ попыткой
+        (после перезапуска сервиса облако уже могло ожить)."""
         deadline = time.time() + 4 * 3600
+        delay = first_delay
         while time.time() < deadline and not self._stop.is_set():
-            time.sleep(300)
+            time.sleep(delay)
+            delay = 300
             if not Path(out).exists():
                 return  # purged (retention) — nothing left to deliver
             place = _meeting_place(st, cfg, None, out)
@@ -1233,11 +1237,12 @@ class Scheduler:
             st.upload_error = None
             token = cfg.get("weeek_token")
             field = (cfg.get("weeek_video_field") or "").strip()
-            if cfg.get("weeek_set_video_field", True) and st.cloud_url and field:
+            weeek_ok = bool(token) and not is_adhoc(st.task_id)  # по ссылке — некуда
+            if weeek_ok and cfg.get("weeek_set_video_field", True) and st.cloud_url and field:
                 delivery.write_weeek_field(
                     token, st.task_id, field, st.cloud_url, lambda *_: None,
                     protected=cfg.get("weeek_protected_fields"))
-            if cfg.get("post_back_to_weeek") and st.cloud_url:
+            if weeek_ok and cfg.get("post_back_to_weeek") and st.cloud_url:
                 weeek.add_comment(token, st.task_id,
                                   f"🎥 Запись встречи: {st.cloud_url}")
             snapshots.save(st)  # the late-delivered cloud link survives restarts
@@ -1441,25 +1446,40 @@ class Scheduler:
         for team in security.list_teams():
             try:
                 cfg = auto_settings.load(team)
-                if not cfg.get("weeek_token"):
-                    continue
+                has_weeek = bool(cfg.get("weeek_token"))
                 snaps = snapshots.load(team)
             except Exception:  # noqa: BLE001 — one broken team must not stop the rest
                 continue
             for key, snap in snaps.items():
                 jid = snap.get("job_id")
-                if (snap.get("state") not in pending
-                        or (snap.get("saved_at") or 0) < cutoff):
+                if (snap.get("saved_at") or 0) < cutoff:
                     continue
                 parts = key.split(":", 2)
                 task_id = parts[1] if len(parts) > 1 else None
                 if not task_id:
+                    continue
+                # Команда без Weeek — это «бот по ссылке»: её встречи тоже
+                # восстанавливаются (раньше команда пропускалась целиком).
+                # Встреча из Weeek без токена — восстанавливать нечем.
+                if not has_weeek and not is_adhoc(task_id):
                     continue
                 try:
                     start = (datetime.fromisoformat(parts[2])
                              if len(parts) > 2 else None)
                 except ValueError:
                     start = None
+                # Ревью 30.10, P0-4: видео, которое облако не приняло, после
+                # перезапуска НЕ дозаливалось — фоновую дозаливку запускал
+                # только живой _run, — и через двое суток уборка удаляла его.
+                # Касается и готовых встреч: протокол есть, а видео — нет.
+                out_path = snap.get("out_path")
+                video_stuck = bool(
+                    jid and out_path and snap.get("upload_error")
+                    and not snap.get("cloud_url") and Path(out_path).exists())
+                if snap.get("state") not in pending:
+                    if video_stuck:
+                        self._resume_video(team, key, task_id, start, snap, cfg)
+                    continue
 
                 # Д8: the process died DURING the recording — no job yet, but
                 # the fMP4 on disk is readable up to the crash. Queue it for the
@@ -1511,6 +1531,8 @@ class Scheduler:
                     rec_bytes=int(snap.get("rec_bytes") or 0))
                 with self._lock:
                     st = self._states.setdefault(key, st)
+                if video_stuck:
+                    self._start_late_upload(team, st, cfg, out_path)
                 if not (st.do_protocol and cfg.get("upload_protocol", True)):
                     continue
                 try:
@@ -1523,6 +1545,35 @@ class Scheduler:
                     target=self._await_and_upload_protocol,
                     args=(st, jid, cfg),
                     daemon=True).start()
+
+    def _start_late_upload(self, team: str, st: MeetingState, cfg: dict,
+                           out: str) -> None:
+        _LOG.info("Видео встречи «%s» не в облаке — дозаливаю после перезапуска",
+                  st.title)
+        threading.Thread(target=self._late_upload, args=(team, st, cfg, out),
+                         kwargs={"first_delay": 30}, daemon=True,
+                         name="vtx-late-upload").start()
+
+    def _resume_video(self, team: str, key: str, task_id: str, start,
+                      snap: dict, cfg: dict) -> None:
+        """Готовая (или упавшая) встреча, у которой видео так и не уехало в
+        облако: поднять карточку из снапшота и запустить дозаливку."""
+        out = snap["out_path"]
+        st = MeetingState(
+            key=key, task_id=task_id, title=Path(out).stem, url="", start=start,
+            owner=team, state=snap.get("state") or "done",
+            detail=snap.get("detail") or "", job_id=snap.get("job_id"),
+            cloud_url=None, out_path=out,
+            live_notes=str(snap.get("live_notes") or ""),
+            do_protocol=bool(snap.get("do_protocol")),
+            upload_error=snap.get("upload_error"),
+            cloud_path=snap.get("cloud_path"),
+            stop_reason=snap.get("stop_reason"),
+            screenshot=snap.get("screenshot"),
+            rec_bytes=int(snap.get("rec_bytes") or 0))
+        with self._lock:
+            st = self._states.setdefault(key, st)
+        self._start_late_upload(team, st, cfg, out)
 
     def _finalize_orphan(self, st: MeetingState, cfg: dict, out: str) -> None:
         """A recording the crash orphaned: run the same post-recording pipeline
@@ -1817,6 +1868,20 @@ class Scheduler:
                     Path(wav).unlink(missing_ok=True)
                 except OSError:
                     pass
+
+    def forget_team(self, team: str) -> int:
+        """Забыть карточки встреч команды — при удалении аккаунта. Идущая
+        запись получает команду остановиться. Иначе новый пользователь с тем
+        же логином видел бы чужие встречи на странице «Встречи»."""
+        n = 0
+        with self._lock:
+            for key, st in list(self._states.items()):
+                if st.owner != team:
+                    continue
+                st.stop_flag = True
+                self._states.pop(key, None)
+                n += 1
+        return n
 
     def stop_recording(self, user: str | None = None, task_id=None) -> dict:
         """Stop recording(s) in progress. With `task_id` — just that meeting;

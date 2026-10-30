@@ -870,6 +870,19 @@ def profile_delete(body: AccountDelete, request: Request,
     res = security.delete_account(user, body.password)
     if not res.get("ok"):
         raise HTTPException(400, res.get("error"))
+    # Задачи и карточки встреч живут не под логином в users/, а в общем
+    # хранилище, ключом по команде (= логин владельца). Без этого логин
+    # освобождался вместе с чужими протоколами (ревью 30.10, P0-2).
+    try:
+        store.delete_owner(user)
+    except Exception:  # noqa: BLE001
+        log.error("Задачи удалённого аккаунта %s не удалены", user, exc_info=True)
+    try:
+        from .automation.scheduler import scheduler
+        scheduler.forget_team(user)
+    except Exception:  # noqa: BLE001
+        log.warning("Карточки встреч удалённого аккаунта %s не забыты", user,
+                     exc_info=True)
     security.destroy_session(request.cookies.get(security.SESSION_COOKIE))
     resp = JSONResponse({"ok": True, "detail": "Аккаунт удалён."})
     resp.delete_cookie(security.SESSION_COOKIE)

@@ -973,6 +973,40 @@ class JobStore:
             with self._lock:
                 self._save()
 
+    def delete_owner(self, owner: str) -> int:
+        """Удалить ВСЕ задачи владельца-команды вместе с файлами — при удалении
+        аккаунта. Раньше удаление стирало логин, настройки и записи, но не
+        задачи: логин освобождался, и новый пользователь с тем же логином
+        (команда = логин) видел чужие расшифровки и протоколы (ревью 30.10,
+        P0-2). Незавершённые задачи тоже: аккаунта больше нет."""
+        owner = str(owner or "")
+        if not owner:
+            return 0
+        doomed = [j for j in list(self._jobs.values()) if j.owner == owner]
+        for job in doomed:
+            ctl = self._control.get(job.id)
+            if ctl is not None:
+                try:
+                    ctl.cancel()
+                except Exception:  # noqa: BLE001
+                    pass
+            self._delete_job_files(job)
+            if db.enabled():
+                try:
+                    db.search_delete(job.id)
+                except Exception:  # noqa: BLE001
+                    log.warning("Не удалось убрать задачу %s из индекса", job.id,
+                                exc_info=True)
+            self._jobs.pop(job.id, None)
+            self._partial.pop(job.id, None)
+            self._control.pop(job.id, None)
+        if doomed:
+            # Без аргумента _save переписывает набор целиком: на Postgres
+            # строки задач, которых нет в памяти, удаляются (db.jobs_save).
+            with self._lock:
+                self._save()
+        return len(doomed)
+
     def _delete_job_files(self, job: Job) -> None:
         for fmt in ("txt", "plain", "srt", "json", "docx", "screen.txt"):
             self.result_path(job.id, fmt).unlink(missing_ok=True)

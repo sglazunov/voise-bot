@@ -429,28 +429,51 @@ class RecorderTest(BaseModel):
     seconds: int = 30
 
 
+# Одна тестовая запись на сервер: слоты записи общие для всех команд, а
+# регистрация открыта — четыре теста подряд останавливали запись встреч у всех
+# (ревью 30.10, P0-3).
+_RECORDER_TEST_LOCK = threading.Lock()
+
+
 @router.post("/recorder/test")
 def automation_recorder_test(body: RecorderTest, user: str = Depends(current_user)):
     """Manually join a Telemost link and record for a few seconds, to verify
     the bot + capture work on this machine before automating."""
+    from .automation.scheduler import telemost_url
+    url = telemost_url(body.url)
+    if url is None:
+        # Серверный Chromium открывал ЛЮБОЙ адрес — внутреннюю сеть Docker,
+        # хост, метаданные облака — и сохранял скриншот и HTML чужой страницы.
+        raise HTTPException(400, "Нужна ссылка на встречу Яндекс Телемоста "
+                                 "(telemost.yandex.ru/j/…).")
+    if not _RECORDER_TEST_LOCK.acquire(blocking=False):
+        raise HTTPException(409, "Уже идёт тестовая запись — дождитесь её конца.")
+    try:
+        return _recorder_test(user, url, body.seconds)
+    finally:
+        _RECORDER_TEST_LOCK.release()
+
+
+def _recorder_test(user: str, url: str, seconds: int) -> dict:
     import time
     from .automation import settings as auto_settings, recorder
     cfg = auto_settings.load(user)
     out = str(security.user_dir(user) / "recordings" /
               f"test-{time.strftime('%Y%m%d-%H%M%S')}.mp4")
     Path(out).parent.mkdir(parents=True, exist_ok=True)
-    deadline = time.time() + max(5, min(int(body.seconds), 300))
+    deadline = time.time() + max(5, min(int(seconds), 300))
     logs: list[str] = []
     slot = recorder.acquire_slot()
     if slot is None:
         raise HTTPException(409, f"Все слоты записи заняты (до {recorder.MAX_SLOTS}).")
     try:
         res = recorder.record_meeting(
-            body.url, out, cfg, slot=slot,
+            url, out, cfg, slot=slot,
             on_log=lambda m: logs.append(str(m)),
             should_stop=lambda: time.time() > deadline)
     finally:
         recorder.release_slot(slot)
+    res.pop("screenshot", None)       # путь на сервере пользователю ни к чему
     res["logs"] = logs
     return res
 
