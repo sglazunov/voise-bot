@@ -52,8 +52,10 @@ def recorded_but_failed(tmp_path):
                              "допоставит его в Weeek.",
                       job_id="abc123456789", out_path=str(out))
     scheduler._states[st.key] = st
+    scheduler._poll_ids["alice"] = {str(TASK)}   # задача — из опроса команды
     yield st, out
     scheduler._states.clear()
+    scheduler._poll_ids.clear()
 
 
 def test_run_now_lets_the_bot_rejoin_without_touching_the_recording(

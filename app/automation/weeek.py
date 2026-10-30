@@ -148,9 +148,14 @@ def list_tasks(token: str, project_id: Any = None,
         if extra_params:
             params.update(extra_params)
         out = _request("GET", "/tm/tasks", token, params=params)
-        if isinstance(out, dict):
-            return out.get("tasks") or []
-        return out if isinstance(out, list) else []
+        # Ответ без списка задач — сбой, а не «задач нет»: опрос по правилу
+        # «задачи нет в выдаче — карточка уходит» стёр бы весь план (ревью
+        # 30.10, второй раунд). Законный пустой ответ — `"tasks": []`.
+        if isinstance(out, dict) and isinstance(out.get("tasks"), list):
+            return out["tasks"]
+        if isinstance(out, list):
+            return out
+        raise WeeekError(f"Weeek вернул ответ без списка задач: {str(out)[:200]}")
 
     first = fetch(0)
     if n_pages == 1 or len(first) < per:
@@ -459,6 +464,26 @@ def upcoming_meetings(token: str, project_id: Any = None, board_id: Any = None,
     meetings.sort(key=lambda m: (m.start is None, m.start or datetime.max.replace(
         tzinfo=timezone.utc)))
     return meetings
+
+
+def team_boards(cfg: dict) -> set[str]:
+    """Доски команды: доска встреч и доска задач из протокола."""
+    return {str(b).strip() for b in (cfg.get("weeek_board_id"),
+                                     cfg.get("weeek_tasks_board_id"))
+            if b not in (None, "") and str(b).strip()}
+
+
+def task_on_team_board(cfg: dict, task_id: Any) -> bool:
+    """Лежит ли задача на доске команды. Для команды без замка — всегда да.
+    Задачу прочитать не удалось — нет: под замком доставка в непроверенную
+    задачу хуже, чем «Прикрепить заново» позже."""
+    if not cfg.get("managed_by_server"):
+        return True
+    try:
+        task = get_task(cfg.get("weeek_token"), task_id)
+    except WeeekError:
+        return False
+    return bool(team_boards(cfg) & set(task_board_ids(task)))
 
 
 _NO_BOARD_WARNED: set[str] = set()

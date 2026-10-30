@@ -10,8 +10,21 @@ import { TZ_RU, TZ_CIS, otherZones, tzLabel } from "../lib/timezones";
 export default function Weeek() {
   // Основатель сервера может открыть настройки клиентской команды ("" — свои).
   const [team, setTeam] = useManagedTeam();
-  const { s, set, save, reload, ready, locked } = useSettings(team, () => setTeam(""));
+  const { s, set, save, reload, ready, locked, canManage, teamNow } = useSettings(team, () => setTeam(""));
   const tq = (sep = "?") => teamQuery(team, sep);
+  // Запрос списка (доски, проекты, колонки, участники, проба) — ответ
+  // показывается, только если команда за время ожидания не сменилась: иначе
+  // доски клиента A появлялись у B, и выбор из них сохранял доску A в B.
+  async function fetchForTeam(url: string): Promise<any | undefined> {
+    const t = team;
+    try {
+      const d = await api.get(url);
+      return teamNow() === t ? d : undefined;
+    } catch (e: any) {
+      if (teamNow() === t) toast(e.message, true);
+      return undefined;
+    }
+  }
   const [token, setToken] = useState("");
   const [meetBoards, setMeetBoards] = useState<any[] | null>(null);
   useEffect(() => {
@@ -26,9 +39,10 @@ export default function Weeek() {
   async function probe() {
     setProbing(true); setProbeRes(null);
     // ?team= — «Диагностика задачи» клиента идёт его токеном, а не своим.
-    try { setProbeRes(await api.get(`/api/automation/weeek/probe?task_id=${encodeURIComponent(probeId.trim())}${tq("&")}`)); }
-    catch (e: any) { toast(e.message, true); }
-    finally { setProbing(false); }
+    try {
+      const d = await fetchForTeam(`/api/automation/weeek/probe?task_id=${encodeURIComponent(probeId.trim())}${tq("&")}`);
+      if (d !== undefined) setProbeRes(d);
+    } finally { setProbing(false); }
   }
   const connected = !!s.weeek_token;
 
@@ -42,15 +56,15 @@ export default function Weeek() {
     } catch (e: any) { toast(e.message, true); }
   }
   async function loadProjects() {
-    try { const d = await api.get(`/api/automation/weeek/projects${tq()}`); setProjects(d.projects || d || []); }
-    catch (e: any) { toast(e.message, true); }
+    const d = await fetchForTeam(`/api/automation/weeek/projects${tq()}`);
+    if (d !== undefined) setProjects(d.projects || d || []);
   }
   // Доска, с которой берутся встречи: список досок проекта встреч.
   async function loadMeetBoards() {
     const pid = String(s.weeek_project_id || "").trim();
     if (!pid) { toast("Сначала укажите id проекта встреч", true); return; }
-    try { const d = await api.get(`/api/automation/weeek/boards?project_id=${encodeURIComponent(pid)}${tq("&")}`); setMeetBoards(d.boards || []); }
-    catch (e: any) { toast(e.message, true); }
+    const d = await fetchForTeam(`/api/automation/weeek/boards?project_id=${encodeURIComponent(pid)}${tq("&")}`);
+    if (d !== undefined) setMeetBoards(d.boards || []);
   }
   async function setManaged(on: boolean) {
     try {
@@ -82,24 +96,25 @@ export default function Weeek() {
   async function loadBoards() {
     const pid = String(s.weeek_tasks_project_id || s.weeek_project_id || "").trim();
     if (!pid) { toast("Сначала укажите id проекта", true); return; }
-    try { const d = await api.get(`/api/automation/weeek/boards?project_id=${encodeURIComponent(pid)}${tq("&")}`); setBoards(d.boards || []); }
-    catch (e: any) { toast(e.message, true); }
+    const d = await fetchForTeam(`/api/automation/weeek/boards?project_id=${encodeURIComponent(pid)}${tq("&")}`);
+    if (d !== undefined) setBoards(d.boards || []);
   }
   async function loadColumns() {
     const bid = String(s.weeek_tasks_board_id || "").trim();
     if (!bid) { toast("Сначала выберите доску", true); return; }
-    try { const d = await api.get(`/api/automation/weeek/board-columns?board_id=${encodeURIComponent(bid)}${tq("&")}`); setColumns(d.columns || []); }
-    catch (e: any) { toast(e.message, true); }
+    const d = await fetchForTeam(`/api/automation/weeek/board-columns?board_id=${encodeURIComponent(bid)}${tq("&")}`);
+    if (d !== undefined) setColumns(d.columns || []);
   }
   async function loadMembers() {
-    try { const d = await api.get(`/api/automation/weeek/members?refresh=1${tq("&")}`); setMembers(d.members || []); toast(`Участников: ${(d.members || []).length}`); }
-    catch (e: any) { toast(e.message, true); }
+    const d = await fetchForTeam(`/api/automation/weeek/members?refresh=1${tq("&")}`);
+    if (d === undefined) return;
+    setMembers(d.members || []); toast(`Участников: ${(d.members || []).length}`);
   }
   const userMap: Record<string, string> = s.weeek_user_map || {};
 
   return (
     <Page title="Weeek" subtitle="Источник задач со встречами и ссылками на Телемост">
-      <TeamPicker s={s} team={team} setTeam={setTeam} onManaged={setManaged} />
+      <TeamPicker s={s} canManage={canManage} team={team} setTeam={setTeam} onManaged={setManaged} />
       <div className="grid lg:grid-cols-2 gap-3.5">
         <Card>
           <div className="flex items-center gap-3 mb-3">

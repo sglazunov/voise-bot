@@ -23,7 +23,10 @@ def _backend_cfg(settings: dict, key: str, owner: str | None = None) -> dict:
     """The settings sub-dict a backend expects. `owner` — команда: локальному
     диску нужна своя подпапка в общей папке по умолчанию (local.base_dir)."""
     if key == "local":
-        return {"local_dir": settings.get("local_dir"), "team": owner or ""}
+        # Без явного владельца — команда, чьи это настройки (`settings.load`
+        # ставит `_team`): иначе статус показывал общую папку сервера.
+        return {"local_dir": settings.get("local_dir"),
+                "team": owner or settings.get("_team") or ""}
     sub = settings.get(key)
     return dict(sub) if isinstance(sub, dict) else {}
 
@@ -83,10 +86,15 @@ def upload(file_path: str, name: str, settings: dict,
             # стоит именно такое значение, поэтому доставка протокола ломалась
             # в конфигурации ПО УМОЛЧАНИЮ. Чужую форму игнорируем и кладём
             # протоколы в подпапку рядом с записями.
-            if Path(folder).is_absolute():
+            # Абсолютная папка — только своя (local.folder_allowed, ревью 30.10,
+            # второй раунд): старое значение, ведущее в чужую команду, при
+            # чтении заменяется подпапкой рядом с записями.
+            base = local.base_dir(bcfg)
+            if Path(folder).is_absolute() and local.folder_allowed(
+                    Path(folder), base, bcfg.get("team") or ""):
                 bcfg["local_dir"] = folder
             else:
-                bcfg["local_dir"] = str(local.base_dir(bcfg) / "protocols")
+                bcfg["local_dir"] = str(base / "protocols")
         elif key == "gdrive":
             # Та же беда, что и с локальным диском: папка протоколов может быть
             # записана в форме Яндекс.Диска («disk:/…») — так стоит В

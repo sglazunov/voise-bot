@@ -35,28 +35,51 @@ export function useManagedTeam(): [string, (t: string) => void] {
 // `onTeamGone` — сервер ответил 403/404 на выбранную команду (вошёл не
 // основатель, команду удалили): страница сбрасывает выбор на свою команду,
 // иначе поля оставались неактивными без единой ошибки.
-export function useSettings(team?: string, onTeamGone?: () => void) {
-  const [s, setS] = useState<Record<string, any> | null>(null);
-  const [failed, setFailed] = useState(false);
-  // Номер последнего запроса. Ответ на ПРЕЖНЮЮ команду, пришедший после
-  // переключения, отбрасывается: иначе форма показывала клиента A при
-  // выбранном B, и «Сохранить» писало настройки A в B.
+//
+// Настройки хранятся ВМЕСТЕ с командой, для которой пришли, и показываются
+// только при совпадении с выбранной (ревью 30.10, второй раунд): сразу после
+// смены команды форма пуста и «Сохранить» закрыто — а не один кадр до эффекта
+// с настройками прежней. `reload` грузит ТЕКУЩУЮ команду, даже если его
+// позвали из замыкания прежней (onSave Weeek: `await save(); reload()`), и
+// ответ на любую команду, кроме текущей, отбрасывается. Раньше такой reload
+// брал новый номер запроса, становился «последним», и настройки A снова
+// ложились в форму B.
+export function useSettings(team = "", onTeamGone?: () => void) {
+  const [loaded, setLoaded] = useState<{ team: string; v: Record<string, any> } | null>(null);
+  const [failedFor, setFailedFor] = useState<string | null>(null);
+  // Основатель ли смотрит — свойство человека, а не команды: выбор команды
+  // не должен пропадать, пока грузятся настройки новой.
+  const [canManage, setCanManage] = useState(false);
+  // Номер последнего запроса и выбранная СЕЙЧАС команда: ответ принимается,
+  // только если он последний и про текущую команду.
   const seq = useRef(0);
+  const current = useRef(team);
+  current.current = team;
   const gone = useRef(onTeamGone);
   gone.current = onTeamGone;
   const load = useCallback(() => {
+    const t = current.current;
     const my = ++seq.current;
-    setFailed(false);
-    return api.get(`/api/automation/settings${teamQuery(team)}`)
-      .then((v) => { if (my === seq.current) setS(v); })
+    setFailedFor(null);
+    const mine = () => my === seq.current && t === current.current;
+    return api.get(`/api/automation/settings${teamQuery(t)}`)
+      .then((v) => {
+        if (!mine()) return;
+        setLoaded({ team: t, v });
+        setCanManage(!!v?.can_manage_teams);
+      })
       .catch((e) => {
-        if (my !== seq.current) return;
-        setFailed(true);
-        if (team && (e?.status === 403 || e?.status === 404)) gone.current?.();
+        if (!mine()) return;
+        setFailedFor(t);
+        if (t && (e?.status === 403 || e?.status === 404)) gone.current?.();
       });
-  }, [team]);
-  useEffect(() => { setS(null); load(); }, [load]);
-  const set = (k: string, v: any) => setS((p) => ({ ...(p || {}), [k]: v }));
+  }, []);
+  useEffect(() => { load(); }, [team, load]);
+  const s = loaded && loaded.team === team ? loaded.v : null;
+  // Правка до загрузки ничего не создаёт: раньше одно поле делало форму
+  // «загруженной», и «Сохранить» затирало остальное пустыми значениями.
+  const set = (k: string, v: any) => setLoaded((p) => (p && p.team === current.current
+    ? { team: p.team, v: { ...p.v, [k]: v } } : p));
   const ready = s !== null;
   const save = (patch: Record<string, any>) => {
     if (!ready) {
@@ -68,5 +91,9 @@ export function useSettings(team?: string, onTeamGone?: () => void) {
   };
   const lockedKeys: string[] = (s && s.locked_keys) || [];
   const locked = (k: string) => lockedKeys.includes(k);
-  return { s: s || {}, ready, failed, set, save, reload: load, locked };
+  // Какая команда выбрана СЕЙЧАС — для ответов страницы, пришедших после
+  // await (списки досок, участники): ответ про прежнюю команду не показывать.
+  const teamNow = useCallback(() => current.current, []);
+  return { s: s || {}, ready, failed: failedFor === team, set, save, reload: load,
+           locked, canManage, teamNow };
 }

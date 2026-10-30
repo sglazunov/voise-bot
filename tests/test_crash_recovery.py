@@ -376,6 +376,7 @@ class TestOneUrlOneBot:
         with s._lock:
             s._states[rec.key] = rec
             s._states[other.key] = other
+            s._poll_ids["alice"] = {"1", "2"}     # обе задачи — из опроса команды
         res = s.run_now("alice", "2")
         assert not res["ok"] and "уже в этом звонке" in res["error"]
 
@@ -444,5 +445,6 @@ class TestОднаКомнатаОдинБот:
         with s._lock:
             s._states[rec.key] = rec
             s._states[other.key] = other
+            s._poll_ids["alice"] = {"1", "2"}     # обе задачи — из опроса команды
         res = s.run_now("alice", "2")
         assert not res["ok"] and "уже в этом звонке" in res["error"]

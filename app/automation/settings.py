@@ -192,25 +192,37 @@ def locked_keys(user: str, cfg: dict | None = None) -> set[str]:
     return keys
 
 
-def _server_path(value: Any) -> bool:
-    """Абсолютный путь на диске сервера: «/srv/…», «C:\\…», «\\\\host\\…».
-    «disk:/…» (Яндекс.Диск) и идентификатор папки Google — не пути."""
+def _server_path(value: Any, cloud: str = "local") -> bool:
+    """Путь на диске сервера: «C:\\…», «\\\\host\\…» — всегда; «/…» — только
+    у локального облака. У Яндекс.Диска «/Протоколы» — законная папка Диска
+    (как «disk:/Протоколы»), и раньше она молча отбрасывалась (ревью 30.10,
+    второй раунд). Идентификатор папки Google — не путь."""
     s = str(value or "").strip()
-    return s.startswith(("/", "\\")) or bool(re.match(r"^[A-Za-z]:", s))
+    if s.startswith("\\") or re.match(r"^[A-Za-z]:", s):
+        return True
+    return s.startswith("/") and (cloud or "local") == "local"
 
 
 def writable(user: str, cfg: dict, values: dict[str, Any]) -> tuple[dict, list[str]]:
     """Разделить присланное на то, что `user` вправе записать, и отброшенное.
 
-    Кроме ключей под замком отбрасывается абсолютная `protocol_folder`: сам
-    ключ команде доступен (папка на Диске или в Google), но у локального облака
-    абсолютный путь становится папкой протоколов как есть — тот же путь в
-    чужую команду, что и через `local_dir`."""
+    Кроме ключей под замком отбрасывается `protocol_folder`, которая для
+    облака команды — путь на диске сервера: сам ключ команде доступен (папка
+    на Диске или в Google), но у локального облака абсолютный путь стал бы
+    папкой протоколов — тот же путь в чужую команду, что и через `local_dir`.
+    Облако — то, что будет ПОСЛЕ сохранения. Уже сохранённое значение не
+    отбрасывается: форма шлёт его целиком, а старое значение и так
+    проверяется при чтении (`clouds.local.folder_allowed`).
+    `automation_save` такой отказ возвращает ошибкой, а не молчит."""
     locked = locked_keys(user, cfg)
     founder = security.is_super_admin(user)
+    cloud = values.get("cloud") if "cloud" in values and "cloud" not in locked else None
+    cloud = cloud or cfg.get("cloud") or "local"
     keep, dropped = {}, []
     for k, v in values.items():
-        if k in locked or (not founder and k == "protocol_folder" and _server_path(v)):
+        bad_folder = (not founder and k == "protocol_folder"
+                      and v != cfg.get("protocol_folder") and _server_path(v, cloud))
+        if k in locked or bad_folder:
             dropped.append(k)
         else:
             keep[k] = v

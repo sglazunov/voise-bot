@@ -944,6 +944,15 @@ class JobStore:
                     self._set(job, delivery_error="Не задан токен Weeek — задайте его в «Автоматизации».")
                     return
                 tid = _weeek_task_id(job.deliver_weeek_task)
+                # Под замком — только в задачу на доске команды. Проверка здесь,
+                # а не только в ручках: «Прикрепить заново», `_resume_pending` и
+                # `_late_upload` доставляют в СОХРАНЁННУЮ задачу, а её могли
+                # перенести к другому клиенту (ревью 30.10, второй раунд).
+                if not weeek.task_on_team_board(cfg, tid):
+                    self._set(job, delivery_error=(
+                        "Задача Weeek не на доске вашей команды — ссылка на "
+                        "протокол в неё не записана."))
+                    return
                 field = (cfg.get("weeek_protocol_field") or "Протокол встречи").strip()
                 if cfg.get("weeek_set_protocol_field", True) and field:
                     res = weeek.set_custom_field(token, tid, field, url)
