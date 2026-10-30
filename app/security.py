@@ -272,7 +272,8 @@ def set_phone(username: str, password: str, new_phone: str) -> dict:
     can't silently re-point recovery to the attacker's number)."""
     username = normalize_username(username)
     if not verify_user(username, password):
-        return {"ok": False, "error": "Текущий пароль неверный."}
+        return {"ok": False, "error": "Текущий пароль неверный.",
+                "bad_password": True}
     phone = normalize_phone(new_phone)
     if not phone:
         return {"ok": False, "error": "Укажите корректный номер телефона (10–15 цифр)."}
@@ -350,7 +351,8 @@ def clear_telegram(username: str, password: str) -> dict:
     смена телефона: угнанная сессия не должна лишать владельца канала)."""
     username = normalize_username(username)
     if not verify_user(username, password):
-        return {"ok": False, "error": "Текущий пароль неверный."}
+        return {"ok": False, "error": "Текущий пароль неверный.",
+                "bad_password": True}
     with _LOCK:
         users = _load_users()
         if username not in users:
@@ -682,26 +684,59 @@ def change_password(username: str, new: str, old: str | None = None,
     return {"ok": True}
 
 
-def delete_account(username: str, password: str) -> dict:
+def _deletion_blocker(users: dict, username: str) -> str:
+    """Почему аккаунт удалить нельзя, или ''."""
+    if username not in users:
+        return "Аккаунт не найден."
+    # A team-admin can't delete the workspace out from under its members
+    # (all shared data lives under the admin's login). They must remove the
+    # members first. A member deleting themselves only removes their login.
+    if users[username].get("is_admin"):
+        members = [u for u in users
+                   if u != username and (users[u].get("team") or u) == username]
+        if members:
+            return (f"В вашей команде есть участники ({len(members)}). "
+                    "Сначала удалите их аккаунты.")
+    # Основатель не удаляет себя, пока на сервере есть другие аккаунты.
+    # Иначе роль переходила к самому раннему из оставшихся (is_super_admin
+    # заполняет пустоту), а при открытой регистрации это случайный клиент —
+    # и он получал `?team=` над настройками ВСЕХ команд (адверсариальное
+    # ревью 30.10). Последний аккаунт сервера удалить можно: сервер пуст, и
+    # следующий зарегистрированный честно основатель, как на свежей установке.
+    if len(users) > 1 and is_super_admin(username):
+        return ("Вы — основатель сервера: пока на нём есть другие аккаунты, "
+                "удалить вашу учётную запись нельзя — роль основателя перешла "
+                "бы к случайному клиенту. Сначала передайте роль (см. "
+                "CLAUDE.md, «Удаление аккаунта и роль основателя»).")
+    return ""
+
+
+def delete_account(username: str, password: str,
+                   before_release: "Callable[[str], None] | None" = None) -> dict:
     """Permanently delete an account: the login, phone, sessions, recovery code
     and ALL of the user's data (settings, tokens, LLM keys, AI context, meeting
-    states, and their files on disk). Requires the current password."""
+    states, and their files on disk). Requires the current password.
+
+    `before_release(username)` — остановить и удалить данные, живущие вне
+    этого модуля (задачи, карточки встреч), ПОКА логин ещё занят. Раньше логин
+    освобождался первым: зарегистрировавшийся в это окно видел старые
+    расшифровки, а потом удаление задач стирало уже ЕГО. Исключение из
+    колбэка уходит наверх, и аккаунт остаётся — удалённым с живыми данными
+    он не бывает."""
     username = normalize_username(username)
     if not verify_user(username, password):
-        return {"ok": False, "error": "Пароль неверный."}
+        return {"ok": False, "error": "Пароль неверный.", "bad_password": True}
+    with _LOCK:
+        err = _deletion_blocker(_load_users(), username)
+    if err:
+        return {"ok": False, "error": err}
+    if before_release is not None:
+        before_release(username)
     with _LOCK:
         users = _load_users()
-        if username not in users:
-            return {"ok": False, "error": "Аккаунт не найден."}
-        # A team-admin can't delete the workspace out from under its members
-        # (all shared data lives under the admin's login). They must remove the
-        # members first. A member deleting themselves only removes their login.
-        if users[username].get("is_admin"):
-            members = [u for u in users
-                       if u != username and (users[u].get("team") or u) == username]
-            if members:
-                return {"ok": False, "error": f"В вашей команде есть участники "
-                        f"({len(members)}). Сначала удалите их аккаунты."}
+        err = _deletion_blocker(users, username)   # пока чистили, мог войти участник
+        if err:
+            return {"ok": False, "error": err}
         users.pop(username, None)
         _save_users(users)
         rec = _load_recovery()

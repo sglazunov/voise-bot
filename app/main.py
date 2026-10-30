@@ -215,10 +215,18 @@ _PUBLIC_PATHS = {"/login", "/register", "/recover", "/healthz",
                  "/apple-touch-icon.png", "/icon-512.png", "/og-image.png",
                  "/api/auth/login", "/api/auth/register",
                  "/api/auth/recover/request", "/api/auth/recover/verify"}
-# Формы, которые открывают сессию: их CSRF-проверка не ждёт живой сессии и
-# строже общей — соседний поддомен (same-site) тоже чужой: на kreativdelo.ru
-# живут и другие сайты.
-_AUTH_FORM_PATHS = {"/api/auth/login", "/api/auth/register"}
+# Формы без сессии: вход, регистрация и восстановление пароля. Их CSRF-проверка
+# не ждёт живой сессии: иначе чужая страница логинит браузер жертвы в аккаунт
+# атакующего (P1-3) или шлёт жертве SMS/Telegram с кодом и тратит её лимит
+# (адверсариальное ревью 30.10).
+_AUTH_FORM_PATHS = {"/api/auth/login", "/api/auth/register",
+                    "/api/auth/recover/request", "/api/auth/recover/verify"}
+# Соседний поддомен (`Sec-Fetch-Site: same-site`) — ЧУЖОЙ сайт: на
+# kreativdelo.ru живут и другие сайты, а JSON, отправленный как Blob без
+# Content-Type, не требует preflight. Доверять поддоменам можно только явно,
+# если они все свои: VTX_TRUST_SUBDOMAINS=1. Формы без сессии поддоменам не
+# доверяют никогда.
+_TRUST_SAME_SITE = os.getenv("VTX_TRUST_SUBDOMAINS", "0") == "1"
 _SECURE_COOKIE = os.getenv("VTX_HTTPS", "0") == "1"
 
 
@@ -237,7 +245,8 @@ async def _auth_gate(request: Request, call_next):
     request.state.user = user
     path = request.url.path
     if (user or path in _AUTH_FORM_PATHS) and _cross_site_write(
-            request, allow_same_site=path not in _AUTH_FORM_PATHS):
+            request,
+            allow_same_site=_TRUST_SAME_SITE and path not in _AUTH_FORM_PATHS):
         # CSRF: до сих пор защита держалась только на SameSite=Lax у куки.
         # Sec-Fetch-Site ставит сам браузер, со страницы атакующего его не
         # подделать; запросы со своего сайта и навигация проходят.
@@ -826,12 +835,39 @@ class PhoneChange(BaseModel):
     phone: str
 
 
+# Все проверки ТЕКУЩЕГО пароля в профиле — смена пароля, телефона, привязка и
+# отвязка Telegram, удаление аккаунта — делят ОДИН лимит попыток: по логину
+# (угнанную сессию можно гонять с любых IP) и по IP. Раньше лимит был только у
+# смены пароля, а остальные четыре отвечали на неверный и верный пароль
+# по-разному без ограничений: перебор с украденной сессией, затем смена пароля
+# — тот самый захват, который закрывал P1-1 (адверсариальное ревью 30.10).
+def _pwd_keys(user: str, request: Request) -> tuple[str, str]:
+    return (f"pwd:{user}", f"pwd:{_client_ip(request)}")
+
+
+def _pwd_throttle(keys: tuple[str, str]) -> None:
+    wait = security.throttle_check(*keys)
+    if wait:
+        raise HTTPException(429, f"Слишком много неудачных попыток. Подождите {wait} с.")
+
+
+def _pwd_outcome(keys: tuple[str, str], res: dict) -> None:
+    """Учесть исход проверки пароля; неудача — 400 с текстом ошибки."""
+    if res.get("ok"):
+        security.throttle_clear(*keys)
+        return
+    if res.get("bad_password"):
+        security.throttle_fail(*keys)
+    raise HTTPException(400, res.get("error"))
+
+
 @app.post("/api/profile/phone")
-def profile_change_phone(body: PhoneChange, user: str = Depends(current_user)):
+def profile_change_phone(body: PhoneChange, request: Request,
+                         user: str = Depends(current_user)):
     """Change the recovery phone; requires the CURRENT password."""
-    res = security.set_phone(user, body.password, body.phone)
-    if not res.get("ok"):
-        raise HTTPException(400, res.get("error"))
+    keys = _pwd_keys(user, request)
+    _pwd_throttle(keys)
+    _pwd_outcome(keys, security.set_phone(user, body.password, body.phone))
     return {"ok": True, "phone_masked": security.masked_phone(user)}
 
 
@@ -840,7 +876,8 @@ class TelegramLink(BaseModel):
 
 
 @app.post("/api/profile/telegram/link")
-def profile_telegram_link(body: TelegramLink, user: str = Depends(current_user)):
+def profile_telegram_link(body: TelegramLink, request: Request,
+                          user: str = Depends(current_user)):
     """Выдать одноразовый код привязки Telegram. Требует ТЕКУЩИЙ пароль — как
     смена телефона: угнанная сессия не должна перевести восстановление пароля
     на чужой Telegram. Сама привязка завершается, когда человек отправит боту
@@ -848,18 +885,22 @@ def profile_telegram_link(body: TelegramLink, user: str = Depends(current_user))
     if not telegram.configured():
         raise HTTPException(400, "Telegram-бот на сервере не настроен "
                                  "(VTX_TELEGRAM_BOT_TOKEN).")
-    if not security.verify_user(user, body.password):
-        raise HTTPException(400, "Текущий пароль неверный.")
+    keys = _pwd_keys(user, request)
+    _pwd_throttle(keys)
+    _pwd_outcome(keys, {"ok": True} if security.verify_user(user, body.password)
+                 else {"ok": False, "error": "Текущий пароль неверный.",
+                       "bad_password": True})
     code = telegram.new_link_code(user)
     return {"ok": True, "code": code, "url": telegram.link_url(code),
             "bot": telegram.bot_username(), "ttl": telegram.LINK_CODE_TTL}
 
 
 @app.post("/api/profile/telegram/unlink")
-def profile_telegram_unlink(body: TelegramLink, user: str = Depends(current_user)):
-    res = security.clear_telegram(user, body.password)
-    if not res.get("ok"):
-        raise HTTPException(400, res.get("error"))
+def profile_telegram_unlink(body: TelegramLink, request: Request,
+                            user: str = Depends(current_user)):
+    keys = _pwd_keys(user, request)
+    _pwd_throttle(keys)
+    _pwd_outcome(keys, security.clear_telegram(user, body.password))
     return {"ok": True}
 
 
@@ -875,13 +916,11 @@ def profile_change_password(body: PasswordChange, request: Request,
                             user: str = Depends(current_user)):
     """Смена пароля: текущий пароль ИЛИ телефон + одноразовый код.
 
-    Лимит попыток — по логину (сессию можно гонять с любых IP) и по IP. После
-    смены гаснут ВСЕ сессии аккаунта — возможно, угнанные, — а этому браузеру
-    выдаётся новая кука, чтобы человек не вылетал из профиля."""
-    keys = (f"pwd:{user}", f"pwd:{_client_ip(request)}")
-    wait = security.throttle_check(*keys)
-    if wait:
-        raise HTTPException(429, f"Слишком много неудачных попыток. Подождите {wait} с.")
+    Лимит попыток — общий с другими проверками пароля в профиле (`_pwd_keys`).
+    После смены гаснут ВСЕ сессии аккаунта — возможно, угнанные, — а этому
+    браузеру выдаётся новая кука, чтобы человек не вылетал из профиля."""
+    keys = _pwd_keys(user, request)
+    _pwd_throttle(keys)
     res = security.change_password(user, body.new_password,
                                    old=body.old_password or None,
                                    phone=body.phone or None,
@@ -904,23 +943,36 @@ class AccountDelete(BaseModel):
 def profile_delete(body: AccountDelete, request: Request,
                    user: str = Depends(current_user)):
     """Permanently delete the current account (login, phone, all data). Requires
-    the current password. Clears the session — the client redirects to /login."""
-    res = security.delete_account(user, body.password)
-    if not res.get("ok"):
-        raise HTTPException(400, res.get("error"))
-    # Задачи и карточки встреч живут не под логином в users/, а в общем
-    # хранилище, ключом по команде (= логин владельца). Без этого логин
-    # освобождался вместе с чужими протоколами (ревью 30.10, P0-2).
+    the current password. Clears the session — the client redirects to /login.
+
+    Порядок (адверсариальное ревью 30.10): сначала карточки встреч (идущие
+    записи останавливаются, опрос Weeek больше не заводит новых), потом задачи
+    распознавания, и ТОЛЬКО ПОТОМ освобождается логин. Задачи и карточки живут
+    не под логином в users/, а в общем хранилище, ключом по команде (= логин
+    владельца) — без этого логин освобождался вместе с чужими протоколами
+    (P0-2). Сбой удаления задач — 500, аккаунт остаётся."""
+    from .automation.scheduler import scheduler
+    keys = _pwd_keys(user, request)
+    _pwd_throttle(keys)
+
+    def purge(login: str) -> None:
+        scheduler.forget_team(login)
+        store.delete_owner(login)
+
+    restore = True
     try:
-        store.delete_owner(user)
+        res = security.delete_account(user, body.password, before_release=purge)
+        restore = not res.get("ok")
     except Exception:  # noqa: BLE001
-        log.error("Задачи удалённого аккаунта %s не удалены", user, exc_info=True)
-    try:
-        from .automation.scheduler import scheduler
-        scheduler.forget_team(user)
-    except Exception:  # noqa: BLE001
-        log.warning("Карточки встреч удалённого аккаунта %s не забыты", user,
-                     exc_info=True)
+        log.error("Данные аккаунта %s не удалены — аккаунт оставлен", user,
+                  exc_info=True)
+        raise HTTPException(500, "Не удалось удалить данные аккаунта. Аккаунт НЕ "
+                                 "удалён — повторите позже.")
+    finally:
+        # Аккаунт остался — его карточки встреч возвращаются (идущая запись
+        # уже остановлена, но сохраняется и обрабатывается как обычно).
+        scheduler.forget_done(user, restore=restore)
+    _pwd_outcome(keys, res)
     security.destroy_session(request.cookies.get(security.SESSION_COOKIE))
     resp = JSONResponse({"ok": True, "detail": "Аккаунт удалён."})
     resp.delete_cookie(security.SESSION_COOKIE)
