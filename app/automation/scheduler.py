@@ -67,10 +67,11 @@ class MeetingState:
     # Служебный путь файла в облаке (disk:/…): нужен поздней дозагрузке, чтобы
     # ОПУБЛИКОВАТЬ уже лежащий файл, а не заливать гигабайт заново.
     cloud_path: str | None = None
-    # Прежние части встречи (повторный заход), чьё видео облако так и не
-    # приняло: {out_path, cloud_path, job_id, upload_error}. Карточка и снапшот
-    # описывают ПОСЛЕДНЮЮ часть, и без этого списка застрявшая первая часть
-    # после перезапуска не дозаливалась, а через двое суток её удаляла уборка.
+    # Прежние части встречи (повторный заход) — ВСЕ, а не только застрявшие:
+    # {out_path, cloud_path, cloud_url, job_id, upload_error}. Карточка и
+    # снапшот описывают ПОСЛЕДНЮЮ часть; здесь — задача каждой прежней части
+    # (восстановление, удаление исходника), её облачная копия (дозаливка) и
+    # номер следующей части (имя файла: облако не должно затереть прежнюю).
     parts: list = field(default_factory=list)
     # Чем кончилась запись: silence | max_duration | chat_stop | call_ended |
     # left_call | nobody_joined | thinned_out | stopped | error. Рекордер
@@ -296,6 +297,11 @@ class Scheduler:
         self._resumed = False
         # Файлы, которые сейчас дозаливаются в облако: одна дозаливка на файл.
         self._late_uploads: set[str] = set()
+        # Карточки, у которых идёт `_run` (запись → выгрузка → задача). Второй
+        # `_run` на той же карточке — повторный заход, пока прежняя часть ещё
+        # выгружается, — перепутывал части: облачные поля и задача одной
+        # ложились на другую (второй раунд ревью 30.10).
+        self._active_runs: set[str] = set()
 
     # -- lifecycle ----------------------------------------------------------
     def start(self) -> None:
@@ -1027,6 +1033,9 @@ class Scheduler:
         прерывался на первом же клике, и человек получал ложное «изменилась
         вёрстка Телемоста» вместо «автоматика выключена».
         """
+        # Один `_run` на карточку (`_launch_manual` отказывает, пока ключ здесь).
+        with self._lock:
+            self._active_runs.add(st.key)
         try:
             user = st.owner
             cfg = auto_settings.load(user)
@@ -1064,7 +1073,27 @@ class Scheduler:
             bad = '\\/*?"<>|'  # strip chars that break file names / URLs (keep the time ':')
             title = "".join(" " if c in bad else c for c in str(st.title or "")).strip()
             title = " ".join(title.split())[:80]
-            fname = f"{stamp}. - {title}.mp4" if title else f"{stamp}.mp4"
+            # Повторный заход: карточка переходит на НОВУЮ часть. Прежняя
+            # уходит в `parts` ВСЕГДА, а не только когда облако её не приняло:
+            # с ней уезжают её задача распознавания, путь и ссылка в облаке
+            # (второй раунд ревью 30.10). Иначе `job_id` первой части оставался
+            # на карточке второй — восстановление после падения посреди второй
+            # части видело «задачу» и вторую часть не обрабатывало вовсе, а
+            # карточка во время записи второй части показывала «Готово» по
+            # задаче первой (без кнопки «Стоп»).
+            prev = st.out_path
+            prev_kept = bool(prev) and bool(
+                st.job_id or st.cloud_url or st.cloud_path or Path(prev).exists())
+            new_part = prev_kept and all(p.get("out_path") != prev for p in st.parts)
+            # ⚠️ Имя части — по её НОМЕРУ на карточке, а не по свободному месту
+            # на диске сервера: уехавшая в облако первая часть локально уже
+            # удалена, `_free_path` отдавал второй ТО ЖЕ имя, и облако
+            # затирало первую часть второй (`overwrite`) — публичная ссылка
+            # первой части в Weeek показывала уже вторую. Номер переживает
+            # перезапуск: `parts` есть в снапшоте.
+            n = len(st.parts) + (1 if new_part else 0) + 1
+            base = f"{stamp}. - {title}" if title else stamp
+            fname = f"{base}.mp4" if n == 1 else f"{base} (часть {n}).mp4"
             rec_dir = security.user_dir(user) / "recordings"  # private per-user
             rec_dir.mkdir(parents=True, exist_ok=True)
             out = str(_free_path(rec_dir / fname))
@@ -1072,24 +1101,20 @@ class Scheduler:
             # записи с тем же именем (видео удалили, а живая расшифровка
             # осталась) подмешали бы в новую встречу чужие сегменты.
             store_drop_sidecars(out)
-            # Повторный заход: карточка переходит на НОВУЮ часть, и всё, что
-            # описывало облачную копию прежней, сбрасывается. Путь и ссылка
-            # первой части у второй приводили к потере записи: неудачная
-            # выгрузка второй оставляла путь первой, дозаливка «публиковала»
-            # его, получала ok и удаляла локальный файл второй части; а при
-            # падении посреди второй части восстановление видело ссылку и не
-            # выгружало её вовсе (ревью 30.10). Прежняя часть, которую облако
-            # так и не приняло, уходит в `parts` — её дозаливка продолжается и
-            # переживает перезапуск.
-            prev = st.out_path
-            stuck = bool(prev and prev != out and st.upload_error
-                         and not st.cloud_url and Path(prev).exists())
+            # Всё, что описывало прежнюю часть, сбрасывается с карточки ОДНИМ
+            # блоком под локом с переносом в `parts`: дозаливка прежней части
+            # пишет под тем же локом, и её результат не теряется между ними.
+            # Путь и ссылка первой части у второй приводили к потере записи
+            # (ревью 30.10): дозаливка «публиковала» путь первой, получала ok и
+            # удаляла локальный файл второй.
             with self._lock:
-                if stuck and all(p.get("out_path") != prev for p in st.parts):
+                if new_part and all(p.get("out_path") != prev for p in st.parts):
                     st.parts.append({"out_path": prev, "cloud_path": st.cloud_path,
+                                     "cloud_url": st.cloud_url,
                                      "job_id": st.job_id,
                                      "upload_error": st.upload_error})
                 st.cloud_url = st.cloud_path = st.upload_error = None
+                st.job_id = None
                 # Persist the file path BEFORE recording starts: if the process
                 # dies mid-meeting, the restart scan (_resume_pending) finds the
                 # fMP4 by this path and queues it instead of losing it.
@@ -1315,6 +1340,8 @@ class Scheduler:
             self._set(st, "error", f"Сбой: {e}")
         finally:
             recorder.release_slot(slot)
+            with self._lock:
+                self._active_runs.discard(st.key)
 
     # -- Weeek custom-field writes (retried; stale links wiped) --------------
 
@@ -1342,8 +1369,7 @@ class Scheduler:
                 return  # purged (retention) — nothing left to deliver
             with self._lock:
                 current = st.out_path == out
-                part = None if current else next(
-                    (p for p in st.parts if p.get("out_path") == out), None)
+                part = None if current else self._part_of(st, out)
                 cloud_path = st.cloud_path if current else (part or {}).get("cloud_path")
             place = _meeting_place(st, cfg, None, out)
             up = delivery.publish_or_upload(out, cfg, cloud_path, lambda *_: None,
@@ -1356,18 +1382,32 @@ class Scheduler:
             url = up.get("url") if up.get("ok") else None
             error = None if up.get("ok") else (up.get("error") or "облако недоступно")
             with self._lock:
-                # Карточка могла перейти на новую часть, пока шла выгрузка.
+                # Карточка могла перейти на новую часть, пока шла выгрузка:
+                # и «текущая ли», и запись части смотрим ЗАНОВО. Взятая до
+                # выгрузки часть была None — у дозаливки, пересёкшейся с
+                # повторным заходом, терялась задача распознавания, и исходник
+                # удалялся, пока она стояла в очереди (второй раунд ревью).
                 current = st.out_path == out
+                part = None if current else self._part_of(st, out)
                 if current:
                     st.cloud_path, st.upload_error = cloud_path, error
                     if url:
                         st.cloud_url = url
-                elif error and part is not None:
+                    jid = st.job_id
+                elif part is not None:
+                    # Запись части остаётся: в ней задача распознавания, а
+                    # номер части держит имена следующих частей уникальными.
                     part.update(cloud_path=cloud_path, upload_error=error)
-                elif not error:
-                    st.parts = [p for p in st.parts if p.get("out_path") != out]
+                    if url:
+                        part["cloud_url"] = url
+                    jid = part.get("job_id")
+                else:
+                    jid = None
+            # Ссылка сохраняется ДО записи в Weeek: та ретраится минутами, и
+            # перезапуск в это окно заливал видео второй раз (на Google Drive —
+            # дубль файла и второй комментарий).
+            snapshots.save(st)
             if error:
-                snapshots.save(st)
                 continue
             token = cfg.get("weeek_token")
             field = (cfg.get("weeek_video_field") or "").strip()
@@ -1381,14 +1421,12 @@ class Scheduler:
                 weeek.add_comment(token, st.task_id,
                                   f"🎥 Запись встречи: {url}" if current else
                                   f"🎥 Запись встречи (прежняя часть): {url}")
-            snapshots.save(st)  # the late-delivered cloud link survives restarts
-            jid = st.job_id if current else (part or {}).get("job_id")
             if current:
                 # Запись всё-таки уехала — строка исхода переписывается уже без
                 # upload_error. Иначе «осталось на сервере» в метрике оставалось
                 # бы навсегда, хотя облако приняло видео получасом позже.
                 self._record_outcome(st, "recorded")
-            job = store.get(jid) if jid else None
+            job = self._job_of_file(out, jid)
             # Протокол той же встречи мог упасть на ТОЙ ЖЕ публикации — теперь,
             # когда облако отвечает, прикрепляем и его.
             if job is not None and job.status == "done" and getattr(job, "delivery_error", None):
@@ -1466,6 +1504,17 @@ class Scheduler:
         job = store.get(job_id)
         if not job or st.forgotten:
             return
+
+        def close(state: str, detail: str) -> None:
+            """Закрыть карточку — только если она ещё описывает ЭТУ задачу.
+            После повторного захода карточка — уже следующая часть: ожидатель
+            первой ставил ей «Готово» посреди записи второй, пропадала кнопка
+            «Стоп», а комната считалась свободной (второй раунд ревью 30.10)."""
+            if st.job_id == job_id:
+                self._set(st, state, detail)
+            else:
+                log(f"Часть встречи (job {job_id}): {detail}")
+
         where = "в облаке" if st.cloud_url else "локально"
         provs = getattr(job, "docx_providers", None)
         if job.status != "done" or not provs:
@@ -1477,15 +1526,15 @@ class Scheduler:
             from . import notify
             notify.send(cfg, f"⚠ Протокол «{st.title or task_id}» не собрался: "
                              f"{reason}. Нажмите «Пересобрать» в приложении.")
-            self._set(st, "error",
-                      f"Протокол не собрался — job {job_id}. «Пересобрать» "
-                      f"допоставит его в Weeek. Запись {where}.")
+            close("error",
+                  f"Протокол не собрался — job {job_id}. «Пересобрать» "
+                  f"допоставит его в Weeek. Запись {where}.")
             return
         err = (getattr(job, "delivery_error", "") or "").strip()
         if err:
             report(f"⚠ Протокол готов, но прикрепить не удалось: {err}")
-            self._set(st, "error",
-                      f"Протокол готов, но не прикреплён: {err} — job {job_id}.")
+            close("error",
+                  f"Протокол готов, но не прикреплён: {err} — job {job_id}.")
             return
         log("Протокол прикреплён к задаче Weeek ✓")
         from . import notify
@@ -1493,14 +1542,16 @@ class Scheduler:
         notify.send(cfg, f"📄 Протокол готов: «{st.title or task_id}» — "
                          "прикреплён к задаче Weeek."
                          + (f"\n{proto_url}" if proto_url else ""))
-        self._set(st, "done",
-                  f"Готово. Запись {where}, протокол прикреплён — job {job_id}.")
+        close("done",
+              f"Готово. Запись {where}, протокол прикреплён — job {job_id}.")
 
     def _enrich_from_job(self, m: dict) -> None:
         """Overlay the live transcription/protocol stage onto a meeting dict,
         read from its job's own status (recognition → protocol → done)."""
         jid = m.get("job_id")
-        if not jid:
+        if not jid or m.get("state") == "recording":
+            # Идёт запись — она важнее статуса задачи: «Готово» по задаче
+            # прежней части прятало кнопку «Стоп» (второй раунд ревью 30.10).
             return
         job = store.get(jid)
         if job is None:
@@ -1617,24 +1668,30 @@ class Scheduler:
                 video_stuck = bool(
                     out_path and snap.get("upload_error")
                     and not snap.get("cloud_url") and Path(out_path).exists())
-                # Прежние части встречи (повторный заход), так и не уехавшие.
-                left = [p for p in (snap.get("parts") or [])
-                        if p.get("out_path") and Path(p["out_path"]).exists()]
-                # Команда без Weeek — это «бот по ссылке»: её встречи тоже
-                # восстанавливаются (раньше команда пропускалась целиком).
-                # Встрече из Weeek без токена доставлять протокол некуда —
-                # только видео.
-                weeek_ok = has_weeek or is_adhoc(task_id)
-                if snap.get("state") not in pending or not weeek_ok:
-                    if video_stuck or left:
-                        self._resume_video(team, key, task_id, start, snap, cfg,
-                                           video_stuck)
-                    continue
+                job = store.get(jid) if jid else None
+                if job is not None and out_path and job.audio_path \
+                        and job.audio_path != out_path:
+                    # Снапшот прежнего кода: у второй части осталась задача
+                    # ПЕРВОЙ (повторный заход не сбрасывал job_id). Задача
+                    # уходит в запись прежней части, а текущая часть без задачи
+                    # — сирота, иначе её после падения не обработал бы никто.
+                    parts = [dict(p) for p in (snap.get("parts") or [])]
+                    if all(p.get("job_id") != jid for p in parts):
+                        parts.append({"out_path": job.audio_path, "job_id": jid})
+                    snap = dict(snap, job_id=None, parts=parts, _moved_job=jid)
+                    jid, job = None, None
+                # Прежние части встречи (повторный заход): видео, не уехавшее
+                # в облако, или задача, которую прервал перезапуск.
+                left = self._parts_pending(snap.get("parts"))
+                pending_state = snap.get("state") in pending
 
                 # Д8: the process died DURING the recording — no job yet, but
                 # the fMP4 on disk is readable up to the crash. Queue it for the
-                # normal transcribe→protocol→deliver pipeline.
-                if not jid and out_path and Path(out_path).exists() \
+                # normal transcribe→protocol→deliver pipeline. Токен Weeek для
+                # этого НЕ нужен (второй раунд ревью 30.10: без него запись,
+                # прерванная посреди встречи, не обрабатывалась вовсе) — без
+                # токена `_finalize_orphan` пропускает только запись в Weeek.
+                if pending_state and not jid and out_path and Path(out_path).exists() \
                         and Path(out_path).stat().st_size > 0:
                     st = self._revive(team, key, task_id, start, snap,
                                       state="transcribing", detail="",
@@ -1643,12 +1700,16 @@ class Scheduler:
                     self._finalize_orphan(st, cfg, out_path)
                     continue
 
-                if not jid:
+                # Команда без Weeek — это «бот по ссылке»: её встречи тоже
+                # восстанавливаются (раньше команда пропускалась целиком).
+                # Встрече из Weeek без токена доставлять протокол некуда —
+                # только видео.
+                weeek_ok = has_weeek or is_adhoc(task_id)
+                if not pending_state or not weeek_ok or not jid:
                     if video_stuck or left:
                         self._resume_video(team, key, task_id, start, snap, cfg,
                                            video_stuck)
                     continue
-                job = store.get(jid)
                 if job is None:
                     if video_stuck or left:
                         self._resume_video(team, key, task_id, start, snap, cfg,
@@ -1719,8 +1780,10 @@ class Scheduler:
                 if st.out_path == fresh.out_path:
                     st.cloud_path = st.cloud_path or fresh.cloud_path
                     st.upload_error = st.upload_error or fresh.upload_error
-                if not st.parts:
-                    st.parts = fresh.parts
+                known = {p.get("out_path") for p in st.parts}
+                st.parts.extend(p for p in fresh.parts if p.get("out_path") not in known)
+                if st.job_id and st.job_id == snap.get("_moved_job"):
+                    st.job_id = None
         return st
 
     def _start_late_upload(self, team: str, st: MeetingState, cfg: dict,
@@ -1745,12 +1808,53 @@ class Scheduler:
         threading.Thread(target=run, daemon=True, name="vtx-late-upload").start()
         return True
 
+    @staticmethod
+    def _part_of(st: MeetingState, out: str) -> "dict | None":
+        """Запись прежней части карточки по её файлу."""
+        return next((p for p in st.parts if p.get("out_path") == out), None)
+
+    @staticmethod
+    def _job_of_file(out: str, jid: "str | None"):
+        """Задача распознавания этого файла: по id, а если связь потеряна
+        (снапшот прежнего кода, гонка с повторным заходом) — по пути исходника.
+        Без задачи дозаливка удалила бы файл, который она ещё читает."""
+        job = store.get(jid) if jid else None
+        if job is not None:
+            return job
+        mine = [j for j in store.list() if j.audio_path == out]
+        return next((j for j in mine if j.status != "done"), mine[0] if mine else None)
+
+    @staticmethod
+    def _part_stuck(p: dict) -> bool:
+        """Прежняя часть, чьё видео облако так и не приняло."""
+        out = p.get("out_path")
+        return bool(out and p.get("upload_error") and not p.get("cloud_url")
+                    and Path(out).exists())
+
+    @staticmethod
+    def _part_interrupted(p: dict) -> bool:
+        """Задачу прежней части прервал перезапуск — исходник ещё цел."""
+        job = store.get(p.get("job_id")) if p.get("job_id") else None
+        return bool(job is not None and job.status == "error"
+                    and "перезапущен" in (job.error or "")
+                    and job.audio_path and Path(job.audio_path).exists())
+
+    def _parts_pending(self, parts) -> bool:
+        return any(self._part_stuck(p) or self._part_interrupted(p) for p in parts or [])
+
     def _resume_parts(self, team: str, st: MeetingState, cfg: dict) -> None:
-        """Дозаливка прежних частей встречи после перезапуска."""
+        """Прежние части встречи после перезапуска: дозаливка видео, которое
+        облако не приняло, и повтор задачи, которую прервал перезапуск (раньше
+        её держала карточка, теперь — запись части)."""
         for p in list(st.parts):
-            out = p.get("out_path")
-            if out and Path(out).exists():
-                self._start_late_upload(team, st, cfg, out, first_delay=30)
+            if self._part_stuck(p):
+                self._start_late_upload(team, st, cfg, p["out_path"], first_delay=30)
+            if self._part_interrupted(p):
+                try:
+                    store.retry(p["job_id"])
+                except Exception:  # noqa: BLE001
+                    _LOG.warning("Не удалось перезапустить задачу %s прежней части",
+                                 p.get("job_id"), exc_info=True)
 
     def _resume_video(self, team: str, key: str, task_id: str, start,
                       snap: dict, cfg: dict, video_stuck: bool = True) -> None:
@@ -2102,6 +2206,26 @@ class Scheduler:
                 for st in gone:
                     st.forgotten = False
                     self._states.setdefault(st.key, st)
+        if restore and gone:
+            self._rearm_uploads(team, gone)
+
+    def _rearm_uploads(self, team: str, cards: list) -> None:
+        """Удаление аккаунта сорвалось: дозаливки, вышедшие по `forgotten`,
+        запускаются снова — иначе видео оставалось на сервере до уборки
+        (второй раунд ревью 30.10). Ещё живую дозаливку `_start_late_upload`
+        второй раз не заведёт."""
+        try:
+            cfg = auto_settings.load(team)
+        except Exception:  # noqa: BLE001
+            _LOG.warning("Настройки команды %s не прочитаны — дозаливка не "
+                         "возобновлена", team, exc_info=True)
+            return
+        for st in cards:
+            out = st.out_path
+            if (out and st.upload_error and not st.cloud_url
+                    and Path(out).exists()):
+                self._start_late_upload(team, st, cfg, out, first_delay=30)
+            self._resume_parts(team, st, cfg)
 
     def stop_recording(self, user: str | None = None, task_id=None) -> dict:
         """Stop recording(s) in progress. With `task_id` — just that meeting;
@@ -2182,6 +2306,13 @@ class Scheduler:
             if st.state == "recording":
                 recorder.release_slot(slot)
                 return {"ok": False, "error": "Эта встреча уже записывается."}
+            if st.key in self._active_runs:
+                # Прежняя часть ещё выгружается: второй `_run` на той же
+                # карточке перепутал бы части (облачные поля и задача одной
+                # ложились на другую, потеря записи 6.1 возвращалась).
+                recorder.release_slot(slot)
+                return {"ok": False, "error": "Предыдущая часть этой встречи ещё "
+                        "выгружается в облако — подключитесь снова через минуту."}
             if self._recording_in_room(team, st) is not None:
                 recorder.release_slot(slot)
                 return {"ok": False, "error": "Бот уже в этом звонке — эта "
@@ -2189,6 +2320,7 @@ class Scheduler:
                         "ничего не добавит; ссылки можно прикрепить к задаче "
                         "вручную после записи."}
             st.state, st.detail, st.stop_flag = "recording", "Бот заходит на встречу…", False
+            self._active_runs.add(st.key)
             if register:
                 self._states[st.key] = st
         threading.Thread(target=self._run, args=(st, slot, True),

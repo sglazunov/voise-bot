@@ -120,8 +120,10 @@ def upload_with_retry(out: str, cfg: dict, log, attempts: int = 3,
                         else dict(last, error="файл загружен в облако, но публичная ссылка "
                                   f"не получена: {res.get('error') or last.get('error')}"))
             else:
+                # Запись встречи в облаке не затирается никогда: одноимённый
+                # файл там — это, например, прежняя часть той же встречи.
                 last = clouds.upload(out, Path(out).name, cfg, subfolder=subfolder,
-                                     owner=owner)
+                                     owner=owner, overwrite=False)
         except Exception as e:  # noqa: BLE001 — an uploader bug isn't fatal
             last = {"ok": False, "error": str(e)}
         if _needs_link(last):
