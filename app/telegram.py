@@ -330,6 +330,36 @@ def _sender_name(msg: dict) -> str:
     return " ".join(p for p in (frm.get("first_name"), frm.get("last_name")) if p)
 
 
+# Остановка записи из Telegram — канал, не зависящий от чата Телемоста и его
+# вёрстки (30.10: «стоп» в чате комнаты бот не отличал от истории). Личность
+# подтверждает привязанный чат, как при смене пароля; останавливаются все
+# записи КОМАНДЫ этого человека.
+_STOP_WORDS = {"/stop", "/стоп", "stop", "стоп"}
+
+
+def _stop_recording(chat_id) -> None:
+    from . import security
+    user = security.user_by_telegram(str(chat_id))
+    if not user:
+        send(chat_id, "Этот Telegram не привязан к аккаунту MeetFlowAI. Привяжите "
+                      "его в профиле на сайте — тогда командой /stop можно будет "
+                      "остановить запись бота на встрече.")
+        return
+    try:
+        from .automation.scheduler import scheduler
+        res = scheduler.stop_recording(user)
+    except Exception as e:  # noqa: BLE001
+        log.warning("Остановка записи из Telegram не удалась", exc_info=True)
+        send(chat_id, f"Не удалось остановить запись: {e}")
+        return
+    if res.get("ok"):
+        log.info("Запись остановлена из Telegram (%s)", user)
+        send(chat_id, f"{res.get('detail') or 'Останавливаю запись.'} Бот выйдет "
+                      "со встречи через несколько секунд.")
+    else:
+        send(chat_id, res.get("error") or "Сейчас запись не идёт.")
+
+
 def handle_update(upd: dict) -> None:
     """Разобрать одно обновление: контакт (ответ на кнопку «Отправить мой
     номер»), «/start <код>» (deep link `?start=` приходит именно так) или
@@ -360,6 +390,9 @@ def handle_update(upd: dict) -> None:
             and parts[1].strip().lower() == "recover"):
         _begin_recover(chat_id)
         return
+    if lowered in _STOP_WORDS:
+        _stop_recording(chat_id)
+        return
     with _LOCK:
         waiting = str(chat_id) in _RECOVER_WAIT
     if waiting and not text.startswith("/"):
@@ -386,7 +419,8 @@ def handle_update(upd: dict) -> None:
     security.set_telegram(user, str(chat_id), _sender_name(msg))
     log.info("Telegram привязан к аккаунту %s (chat %s)", user, chat_id)
     send(chat_id, f"Готово: Telegram привязан к аккаунту «{user}». Сюда будут "
-                  f"приходить коды восстановления пароля.")
+                  f"приходить коды восстановления пароля, а командой /stop можно "
+                  f"остановить запись бота на встрече.")
 
 
 def poll_once(timeout: int = 25) -> int:

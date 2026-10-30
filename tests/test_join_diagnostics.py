@@ -656,3 +656,46 @@ def test_подтверждение_выхода_нажимается():
     bot = _bot(page)
     assert bot.leave_call(timeout=2) is True
     assert btn.clicks == 1 and confirm.clicks == 1
+
+
+# ---------------------------------------------------------------------------
+# 30.10.2026: выход не должен зависеть от кнопки. Клик — вежливое «вышел»
+# для Телемоста; гарантия — закрыть вкладку сразу, не дожидаясь ffmpeg.
+# ---------------------------------------------------------------------------
+def _closable(page):
+    page.closed = False
+    page.close = lambda **kw: setattr(page, "closed", True)
+    return page
+
+
+def test_после_нажатия_кнопки_вкладка_закрывается():
+    btn = _Btn("", aria="Покинуть звонок")
+    page, child = _call(btn, 'button[aria-label*="окинуть"]')
+    bot = _bot(_closable(page))
+    assert bot.leave_call(timeout=1) is True
+    assert page.closed is True
+    assert bot._page is None
+
+
+def test_без_кнопки_вкладка_всё_равно_закрывается():
+    page, child = _call(_Btn("Завершить для всех"), 'button:has-text("Завершить")')
+    bot = _bot(_closable(page))
+    assert bot.leave_call(timeout=0.2) is False
+    assert page.closed is True
+    assert any("не нашёл" in m and "закрыл" in m for m in bot.log), bot.log
+
+
+def test_кнопка_выхода_с_role_button_находится():
+    btn = _Btn("", aria="Покинуть звонок")
+    page, child = _call(btn, '[role="button"][aria-label*="окинуть"]')
+    bot = _bot(_closable(page))
+    assert bot.leave_call(timeout=1) is True
+    assert btn.clicks == 1
+
+
+def test_повторный_выход_после_закрытия_безопасен():
+    btn = _Btn("", aria="Покинуть звонок")
+    page, child = _call(btn, 'button[aria-label*="окинуть"]')
+    bot = _bot(_closable(page))
+    bot.leave_call(timeout=1)
+    assert bot.leave_call(timeout=1) is False       # вкладки уже нет

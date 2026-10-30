@@ -422,3 +422,42 @@ def test_start_без_намерения_привязывает_без_смен�
     assert "999" not in telegram._RECOVER_WAIT
     assert "Номер совпал" in tg.sent()[-1]["text"]
     assert login(client, password="password123").status_code == 200, "пароль не менялся"
+
+
+# --------------------------------------------------------------------------- #
+# /stop — остановка записи из Telegram (канал, не зависящий от чата Телемоста)
+# --------------------------------------------------------------------------- #
+class TestСтопИзТелеграма:
+    def _linked(self, client, tg, chat_id=555):
+        register(client); login(client)
+        _link(client, tg, chat_id)
+        tg.calls.clear()
+
+    def test_stop_останавливает_запись_команды(self, client, tg, monkeypatch):
+        from app.automation.scheduler import scheduler
+        calls = []
+        monkeypatch.setattr(scheduler, "stop_recording",
+                            lambda user, task_id=None: (calls.append(user),
+                                                        {"ok": True, "detail": "Останавливаю запись (1)…"})[1])
+        self._linked(client, tg)
+        telegram.handle_update(_msg(555, "/stop"))
+        assert calls == ["alice"]
+        assert "Останавливаю" in tg.sent()[-1]["text"]
+
+    def test_слово_стоп_тоже_команда(self, client, tg, monkeypatch):
+        from app.automation.scheduler import scheduler
+        calls = []
+        monkeypatch.setattr(scheduler, "stop_recording",
+                            lambda user, task_id=None: (calls.append(user),
+                                                        {"ok": False, "error": "Сейчас запись не идёт."})[1])
+        self._linked(client, tg)
+        telegram.handle_update(_msg(555, "Стоп"))
+        assert calls == ["alice"]
+        assert "не идёт" in tg.sent()[-1]["text"]
+
+    def test_непривязанный_чат_не_останавливает(self, client, tg, monkeypatch):
+        from app.automation.scheduler import scheduler
+        monkeypatch.setattr(scheduler, "stop_recording",
+                            lambda *a, **k: pytest.fail("не должен вызываться"))
+        telegram.handle_update(_msg(777, "/stop"))
+        assert "привяж" in tg.sent()[-1]["text"].lower()

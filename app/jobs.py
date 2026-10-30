@@ -1600,9 +1600,11 @@ def media_sidecars(path: str) -> list[Path]:
     out = [Path(f"{src}{suf}") for suf in
            (".ffmpeg.log", ".live.json", ".live.json.tmp", ".live.wav", ".tail.wav")]
     out += [src.with_suffix(suf) for suf in
-            (".16k.wav", ".join-failed.png", ".join-failed.html")]
+            (".16k.wav", ".join-failed.png", ".join-failed.html", ".chat.html")]
     try:
-        out += sorted(src.parent.glob(src.with_suffix("").name + ".join-failed.frame*.html"))
+        base = src.with_suffix("").name
+        out += sorted(src.parent.glob(base + ".join-failed.frame*.html"))
+        out += sorted(src.parent.glob(base + ".chat.frame*.html"))
     except OSError:
         pass
     return out

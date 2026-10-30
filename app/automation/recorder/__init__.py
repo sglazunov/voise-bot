@@ -247,7 +247,8 @@ def record_meeting(url: str, out_path: str, cfg: dict,
             stop_word = ""          # не тратим время на чтение пустой панели
         elif stop_word:
             log(f"Кодовое слово в чате: «{stop_word}» — напишите его отдельным "
-                "сообщением, и бот остановит запись и выйдет.")
+                "сообщением, и бот остановит запись и выйдет. Запасной путь — "
+                "команда /stop боту в Telegram или кнопка «Стоп» на карточке.")
 
         def _stop_or_silent() -> bool:
             return bool((should_stop and should_stop())
@@ -267,6 +268,15 @@ def record_meeting(url: str, out_path: str, cfg: dict,
         # Телемост держит в комнате до таймаута соединения, и бот «сидел на
         # встрече» после «стоп» (15.10). Когда звонок уже закончен или бота
         # убрали — выходить неоткуда.
+        # HTML чата — рядом с записью, пока вкладка жива. 30.10: «стоп» видно,
+        # а бот сидит, и разбирать было нечего — вёрстку чата никто не
+        # сохранял. Пишется, только если стоп-слово включено и бот хоть раз
+        # видел его в чате (в постоянной комнате — почти всегда).
+        if stop_word and getattr(bot, "_chat_last_n", 0) > 0:
+            try:
+                bot.dump_html(str(Path(out_path).with_suffix(".chat.html")))
+            except Exception:  # noqa: BLE001 — диагностика не стоит записи
+                _LOG.debug("HTML чата не сохранён", exc_info=True)
         if reason not in ("left_call", "call_ended"):
             try:
                 bot.leave_call()

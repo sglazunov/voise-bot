@@ -12,6 +12,7 @@ Playwright is imported lazily so the rest of the app runs without it.
 from __future__ import annotations
 
 import os
+from datetime import datetime
 import queue
 import re
 import shutil
@@ -180,13 +181,19 @@ _LEAVE_BUTTONS = [
     'button[aria-label*="окинуть"]', 'button[aria-label*="ыйти"]',
     'button[aria-label*="leave" i]', 'button:has-text("Покинуть")',
     '[data-testid*="hangup"]', 'button[aria-label*="hang" i]',
+    # Новая вёрстка рисует часть кнопок не <button>, а <div role=button>.
+    '[role="button"][aria-label*="окинуть"]', '[role="button"][aria-label*="ыйти"]',
+    '[role="button"][aria-label*="leave" i]', '[role="button"][aria-label*="hang" i]',
     'button[aria-label*="авершить"]', 'button:has-text("Завершить")',
+    '[role="button"][aria-label*="авершить"]',
 ]
-# Подтверждение выхода, если Телемост переспросит.
+# Подтверждение выхода, если Телемост переспросит (диалог или меню).
 _LEAVE_CONFIRM = [
     'button:has-text("Покинуть звонок")', 'button:has-text("Выйти из звонка")',
     'button:has-text("Покинуть встречу")', 'button:has-text("Покинуть")',
     'button:has-text("Выйти")', 'button:has-text("Leave")',
+    '[role="menuitem"]:has-text("Покинуть")', '[role="menuitem"]:has-text("Выйти")',
+    '[role="menuitem"]:has-text("Leave")',
 ]
 # Оболочка Мессенджера: слева список чатов, встреча — в окне справа. В запись
 # попадал бы список чужих переписок, а плитки участников ужимались; кнопка в
@@ -1178,56 +1185,99 @@ class TelemostBot:
                         return el
         return None
 
+    def _reveal_controls(self) -> None:
+        """Панель управления прячется при неподвижной мыши — пошевелить."""
+        try:
+            self._page.mouse.move(500, 400)
+            self._page.mouse.move(640, 660)
+            self._page.wait_for_timeout(300)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _close_page(self) -> str:
+        """Закрыть вкладку встречи СРАЗУ. Это и есть гарантия выхода: вкладка
+        рвёт WebRTC и WebSocket, сервер видит разрыв и убирает участника —
+        независимо от того, нашлась ли кнопка и что показала вёрстка. Раньше
+        браузер закрывался только в `finally`, после остановки ffmpeg (до
+        25 с), и всё это время бот сидел в комнате."""
+        page, self._page = self._page, None
+        try:
+            page.close(run_before_unload=False)
+            return "page_closed"
+        except Exception:  # noqa: BLE001
+            try:
+                ctx = getattr(self, "_ctx", None)
+                if ctx is not None:
+                    ctx.close()
+                    return "context_closed"
+            except Exception:  # noqa: BLE001
+                pass
+        return "close_failed"
+
     def leave_call(self, timeout: float = 6.0) -> bool:
-        """Нажать «Покинуть звонок» и дождаться, что органов звонка больше нет.
+        """Нажать «Покинуть звонок» и в любом случае закрыть вкладку встречи.
 
         Раньше при остановке записи бот просто закрывал браузер. Телемост
         держит такого участника в комнате, пока не истечёт таймаут соединения,
         и люди видели: «стоп» написали, бот ответил «останавливаю запись и
-        выхожу» — и продолжает сидеть на встрече (15.10)."""
+        выхожу» — и продолжает сидеть на встрече (15.10). Клик по кнопке —
+        вежливое «вышел» для Телемоста (best-effort, вёрстка меняется);
+        закрытие вкладки — гарантия (30.10). Возвращает True, если выход
+        подтвердился по кнопке; вкладка закрывается в обоих случаях."""
         if self._page is None:
             return False
+        self._reveal_controls()
         btn = self._hangup_button()
+        ok = False
         if btn is None:
-            self._on_log("⚠ Кнопку «Покинуть звонок» не нашёл — закрываю браузер; "
-                         "Телемост уберёт бота из комнаты сам, с задержкой.")
-            return False
-        try:
-            btn.click(timeout=3000)
-        except Exception:  # noqa: BLE001
+            self._on_log("⚠ Кнопку «Покинуть звонок» не нашёл — закрыл вкладку "
+                         "встречи, Телемост увидит разрыв соединения.")
+        else:
             try:
-                btn.evaluate("e => e.click()")
+                btn.click(timeout=3000)
             except Exception:  # noqa: BLE001
-                pass
-        deadline = time.time() + timeout
-        confirmed = False
-        while time.time() < deadline:
-            if not self.is_in_call():
-                self._on_log("Вышел из звонка.")
-                return True
-            if not confirmed:
-                for sel in _LEAVE_CONFIRM:
-                    for fr in _frames_of(self._page):
-                        try:
-                            el = _first_visible(fr, sel)
-                        except Exception:  # noqa: BLE001
-                            el = None
-                        if el is not None and not self._for_everyone(el):
+                try:
+                    btn.evaluate("e => e.click()")
+                except Exception:  # noqa: BLE001
+                    pass
+            deadline = time.time() + timeout
+            confirmed = False
+            while time.time() < deadline:
+                if not self.is_in_call():
+                    ok = True
+                    break
+                if not confirmed:
+                    for sel in _LEAVE_CONFIRM:
+                        for fr in _frames_of(self._page):
                             try:
-                                el.click(timeout=3000)
-                                confirmed = True
+                                el = _first_visible(fr, sel)
                             except Exception:  # noqa: BLE001
-                                pass
+                                el = None
+                            if el is not None and not self._for_everyone(el):
+                                try:
+                                    el.click(timeout=3000)
+                                    confirmed = True
+                                except Exception:  # noqa: BLE001
+                                    pass
+                                break
+                        if confirmed:
                             break
-                    if confirmed:
-                        break
-            try:
-                self._page.wait_for_timeout(300)
-            except Exception:  # noqa: BLE001
-                time.sleep(0.3)
-        self._on_log("⚠ Нажал «Покинуть звонок», но органы звонка остались — "
-                     "закрываю браузер.")
-        return False
+                try:
+                    self._page.wait_for_timeout(300)
+                except Exception:  # noqa: BLE001
+                    time.sleep(0.3)
+            if ok:
+                self._on_log("Вышел из звонка.")
+            else:
+                self._on_log("⚠ Нажал «Покинуть звонок», но органы звонка остались "
+                             "— закрываю вкладку встречи.")
+        how = self._close_page()
+        if how == "close_failed":
+            self._on_log("⚠ Вкладка встречи не закрылась — браузер закроется "
+                         "после остановки записи.")
+        elif not ok:
+            self._on_log("Вкладка встречи закрыта.")
+        return ok
 
     def participant_count(self) -> int | None:
         """Best-effort count of participants (None if it can't be read).
@@ -1367,6 +1417,42 @@ class TelemostBot:
             self._on_log("⚠ Кнопка «Чат» не найдена — стоп-слово может не "
                          "сработать (пришлите скриншот встречи).")
 
+    # Прокрутить список сообщений к низу перед чтением: список виртуализирован,
+    # и если панель открылась не внизу, новое сообщение в DOM не появится вовсе.
+    # Ищется ближайший прокручиваемый предок у текста со стоп-словом — это и
+    # есть список чата; тянется вниз, только если он не у самого низа.
+    _PIN_JS = """(word) => {
+      const w = String(word || "").toLowerCase();
+      const seen = new Set(); let n = 0;
+      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+      while (walker.nextNode()) {
+        const t = walker.currentNode;
+        if (!t.nodeValue || !t.nodeValue.toLowerCase().includes(w)) continue;
+        for (let el = t.parentElement; el && el !== document.body; el = el.parentElement) {
+          if (seen.has(el)) break;
+          seen.add(el);
+          const st = getComputedStyle(el);
+          if (/(auto|scroll)/.test(st.overflowY) && el.scrollHeight > el.clientHeight + 40) {
+            if (el.scrollTop < el.scrollHeight - el.clientHeight - 20) {
+              el.scrollTop = el.scrollHeight; n++;
+            }
+            break;
+          }
+        }
+      }
+      return n;
+    }"""
+
+    def _pin_chat_bottom(self, word: str) -> None:
+        page = getattr(self, "_page", None)
+        if page is None or not word:
+            return
+        for fr in _frames_of(page):
+            try:
+                fr.evaluate(self._PIN_JS, word)
+            except Exception:  # noqa: BLE001
+                continue
+
     def _read_all_text(self) -> str | None:
         """Visible text of the main frame AND every child frame. Telemost may
         render the chat inside an iframe, so reading only the top document would
@@ -1384,6 +1470,54 @@ class TelemostBot:
             except Exception:
                 continue
         return "\n".join(parts) if parts else None
+
+    _TIME_RE = re.compile(r"(?<!\d)(\d{1,2}):(\d{2})(?!\d)")
+
+    @classmethod
+    def _stop_events(cls, lines: list[str], word: str) -> list[tuple[str, str | None]]:
+        """Строки-команды с временем сообщения: «стоп 11:26» — в той же
+        строке; в вёрстке Мессенджера время стоит ОТДЕЛЬНОЙ строкой сразу
+        после текста (реже — перед ним). Нет времени — None."""
+        out = []
+        n = len(lines)
+        for i, ln in enumerate(lines):
+            if not cls._is_stop_line(ln, word):
+                continue
+            t = None
+            m = cls._TIME_RE.search(ln)
+            if m:
+                t = m.group(0)
+            else:
+                for j in (i + 1, i - 1):
+                    if 0 <= j < n:
+                        nb = lines[j].strip()
+                        if cls._TIME_RE.fullmatch(nb):
+                            t = nb
+                            break
+            out.append((ln.strip(), t))
+        return out
+
+    @staticmethod
+    def _msg_after(t: str | None, since: float, now: float) -> bool:
+        """Написано ли сообщение со временем «чч:мм» не раньше `since`
+        (вход бота, с запасом в две минуты) и не «из будущего». Сравнение по
+        минутам текущего дня — применимо только под разделом текущего дня."""
+        if not t:
+            return False
+        try:
+            hh, mm = (int(x) for x in t.split(":"))
+        except ValueError:
+            return False
+        if not (0 <= hh < 24 and 0 <= mm < 60):
+            return False
+        msg = hh * 60 + mm
+        d0 = datetime.fromtimestamp(since - 120)
+        d1 = datetime.fromtimestamp(now)
+        lo = d0.hour * 60 + d0.minute
+        cur = d1.hour * 60 + d1.minute
+        if cur < lo:                     # запись перешла через полночь
+            return msg >= lo or msg <= cur + 5
+        return msg >= lo
 
     @staticmethod
     def _is_stop_line(line: str, word: str) -> bool:
@@ -1409,20 +1543,32 @@ class TelemostBot:
         Never clicks anything — the panel was opened once by open_chat(). Reads
         all frames' text every ~5 s, counts standalone stop-word lines, and fires
         when the count grows above the first-seen baseline. The live count is
-        logged whenever it changes, so a miss is diagnosable from the log."""
+        logged whenever it changes, so a miss is diagnosable from the log.
+
+        ⚠️ 30.10: в постоянной комнате вся история — одни «стоп», текст нового
+        сообщения дословно равен старым, а счётчик при виртуализации списка не
+        растёт («одно пришло — одно ушло»). Поэтому под разделом ТЕКУЩЕГО ДНЯ
+        новизну даёт ВРЕМЯ сообщения: «стоп» со временем не раньше входа бота —
+        команда, даже если такой текст уже видели."""
         word = (word or "").strip().lower()
         if not word:
             return False
+        clock = getattr(self, "_clock", None) or time.time
         now = time.time()
         if now - self._chat_last_peek < 5:
             return False
         self._chat_last_peek = now
+        wall = clock()
+        since = getattr(self, "_chat_since", None)
+        if since is None:
+            since = self._chat_since = wall
 
+        self._pin_chat_bottom(word)
         text = self._read_all_text()
         if text is None:
             return False
         all_lines = text.splitlines()
-        lines = self._today_lines(all_lines)
+        lines = self._today_lines(all_lines, wall)
         scope = "today" if len(lines) != len(all_lines) else "all"
         n = sum(1 for ln in lines if self._is_stop_line(ln, word))
         if n != self._chat_last_n:
@@ -1442,7 +1588,9 @@ class TelemostBot:
         # отличимо от старого. Это надёжнее счётчика — при прокрутке
         # виртуализированного списка количество видимых строк скачет в обе
         # стороны, и рост «нового сообщения» терялся.
-        hits = {ln.strip() for ln in lines if self._is_stop_line(ln, word)}
+        events = self._stop_events(lines, word)
+        hits = {txt for txt, _ in events}
+        timed = set(events)                      # (текст, время) — точнее текста
         # ⚠️ Базовая линия — СВОЯ у каждой области счёта (20.10: «видно 10 →
         # 0 → 1», бот видит «стоп» и сидит дальше). На первом чтении
         # разделителя «Сегодня» ещё не было — насчитали 10 из истории; потом
@@ -1457,24 +1605,39 @@ class TelemostBot:
         st = scopes.get(scope)
         if st is None:
             if scope == "today" and not first_read:
-                # «Сегодня» появилось ПО ХОДУ записи. Старым под ним считается
-                # только то, что бот уже видел раньше дословно (утренняя
-                # встреча в той же комнате, дорисованная прокруткой), —
-                # остальное новое. Ложная остановка обрезает встречу, поэтому
-                # сомнение решается в пользу «старое».
-                before = set().union(*(v["seen"] for v in scopes.values()))
-                old = [ln.strip() for ln in lines
-                       if self._is_stop_line(ln, word) and ln.strip() in before]
-                st = scopes[scope] = {"baseline": len(old), "seen": set(old)}
-                self._on_log("Чат: появился раздел «Сегодня» — "
+                # Раздел текущего дня появился ПО ХОДУ записи. Старым под ним
+                # считается то, что бот уже видел раньше (текст и время) или
+                # что написано ДО входа бота (утренняя встреча в той же
+                # комнате). «Стоп» со временем после входа — команда, даже
+                # если такой текст лежит в истории (30.10: в комнате одни
+                # «стоп», и раздел появляется вместе с командой).
+                before = set().union(*(v["timed"] for v in scopes.values()))
+                seen_txt = set().union(*(v["seen"] for v in scopes.values()))
+                old = [(txt, t) for txt, t in events
+                       if (txt, t) in before
+                       or (txt in seen_txt and not self._msg_after(t, since, wall))]
+                st = scopes[scope] = {"baseline": len(old),
+                                      "seen": {txt for txt, _ in old},
+                                      "timed": set(old)}
+                self._on_log("Чат: появился раздел текущего дня — "
                              f"команду «{word}» жду под ним.")
             else:
-                scopes[scope] = {"baseline": n, "seen": hits}
+                scopes[scope] = {"baseline": n, "seen": hits, "timed": timed}
                 return False              # всё, что уже лежало в чате
         fresh = hits - st["seen"]
         st["seen"] |= hits
-        if fresh:
-            self._on_log(f"Чат: новое сообщение «{word}» — останавливаю запись.")
+        recent = []
+        if scope == "today":
+            recent = [(txt, t) for txt, t in events
+                      if (txt, t) not in st["timed"] and self._msg_after(t, since, wall)]
+        st["timed"] |= timed
+        if fresh or recent:
+            if recent:
+                when = datetime.fromtimestamp(since).strftime("%H:%M")
+                self._on_log(f"Чат: новое сообщение «{word}» в {recent[0][1]} "
+                             f"(бот вошёл в {when}) — останавливаю запись.")
+            else:
+                self._on_log(f"Чат: новое сообщение «{word}» — останавливаю запись.")
             return True
         # Запасной признак на случай, когда две команды совпали дословно
         # (одна минута, одно слово): тогда множество не растёт, а счётчик да.
@@ -1488,18 +1651,36 @@ class TelemostBot:
         return False
 
     _TODAY_MARKERS = ("сегодня", "today")
+    _MONTHS_RU = ("января", "февраля", "марта", "апреля", "мая", "июня", "июля",
+                  "августа", "сентября", "октября", "ноября", "декабря")
+    _MONTHS_EN = ("january", "february", "march", "april", "may", "june", "july",
+                  "august", "september", "october", "november", "december")
 
-    @staticmethod
-    def _today_lines(lines: list[str]) -> list[str]:
-        """Строки чата ПОСЛЕ разделителя «Сегодня». Чат комнаты общий и не
+    @classmethod
+    def _today_markers(cls, now: float | None = None) -> set[str]:
+        """Подписи раздела текущего дня: «Сегодня»/«Today» ИЛИ сама дата
+        («30 октября», «30 октября 2026», «October 30»). На скриншоте 30.10 все
+        разделители — датами; подписывает ли Телемост текущий день словом,
+        неизвестно — принимаем оба варианта."""
+        d = datetime.fromtimestamp(now if now is not None else time.time())
+        ru, en = cls._MONTHS_RU[d.month - 1], cls._MONTHS_EN[d.month - 1]
+        return set(cls._TODAY_MARKERS) | {
+            f"{d.day} {ru}", f"{d.day} {ru} {d.year}", f"{d.day} {ru} {d.year} г.",
+            f"{d.day} {en}", f"{en} {d.day}", f"{en} {d.day}, {d.year}",
+        }
+
+    @classmethod
+    def _today_lines(cls, lines: list[str], now: float | None = None) -> list[str]:
+        """Строки чата ПОСЛЕ разделителя текущего дня. Чат комнаты общий и не
         чистится: в нём «стоп» с прошлых встреч за месяцы, а список
         виртуализирован — при прокрутке старые строки то появляются, то
         уходят. Команда сегодняшней встречи может стоять только под
-        «Сегодня»; всё выше — история. Разделителя нет (старая вёрстка) —
-        берём всё, как раньше."""
+        разделом текущего дня; всё выше — история. Разделителя нет (старая
+        вёрстка) — берём всё, как раньше."""
+        markers = cls._today_markers(now)
         idx = None
         for i, ln in enumerate(lines):
-            if ln.strip().lower() in TelemostBot._TODAY_MARKERS:
+            if ln.strip().lower() in markers:
                 idx = i
         return lines[idx + 1:] if idx is not None else lines
 
@@ -1520,6 +1701,9 @@ class TelemostBot:
         last_mute = 0.0               # keep the bot muted for the whole meeting
         # If nobody ever joins, don't sit for the full max_sec — leave after this.
         never_joined_sec = int(self.cfg.get("end_if_nobody_joins_sec", 300))
+        # С этого момента сообщение в чате со временем не раньше входа —
+        # команда этой встречи (см. maybe_chat_stop).
+        self._chat_since = (getattr(self, "_clock", None) or time.time)()
         # Give the call a moment to render its controls before we judge it.
         self._page.wait_for_timeout(6000)
         # Open the chat ONCE now; from here maybe_chat_stop only reads it.
@@ -1528,14 +1712,18 @@ class TelemostBot:
                 self.open_chat()
             except Exception:
                 pass
+        chat_err_at = 0.0
         while True:
             if should_stop and should_stop():
                 return "stopped"
             try:
                 if self.maybe_chat_stop(chat_stop_word):
                     return "chat_stop"
-            except Exception:  # chat probing must never crash the recording
-                pass
+            except Exception as e:  # chat probing must never crash the recording
+                # …но и молчать нельзя: сбой чтения выглядел как «не сработало».
+                if time.time() - chat_err_at > 60:
+                    chat_err_at = time.time()
+                    self._on_log(f"⚠ Чат: сбой чтения — {e}")
             if time.time() - start > max_sec:
                 return "max_duration"
             # Re-assert mute periodically: Telemost can reset the mic/cam after a
