@@ -192,18 +192,41 @@ export default function Recognition() {
   // Статус выбранной встречи сменился «снаружи» (Пересобрать, Повторить,
   // Отмена — после них список перечитывается сразу) — карточку целиком заново.
   const [reload, setReload] = useState(0);
+  // Карточка не загрузилась — причина на виду и кнопка «Повторить». Раньше один
+  // сбой GET /api/jobs/{id} оставлял правую панель пустой навсегда: статус
+  // заполнялся только после успеха, а опрос при пустом статусе молча выходил.
+  const [detailErr, setDetailErr] = useState("");
   useEffect(() => {
     const row = jobs.find((j: any) => j.id === sel);
-    if (row && detail && row.status !== detail.status) setReload((k) => k + 1);
+    if (row && detail?.id === sel && row.status !== detail.status) setReload((k) => k + 1);
   }, [jobs]);
   useEffect(() => {
     if (!sel) { setDetail(null); return; }
     let alive = true;
     let status = "";
+    // Тики идут по интервалу, а запросы асинхронные: /partial дольше 2 с
+    // (сервер занят распознаванием) — и следующий тик уходил с тем же since,
+    // оба ответа дописывали одни и те же фрагменты в живую расшифровку.
+    // Пока запрос в пути, тики пропускаются.
+    let inFlight = false;
+    // Повтор карточки после сбоя — с паузой 2, 4, 8… до 30 с: удалённая задача
+    // (404) не должна молотить сервер каждые 2 с, пока её карточка выбрана.
+    let fails = 0, retryAt = 0;
+    setDetailErr("");
     const full = async () => {
-      const j = await api.get(`/api/jobs/${sel}`);
+      let j: any;
+      try { j = await api.get(`/api/jobs/${sel}`); }
+      catch (e: any) {
+        if (!alive) return;
+        fails += 1;
+        retryAt = Date.now() + Math.min(30000, 2000 * 2 ** (fails - 1));
+        setDetailErr(e?.message || "сеть недоступна");
+        return;
+      }
       if (!alive) return;
+      fails = 0;
       status = j.status;
+      setDetailErr("");
       setDetail(j);
       if (!isBusy(j.status)) setLive(null);
       // Расшифровка готова уже к началу сборки протокола — показываем её и в
@@ -220,19 +243,29 @@ export default function Recognition() {
       }
     };
     const tick = async () => {
-      if (!isBusy(status)) return;
+      if (inFlight) return;
+      inFlight = true;
       try {
+        if (!status) {
+          if (Date.now() < retryAt) return;
+          await full();
+          if (!alive || !status) return;
+        }
+        if (!isBusy(status)) return;
         const p = await api.get(`/api/jobs/${sel}/partial?since=${liveSegs.current.length}`);
         if (!alive) return;
         const got = p.segments || [];
-        liveSegs.current = p.from ? liveSegs.current.concat(got) : got;
+        // Дописываем к первым `from` фрагментам, а не в хвост: повторный ответ
+        // с тем же from не удвоит текст, даже если запросы всё же разойдутся.
+        liveSegs.current = liveSegs.current.slice(0, p.from || 0).concat(got);
         setLive({ ...p, segments: liveSegs.current });
         if (p.status !== status) { await full(); return; }
         setDetail((d: any) => d && d.progress !== p.progress ? { ...d, progress: p.progress } : d);
       } catch { /* сеть или задача удалена — следующий тик */ }
+      finally { inFlight = false; }
     };
     liveSegs.current = [];
-    full().then(tick).catch(() => { /* gone */ });
+    tick();
     const t = setInterval(tick, 2000);
     return () => { alive = false; clearInterval(t); };
   }, [sel, reload]);
@@ -598,10 +631,25 @@ export default function Recognition() {
 
         {/* RIGHT: detail */}
         <Card className="min-h-[420px]">
-          {!detail ? (
+          {!sel ? (
             <div className="grid place-items-center text-center h-full py-20">
               <div><FileText size={30} color="var(--muted)" className="mx-auto mb-3" />
                 <div className="text-[13.5px]" style={{ color: "var(--muted)" }}>Выберите запись слева или загрузите новую,<br />чтобы увидеть протокол и расшифровку.</div></div>
+            </div>
+          ) : detail?.id !== sel ? (
+            // Карточка выбранной встречи ещё не пришла — не показываем на её
+            // месте прошлую: при сбое загрузки чужой протокол висел бы под
+            // новым выделением.
+            <div className="grid place-items-center text-center h-full py-20">
+              {detailErr ? (
+                <div className="max-w-[340px]">
+                  <div className="text-[13.5px] mb-1" style={{ color: "#fca5a5" }}>Не удалось загрузить встречу</div>
+                  <div className="text-[12.5px] mb-3 break-words" style={{ color: "var(--muted)" }}>
+                    {detailErr.replace(/\.$/, "")}. Пробую снова автоматически.</div>
+                  <button className="btn btn-ghost" onClick={() => setReload((k) => k + 1)}>
+                    <RotateCcw size={14} /> Повторить сейчас</button>
+                </div>
+              ) : <Loader2 size={24} className="animate-spin" color="var(--muted)" />}
             </div>
           ) : (
             <>

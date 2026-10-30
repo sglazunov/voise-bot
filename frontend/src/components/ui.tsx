@@ -193,15 +193,20 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     setItems((s) => [...s, { id, msg, bad }]);
     setTimeout(() => setItems((s) => s.filter((t) => t.id !== id)), 3500);
   }, []);
+  // Тосты — выше ВСЕГО, включая модалки (2000) и мобильное меню (1500): ошибка
+  // «неверный пароль» в окне удаления аккаунта раньше рисовалась под затемнением
+  // и была не видна. Портал в <body> по той же причине, что у Modal: предок с
+  // backdrop-filter создал бы свой контекст наложения.
   return (
     <ToastCtx.Provider value={push}>
       {children}
-      <div style={{ position: "fixed", right: 16, bottom: 16, zIndex: 100, display: "flex", flexDirection: "column", gap: 8 }}>
-        {items.map((t) => (
-          <div key={t.id} className="glass" style={{ padding: "11px 14px", fontSize: 13,
-            color: t.bad ? "#fca5a5" : "var(--txt)", maxWidth: 360 }}>{t.msg}</div>
-        ))}
-      </div>
+      {createPortal(
+        <div style={{ position: "fixed", right: 16, bottom: 16, zIndex: 3000, display: "flex", flexDirection: "column", gap: 8 }}>
+          {items.map((t) => (
+            <div key={t.id} role={t.bad ? "alert" : "status"} className="glass" style={{ padding: "11px 14px", fontSize: 13,
+              color: t.bad ? "#fca5a5" : "var(--txt)", maxWidth: 360 }}>{t.msg}</div>
+          ))}
+        </div>, document.body)}
     </ToastCtx.Provider>
   );
 }
