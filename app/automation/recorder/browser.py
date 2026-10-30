@@ -513,6 +513,9 @@ class TelemostBot:
         # уходит, новое приходит, и счётчик не растёт.
         self._chat_scopes: dict[str, dict] = {}
         self._chat_reads = 0
+        # Минута суток, когда бот начал следить за чатом: «стоп» под
+        # «Сегодня» со временем ПОЗЖЕ неё написан уже при боте (29.10).
+        self._chat_since_min: int | None = None
         self._chat_opened_once = False
 
     # -- lifecycle ----------------------------------------------------------
@@ -1471,7 +1474,7 @@ class TelemostBot:
                 continue
         return "\n".join(parts) if parts else None
 
-    _TIME_RE = re.compile(r"(?<!\d)(\d{1,2}):(\d{2})(?!\d)")
+    _TIME_RE = re.compile(r"(?<!\d)([01]?\d|2[0-3]):([0-5]\d)(?!\d)")
 
     @classmethod
     def _stop_events(cls, lines: list[str], word: str) -> list[tuple[str, str | None]]:
@@ -1488,20 +1491,24 @@ class TelemostBot:
             if m:
                 t = m.group(0)
             else:
+                # Соседняя строка — только время и значки доставки («11:54 ✓✓»),
+                # без букв: «Иван Р. 11:30» — чужое сообщение, не берётся.
                 for j in (i + 1, i - 1):
                     if 0 <= j < n:
                         nb = lines[j].strip()
-                        if cls._TIME_RE.fullmatch(nb):
-                            t = nb
+                        m2 = cls._TIME_RE.search(nb)
+                        if m2 and not re.search(r"[^\W\d_]", nb):
+                            t = m2.group(0)
                             break
             out.append((ln.strip(), t))
         return out
 
     @staticmethod
-    def _msg_after(t: str | None, since: float, now: float) -> bool:
-        """Написано ли сообщение со временем «чч:мм» не раньше `since`
-        (вход бота, с запасом в две минуты) и не «из будущего». Сравнение по
-        минутам текущего дня — применимо только под разделом текущего дня."""
+    def _msg_after(t: str | None, since_min: int, cur_min: int) -> bool:
+        """Написано ли сообщение со временем «чч:мм» ПОЗЖЕ минуты, с которой
+        бот следит за чатом. Сама минута входа не считается: «стоп» прошлой
+        встречи в той же минуте (передача комнаты) — не команда. Сравнение по
+        минутам суток — применимо только под разделом текущего дня."""
         if not t:
             return False
         try:
@@ -1511,13 +1518,9 @@ class TelemostBot:
         if not (0 <= hh < 24 and 0 <= mm < 60):
             return False
         msg = hh * 60 + mm
-        d0 = datetime.fromtimestamp(since - 120)
-        d1 = datetime.fromtimestamp(now)
-        lo = d0.hour * 60 + d0.minute
-        cur = d1.hour * 60 + d1.minute
-        if cur < lo:                     # запись перешла через полночь
-            return msg >= lo or msg <= cur + 5
-        return msg >= lo
+        if cur_min < since_min:          # запись перешла через полночь
+            return msg > since_min or msg <= cur_min + 5
+        return msg > since_min
 
     @staticmethod
     def _is_stop_line(line: str, word: str) -> bool:
@@ -1559,9 +1562,18 @@ class TelemostBot:
             return False
         self._chat_last_peek = now
         wall = clock()
-        since = getattr(self, "_chat_since", None)
-        if since is None:
-            since = self._chat_since = wall
+        # Начало слежки — МИНУТА суток (у Chromium и Python один TZ контейнера).
+        # `_chat_since_min` задаётся явно (тесты) либо берётся из `_chat_since`
+        # — момента, когда бот оказался в звонке (wait_until_end).
+        since_min = getattr(self, "_chat_since_min", None)
+        if since_min is None:
+            since = getattr(self, "_chat_since", None)
+            if since is None:
+                since = self._chat_since = wall
+            lt = time.localtime(since)
+            since_min = lt.tm_hour * 60 + lt.tm_min
+        lt = time.localtime(wall)
+        cur_min = lt.tm_hour * 60 + lt.tm_min
 
         self._pin_chat_bottom(word)
         text = self._read_all_text()
@@ -1615,12 +1627,17 @@ class TelemostBot:
                 seen_txt = set().union(*(v["seen"] for v in scopes.values()))
                 old = [(txt, t) for txt, t in events
                        if (txt, t) in before
-                       or (txt in seen_txt and not self._msg_after(t, since, wall))]
+                       or (txt in seen_txt and not self._msg_after(t, since_min, cur_min))]
                 st = scopes[scope] = {"baseline": len(old),
                                       "seen": {txt for txt, _ in old},
                                       "timed": set(old)}
                 self._on_log("Чат: появился раздел текущего дня — "
                              f"команду «{word}» жду под ним.")
+            elif scope == "today":
+                # Первое чтение под разделом дня: всё, что уже лежит, — старое
+                # по ТЕКСТУ, но «стоп» со временем позже начала слежки —
+                # команда и здесь (29.10: чат мог открыться не сразу).
+                st = scopes[scope] = {"baseline": n, "seen": hits, "timed": set()}
             else:
                 scopes[scope] = {"baseline": n, "seen": hits, "timed": timed}
                 return False              # всё, что уже лежало в чате
@@ -1629,13 +1646,14 @@ class TelemostBot:
         recent = []
         if scope == "today":
             recent = [(txt, t) for txt, t in events
-                      if (txt, t) not in st["timed"] and self._msg_after(t, since, wall)]
+                      if (txt, t) not in st["timed"]
+                      and self._msg_after(t, since_min, cur_min)]
         st["timed"] |= timed
         if fresh or recent:
             if recent:
-                when = datetime.fromtimestamp(since).strftime("%H:%M")
+                when = f"{since_min // 60:02d}:{since_min % 60:02d}"
                 self._on_log(f"Чат: новое сообщение «{word}» в {recent[0][1]} "
-                             f"(бот вошёл в {when}) — останавливаю запись.")
+                             f"(слежу с {when}) — останавливаю запись.")
             else:
                 self._on_log(f"Чат: новое сообщение «{word}» — останавливаю запись.")
             return True

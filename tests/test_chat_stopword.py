@@ -96,6 +96,9 @@ class TestРегистрИПрокрутка:
         b._chat_last_n = -1
         b._chat_scopes = {}
         b._chat_reads = 0
+        # Правило «время позже начала слежки» выключено (23:59) — эти тесты
+        # проверяют остальные признаки; своё правило — TestВремяСообщения.
+        b._chat_since_min = 23 * 60 + 59
         b._on_log = lambda *a: None
         return b
 
@@ -230,8 +233,8 @@ class TestОдинаковыеСтопИВремя:
         import datetime as dt
         b = TestРегистрИПрокрутка._bot(self)
         day = dt.datetime(2026, 10, 30, *map(int, joined.split(":")))
-        b._clock = lambda: day.timestamp()        # «сейчас» для бота
-        b._chat_since = day.timestamp()           # когда бот вошёл в звонок
+        b._clock = lambda: day.timestamp()        # «сейчас» для бота (дата!)
+        b._chat_since_min = day.hour * 60 + day.minute   # с какой минуты следим
         return b
 
     def test_сегодня_и_стоп_в_одном_чтении_время_отдельной_строкой(self):
@@ -271,12 +274,76 @@ class TestОдинаковыеСтопИВремя:
         assert self._feed(b, ["Сергей Беск", "стоп", "11:39"]) is False
         assert self._feed(b, ["Сергей Беск", "стоп", "11:39"]) is False
 
-    def test_первое_чтение_никогда_не_команда(self):
+    def test_первое_чтение_по_тексту_не_команда(self):
+        """На первом чтении всё, что лежит в чате, — история; командой может
+        быть только «стоп» со временем позже начала слежки (29.10)."""
         b = self._bot()
-        assert self._feed(b, ["Сегодня", "Сергей Беск", "стоп", "11:26"]) is False
+        assert self._feed(b, ["Сегодня", "Сергей Беск", "стоп", "10:40"]) is False
+        b = self._bot()
+        assert self._feed(b, ["Сергей Беск", "стоп", "11:26"]) is False   # без раздела дня
+        b = self._bot()
+        assert self._feed(b, ["Сегодня", "Сергей Беск", "стоп", "11:26"]) is True
 
     def test_в_логе_причина_новизны(self):
         b = self._bot(); logs = []; b._on_log = logs.append
         self._feed(b, self.HIST)
         self._feed(b, self.HIST + ["Сегодня", "Сергей Беск", "стоп", "11:26"])
         assert any("11:26" in m and "останавливаю" in m for m in logs), logs
+
+
+class TestВремяСообщения:
+    """29.10.2026, «Операционная встреча»: «видно 14 → 13 → 1», «появился
+    раздел «Сегодня»», а «стоп 11:54» под ним бот не принял. Раздел «Сегодня»
+    появляется в чате вместе с ПЕРВЫМ сообщением дня — то есть с самой
+    командой, а строка «стоп» дословно совпадала с историческими, и правило
+    «виденное раньше — старое» её глушило."""
+
+    _feed = TestРегистрИПрокрутка._feed
+
+    def _bot(self, since="11:00"):
+        b = TestРегистрИПрокрутка._bot(self)
+        h, m = since.split(":")
+        b._chat_since_min = int(h) * 60 + int(m)
+        return b
+
+    HISTORY = ["21 июля", "Зоя Р.", "стоп", "11:05", "15 сентября", "Иван Р.",
+               "стоп", "11:42"]
+
+    def test_боевой_случай_29_10(self):
+        b = self._bot(since="11:01")
+        assert self._feed(b, self.HISTORY) is False
+        assert self._feed(b, self.HISTORY[2:]) is False            # прокрутка
+        assert self._feed(b, self.HISTORY + ["Сегодня", "стоп", "11:54"]) is True
+
+    def test_время_в_той_же_строке(self):
+        b = self._bot(since="11:01")
+        self._feed(b, ["стоп 11:05"])
+        assert self._feed(b, ["стоп 11:05", "Сегодня", "стоп ✓✓ 11:54"]) is True
+
+    def test_утренняя_команда_под_сегодня_не_срабатывает(self):
+        """Постоянная комната: «стоп» с утренней встречи стоит под «Сегодня»
+        со временем РАНЬШЕ входа бота."""
+        b = self._bot(since="11:01")
+        assert self._feed(b, ["Сегодня", "стоп", "10:58"]) is False
+        assert self._feed(b, ["Сегодня", "стоп", "10:58", "Иван", "ок", "11:20"]) is False
+
+    def test_минута_входа_не_считается(self):
+        b = self._bot(since="11:01")
+        assert self._feed(b, ["Сегодня", "стоп", "11:01"]) is False
+
+    def test_в_истории_без_сегодня_время_не_решает(self):
+        """Без разделителя время не говорит, какой это день: «стоп 17:42»
+        вчерашний."""
+        b = self._bot(since="11:01")
+        assert self._feed(b, ["стоп 17:42"]) is False
+        assert self._feed(b, ["стоп 17:42", "привет 18:00"]) is False
+
+    def test_чужое_время_следующей_строки_не_берётся(self):
+        b = self._bot(since="11:01")
+        assert self._feed(b, ["Сегодня", "стоп", "Иван Р. 11:30"]) is False
+
+    def test_одна_команда_срабатывает_один_раз(self):
+        b = self._bot(since="11:01")
+        lines = ["Сегодня", "стоп", "11:54"]
+        assert self._feed(b, lines) is True
+        assert self._feed(b, lines) is False
