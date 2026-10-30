@@ -14,7 +14,9 @@ export function TeamPicker({ s, team, setTeam, onManaged }: {
     if (!s.can_manage_teams || teams) return;
     api.get("/api/automation/teams").then((d) => setTeams(d.teams || [])).catch(() => setTeams([]));
   }, [s.can_manage_teams, teams]);
-  const anyLocked = (s.locked_keys || []).some((k: string) => k !== "managed_by_server" && k !== "browser_profile_dir");
+  // Серверные ключи (флаг замка, пути на диске сервера, экономика) закрыты у
+  // ЛЮБОЙ команды — пояснение про замок нужно только команде под замком.
+  const anyLocked = !!s.managed_by_server && (s.locked_keys || []).length > 0;
   return (
     <>
       {s.can_manage_teams && (

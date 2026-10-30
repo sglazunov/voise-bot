@@ -274,7 +274,9 @@ class Scheduler:
         self._last_error: dict[str, str] = {}
         # Фильтр (проект, доска), которым отобраны карточки команды на прошлом
         # опросе: его смена убирает карточки прежней доски (_poll).
-        self._poll_scope: dict[str, tuple[str, str]] = {}
+        # Задачи последнего опроса команды: решение «Пишем» возвращает в план
+        # только их (см. set_decision).
+        self._poll_ids: dict[str, set[str]] = {}
         self._boot_time = 0.0  # session start; meetings older than this are missed
 
     # -- lifecycle ----------------------------------------------------------
@@ -506,9 +508,7 @@ class Scheduler:
         if not token:
             return
         try:
-            meetings = weeek.upcoming_meetings(
-                token, cfg.get("weeek_project_id"),
-                board_id=cfg.get("weeek_board_id"), local_tz=tz)
+            meetings = weeek.team_meetings(cfg, local_tz=tz)
         except Exception:               # noqa: BLE001 — чистка не обязана удаться
             _LOG.warning("Ночная чистка полей: не удалось получить встречи",
                          exc_info=True)
@@ -663,17 +663,7 @@ class Scheduler:
             return timezone.utc
 
     def _poll(self, user: str, cfg: dict) -> None:
-        meetings = weeek.upcoming_meetings(
-            cfg.get("weeek_token"), cfg.get("weeek_project_id"),
-            board_id=cfg.get("weeek_board_id"), local_tz=self._tz(cfg))
-        # Чем отобраны встречи. Сменился фильтр (доска, проект) — карточки,
-        # которых нет в новой выдаче, относятся к ДРУГОЙ доске: их надо убрать,
-        # а не ждать, пока задача «вернётся» (иначе бот запишет встречу доски,
-        # которую команда уже не видит).
-        scope = (str(cfg.get("weeek_project_id") or ""),
-                 str(cfg.get("weeek_board_id") or ""))
-        scope_changed = self._poll_scope.get(user, scope) != scope
-        self._poll_scope[user] = scope
+        meetings = weeek.team_meetings(cfg, local_tz=self._tz(cfg))
         rec_field = cfg.get("weeek_record_field") or "Запись встречи"
         # Снапшоты (а на Postgres это запрос к базе) читаем ДО лока: под ним
         # стоят status(), обновления состояния из потоков записи и остановка
@@ -737,15 +727,24 @@ class Scheduler:
                                                datetime.fromisoformat(parts[2])))
                     except ValueError:
                         pass
+            self._poll_ids[user] = fetched_ids
             for k, s in list(self._states.items()):
-                if s.owner != user or s.state not in ("scheduled", "no_time", "missed"):
+                if s.owner != user or s.state not in (
+                        "scheduled", "no_time", "missed", "skipped"):
+                    continue
+                # Задачи нет в выдаче — её удалили, закрыли или перенесли на
+                # ДРУГУЮ доску (на общем воркспейсе это доска другого клиента),
+                # либо сменился фильтр команды. Карточку убираем: иначе бот
+                # пойдёт на чужую встречу, а «Пишем» вернёт её в план. Раньше
+                # это делалось только при смене фильтра, и задача, перенесённая
+                # к другому клиенту, оставалась в плане. Встречи по ссылке в
+                # Weeek не живут — выдача их не касается.
+                gone = str(s.task_id) not in fetched_ids and not is_adhoc(s.task_id)
+                if s.state == "skipped" and not gone:
                     continue
                 slot = (str(s.task_id),
                         s.start.isoformat() if s.start else "no-time")
-                stale = str(s.task_id) in fetched_ids and slot not in current
-                if scope_changed and str(s.task_id) not in fetched_ids \
-                        and not is_adhoc(s.task_id):
-                    stale = True
+                stale = gone or (str(s.task_id) in fetched_ids and slot not in current)
                 dup_missed = (s.state == "missed" and s.start is not None
                               and any(tid == str(s.task_id)
                                       and abs((s.start - st0).total_seconds())
@@ -1980,7 +1979,11 @@ class Scheduler:
             decisions[str(task_id)] = bool(record)
         auto_settings.save(user, {"rec_decisions": decisions})
         # If we'd already skipped it, allow a re-evaluation on the next tick.
+        # Только задачу из последнего опроса команды: карточка, оставшаяся от
+        # прежнего фильтра (другая доска общего воркспейса), в план не вернётся.
         with self._lock:
+            if str(task_id) not in self._poll_ids.get(user, set()):
+                return {"ok": True, "task_id": str(task_id), "record": record}
             for st in self._states.values():
                 if (st.owner == user and str(st.task_id) == str(task_id)
                         and st.state in ("skipped", "missed")):

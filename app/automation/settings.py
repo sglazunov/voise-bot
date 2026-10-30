@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 from pathlib import Path
 from typing import Any
@@ -170,10 +171,14 @@ MANAGED_KEYS = (
     "folders_by_series", "oneoff_folder",
     "subscription_rub", "support_hours_month",
 )
-# Что меняет только основатель сервера у ЛЮБОЙ команды: сам флаг замка и путь
-# к профилю браузера — это путь на диске сервера, через него админ одной
-# команды подключился бы к входу в Яндекс другой.
-SERVER_ONLY_KEYS = ("managed_by_server", "browser_profile_dir")
+# Что меняет только основатель сервера у ЛЮБОЙ команды, даже без замка:
+# - сам флаг замка;
+# - пути на диске сервера: профиль браузера (через него админ одной команды
+#   подключился бы к входу в Яндекс другой) и папка локального облака (указал
+#   папку чужой команды — и `shutil.copy2` перезаписывает её записи);
+# - экономика команды: её читает отчёт владельца сервиса, а не сама команда.
+SERVER_ONLY_KEYS = ("managed_by_server", "browser_profile_dir", "local_dir",
+                    "subscription_rub", "support_hours_month")
 
 
 def locked_keys(user: str, cfg: dict | None = None) -> set[str]:
@@ -185,6 +190,31 @@ def locked_keys(user: str, cfg: dict | None = None) -> set[str]:
     if cfg.get("managed_by_server"):
         keys |= set(MANAGED_KEYS)
     return keys
+
+
+def _server_path(value: Any) -> bool:
+    """Абсолютный путь на диске сервера: «/srv/…», «C:\\…», «\\\\host\\…».
+    «disk:/…» (Яндекс.Диск) и идентификатор папки Google — не пути."""
+    s = str(value or "").strip()
+    return s.startswith(("/", "\\")) or bool(re.match(r"^[A-Za-z]:", s))
+
+
+def writable(user: str, cfg: dict, values: dict[str, Any]) -> tuple[dict, list[str]]:
+    """Разделить присланное на то, что `user` вправе записать, и отброшенное.
+
+    Кроме ключей под замком отбрасывается абсолютная `protocol_folder`: сам
+    ключ команде доступен (папка на Диске или в Google), но у локального облака
+    абсолютный путь становится папкой протоколов как есть — тот же путь в
+    чужую команду, что и через `local_dir`."""
+    locked = locked_keys(user, cfg)
+    founder = security.is_super_admin(user)
+    keep, dropped = {}, []
+    for k, v in values.items():
+        if k in locked or (not founder and k == "protocol_folder" and _server_path(v)):
+            dropped.append(k)
+        else:
+            keep[k] = v
+    return keep, sorted(dropped)
 
 
 def _atomic_write(user: str, data: dict[str, Any]) -> None:

@@ -461,6 +461,28 @@ def upcoming_meetings(token: str, project_id: Any = None, board_id: Any = None,
     return meetings
 
 
+_NO_BOARD_WARNED: set[str] = set()
+
+
+def team_meetings(cfg: dict, local_tz: tzinfo = timezone.utc) -> list[Meeting]:
+    """Встречи команды по ЕЁ настройкам: токен, проект, доска и замок.
+
+    Один вход для плана встреч, предпросмотра и ночной очистки. Под замком
+    («управляется сервером») доска — граница с другими клиентами общего
+    воркспейса; замок без выбранной доски закрывает всё (пустой план), а не
+    открывает все доски — так же, как ручки Weeek в этом состоянии."""
+    board = _norm_id(cfg.get("weeek_board_id"))
+    if cfg.get("managed_by_server") and not board:
+        team = str(cfg.get("_team") or "")
+        if team not in _NO_BOARD_WARNED:
+            _NO_BOARD_WARNED.add(team)
+            _LOG.warning("Команда %s под замком без доски встреч — встреч не будет, "
+                         "пока основатель сервера не выберет доску", team or "?")
+        return []
+    return upcoming_meetings(cfg.get("weeek_token"), cfg.get("weeek_project_id"),
+                             board_id=board, local_tz=local_tz)
+
+
 # --------------------------------------------------------------------------- #
 # Writes (optional post-back)
 # --------------------------------------------------------------------------- #

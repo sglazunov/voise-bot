@@ -10,11 +10,14 @@ import { TZ_RU, TZ_CIS, otherZones, tzLabel } from "../lib/timezones";
 export default function Weeek() {
   // Основатель сервера может открыть настройки клиентской команды ("" — свои).
   const [team, setTeam] = useManagedTeam();
-  const { s, set, save, reload, ready, locked } = useSettings(team);
+  const { s, set, save, reload, ready, locked } = useSettings(team, () => setTeam(""));
   const tq = (sep = "?") => teamQuery(team, sep);
   const [token, setToken] = useState("");
   const [meetBoards, setMeetBoards] = useState<any[] | null>(null);
-  useEffect(() => { setMeetBoards(null); setBoards(null); setColumns(null); setProjects(null); setToken(""); }, [team]);
+  useEffect(() => {
+    setMeetBoards(null); setBoards(null); setColumns(null); setProjects(null); setToken("");
+    setMembers(null); setProbeRes(null);
+  }, [team]);
   const [projects, setProjects] = useState<any[] | null>(null);
   const [probeId, setProbeId] = useState("");
   const [probeRes, setProbeRes] = useState<any>(null);
@@ -22,7 +25,8 @@ export default function Weeek() {
   const toast = useToast();
   async function probe() {
     setProbing(true); setProbeRes(null);
-    try { setProbeRes(await api.get(`/api/automation/weeek/probe?task_id=${encodeURIComponent(probeId.trim())}`)); }
+    // ?team= — «Диагностика задачи» клиента идёт его токеном, а не своим.
+    try { setProbeRes(await api.get(`/api/automation/weeek/probe?task_id=${encodeURIComponent(probeId.trim())}${tq("&")}`)); }
     catch (e: any) { toast(e.message, true); }
     finally { setProbing(false); }
   }
@@ -88,7 +92,7 @@ export default function Weeek() {
     catch (e: any) { toast(e.message, true); }
   }
   async function loadMembers() {
-    try { const d = await api.get("/api/automation/weeek/members?refresh=1"); setMembers(d.members || []); toast(`Участников: ${(d.members || []).length}`); }
+    try { const d = await api.get(`/api/automation/weeek/members?refresh=1${tq("&")}`); setMembers(d.members || []); toast(`Участников: ${(d.members || []).length}`); }
     catch (e: any) { toast(e.message, true); }
   }
   const userMap: Record<string, string> = s.weeek_user_map || {};

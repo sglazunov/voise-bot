@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
-import { api } from "./api";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { api, MANAGED_TEAM_KEY } from "./api";
 
 // Настройки автоматизации: загрузка, точечные правки, сохранение.
 //
@@ -16,27 +16,44 @@ export function teamQuery(team?: string, sep = "?") {
   return team ? `${sep}team=${encodeURIComponent(team)}` : "";
 }
 
-// Выбранная основателем команда переживает переход «Weeek» ↔ «Облако».
-const TEAM_KEY = "vtx.manage-team";
+// Выбранная основателем команда переживает переход «Weeek» ↔ «Облако», но не
+// выход из аккаунта (`logout`) и не отказ сервера (см. `onTeamGone`).
 export function useManagedTeam(): [string, (t: string) => void] {
   const [team, setTeam] = useState<string>(() => {
-    try { return sessionStorage.getItem(TEAM_KEY) || ""; } catch { return ""; }
+    try { return sessionStorage.getItem(MANAGED_TEAM_KEY) || ""; } catch { return ""; }
   });
-  const choose = (t: string) => {
-    try { if (t) sessionStorage.setItem(TEAM_KEY, t); else sessionStorage.removeItem(TEAM_KEY); } catch { /* приватный режим */ }
+  const choose = useCallback((t: string) => {
+    try {
+      if (t) sessionStorage.setItem(MANAGED_TEAM_KEY, t);
+      else sessionStorage.removeItem(MANAGED_TEAM_KEY);
+    } catch { /* приватный режим */ }
     setTeam(t);
-  };
+  }, []);
   return [team, choose];
 }
 
-export function useSettings(team?: string) {
+// `onTeamGone` — сервер ответил 403/404 на выбранную команду (вошёл не
+// основатель, команду удалили): страница сбрасывает выбор на свою команду,
+// иначе поля оставались неактивными без единой ошибки.
+export function useSettings(team?: string, onTeamGone?: () => void) {
   const [s, setS] = useState<Record<string, any> | null>(null);
   const [failed, setFailed] = useState(false);
+  // Номер последнего запроса. Ответ на ПРЕЖНЮЮ команду, пришедший после
+  // переключения, отбрасывается: иначе форма показывала клиента A при
+  // выбранном B, и «Сохранить» писало настройки A в B.
+  const seq = useRef(0);
+  const gone = useRef(onTeamGone);
+  gone.current = onTeamGone;
   const load = useCallback(() => {
+    const my = ++seq.current;
     setFailed(false);
     return api.get(`/api/automation/settings${teamQuery(team)}`)
-      .then((v) => setS(v))
-      .catch(() => setFailed(true));
+      .then((v) => { if (my === seq.current) setS(v); })
+      .catch((e) => {
+        if (my !== seq.current) return;
+        setFailed(true);
+        if (team && (e?.status === 403 || e?.status === 404)) gone.current?.();
+      });
   }, [team]);
   useEffect(() => { setS(null); load(); }, [load]);
   const set = (k: string, v: any) => setS((p) => ({ ...(p || {}), [k]: v }));
