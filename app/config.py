@@ -169,6 +169,30 @@ OLLAMA_URL = os.getenv("OLLAMA_URL", "http://host.docker.internal:11434")
 OLLAMA_MODEL = os.getenv("VTX_OLLAMA_MODEL", "qwen2.5:7b")
 OLLAMA_ENABLED = os.getenv("VTX_OLLAMA", "0") == "1"
 
+# --- Эмбеддинги памяти встреч (app/embeddings.py) --------------------------
+# Векторный поиск ПОВЕРХ полнотекста по кускам встреч: ловит переформулировки
+# («оплата» ↔ «деньги за сайт»), которых tsvector не видит. По умолчанию
+# ВЫКЛЮЧЕН: пусто — куски ищутся только полнотекстом, ровно как раньше, и
+# образ базы без pgvector ничего не замечает. yandex | gemini | ollama.
+EMBED_PROVIDER = os.getenv("VTX_EMBED_PROVIDER", "").strip().lower()
+# Модель: gemini — gemini-embedding-001, ollama — nomic-embed-text; у Yandex
+# модели две и фиксированные (text-search-doc / text-search-query), здесь не
+# используется.
+EMBED_MODEL = os.getenv("VTX_EMBED_MODEL", "").strip()
+
+
+def _embed_dim(raw: str) -> int:
+    """Размерность вектора. 0 — умолчание провайдера (yandex 256, gemini 768,
+    ollama — какую отдаст модель). Кривое значение — тоже 0, а не падение
+    всего приложения на импорте настроек."""
+    try:
+        return max(int((raw or "0").strip() or 0), 0)
+    except ValueError:
+        return 0
+
+
+EMBED_DIM = _embed_dim(os.getenv("VTX_EMBED_DIM", "0"))
+
 # Human-friendly labels shown in the UI provider picker.
 PROVIDER_LABELS = {
     # Любой поставщик по одному ключу: адрес, способ авторизации и список
