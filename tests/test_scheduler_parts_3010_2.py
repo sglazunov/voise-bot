@@ -339,6 +339,9 @@ class TestОдинRunНаКарточку:
                             lambda self, st, slot, manual=False: launched.append(st))
         st = _card()
         env.sched._states[KEY] = st
+        # Задача — в последнем опросе Weeek: иначе `run_now` откажет раньше,
+        # проверкой доски (ветка клиентов), и тест проверял бы не то.
+        env.sched._poll_ids["team"] = {"42"}
         t = threading.Thread(target=_REAL_RUN, args=(env.sched, st, _Slot(), True))
         t.start()
         try:

@@ -691,6 +691,20 @@ class JobStore:
         parts = [p for p in (rules, job.analysis_instructions) if (p or "").strip()]
         return "\n\n".join(parts)
 
+    def _stop_if_gone(self, job: Job) -> None:
+        """Отмена или удаление задачи — после последнего вызова модели.
+
+        Проверка отмены стояла только ПЕРЕД вызовом модели (второй раунд ревью
+        30.10): удаление аккаунта, пришедшее, пока модель отвечала, не мешало
+        `_remember_series` записать память серии под освободившимся логином
+        (`user_dir` создаёт папку заново — новый владелец логина получал чужие
+        итоги и решения как «ПРОШЛУЮ ВСТРЕЧУ»), а `_deliver_protocol` —
+        доставить протокол с настройками удалённой команды. Зовётся перед
+        памятью серии и перед доставкой (Word собирается секунды)."""
+        if job.id not in self._jobs or self._control.get(job.id, {}).get("cancel"):
+            from .analyze import AnalysisCancelled
+            raise AnalysisCancelled()
+
     def _remember_series(self, job: Job, result: dict | None) -> None:
         """Память серии: решения и задачи этой встречи станут справкой для
         следующей встречи с тем же названием. Не ломает задачу."""
@@ -819,6 +833,7 @@ class JobStore:
             from .docx_export import generate_report
 
             result = self._protocol_pass(job, txt, context, rerun=True)
+            self._stop_if_gone(job)
             result = self._enforce_participants(job, result)
             self._remember_series(job, result)
             job.analysis = result
@@ -838,6 +853,7 @@ class JobStore:
             )
             if prov not in job.docx_providers:
                 job.docx_providers.append(prov)
+            self._stop_if_gone(job)
             self._deliver_protocol(job, self.docx_path(job.id, prov))
             # finished_at MUST be restored: reanalyze() nulls it, and retention
             # ages a job by finished_at — leaving it None made the job count as
@@ -855,6 +871,8 @@ class JobStore:
                       analysis_error=_friendly_error(e))
         finally:
             self._reanalyze_lock.release()
+            if job.id not in self._jobs:
+                self._finalise_gone(job)   # Word, собранный после удаления
 
     # ---- re-run a failed/cancelled job from scratch ------------------------
     def retry(self, job_id: str) -> Job:
@@ -1045,24 +1063,17 @@ class JobStore:
             self._drop([job])
 
     def _drop(self, doomed: list) -> int:
-        """Остановить и удалить задачи. Порядок важен (адверсариальное ревью
-        30.10): сначала отмена, потом запись хранилища, и только после неё —
-        файлы. Хранилище не приняло запись — задачи возвращаются в память и
-        исключение уходит наверх: аккаунт не удаляется, повтор найдёт их снова
-        (иначе строки в базе пережили бы аккаунт навсегда)."""
+        """Остановить и удалить задачи. Порядок важен: запись хранилища, потом
+        отмена, и только после неё — файлы. Хранилище не приняло запись —
+        задачи возвращаются в память и исключение уходит наверх: аккаунт не
+        удаляется, повтор найдёт их снова (иначе строки в базе пережили бы
+        аккаунт навсегда). Отмена ставится только ПОСЛЕ удачной записи: раньше
+        она шла первой, и удаление, упавшее на записи, оставляло живой аккаунт
+        с отменёнными задачами (второй раунд ревью 30.10). Между записью и
+        отменой воркер задачи уже не найдёт её в `_jobs` — `_set` ничего не
+        пишет, а `_stop_if_gone` остановит сборку протокола."""
         if not doomed:
             return 0
-        for job in doomed:
-            # `_control` — словарь флагов, а не объект: прежний `ctl.cancel()`
-            # падал с AttributeError, ошибка глушилась, и задача доделывалась на
-            # ключах удалённой команды. Приостановленная крутилась вечно и при
-            # одном воркере останавливала распознавание ВСЕХ команд. Флаги
-            # ставятся в ТОТ ЖЕ словарь, что держит воркер, и словарь остаётся
-            # в _control: сборка протокола спрашивает отмену через него.
-            ctl = self._control.get(job.id)
-            if ctl is not None:
-                ctl["cancel"] = True
-                ctl["pause"] = False
         with self._lock:
             for job in doomed:
                 self._jobs.pop(job.id, None)
@@ -1074,6 +1085,17 @@ class JobStore:
                 for job in doomed:
                     self._jobs[job.id] = job
                 raise
+        for job in doomed:
+            # `_control` — словарь флагов, а не объект: прежний `ctl.cancel()`
+            # падал с AttributeError, ошибка глушилась, и задача доделывалась на
+            # ключах удалённой команды. Приостановленная крутилась вечно и при
+            # одном воркере останавливала распознавание ВСЕХ команд. Флаги
+            # ставятся в ТОТ ЖЕ словарь, что держит воркер, и словарь остаётся
+            # в _control: сборка протокола спрашивает отмену через него.
+            ctl = self._control.get(job.id)
+            if ctl is not None:
+                ctl["cancel"] = True
+                ctl["pause"] = False
         for job in doomed:
             self._delete_job_files(job)
             if db.enabled():
@@ -1516,6 +1538,7 @@ class JobStore:
 
                     analysis_result = self._protocol_pass(
                         job, analysis_input, analysis_context)
+                    self._stop_if_gone(job)
                     analysis_result = self._enforce_participants(job, analysis_result)
                     self._remember_series(job, analysis_result)
                     job.analysis = analysis_result
@@ -1535,6 +1558,7 @@ class JobStore:
                     )
                     if prov not in job.docx_providers:
                         job.docx_providers.append(prov)
+                    self._stop_if_gone(job)
                     # Optionally push the protocol to cloud + Weeek (best-effort).
                     self._deliver_protocol(job, self.docx_path(job.id, prov))
                 except AnalysisCancelled:

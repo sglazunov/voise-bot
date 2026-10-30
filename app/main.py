@@ -521,12 +521,14 @@ def auth_login(body: Credentials, request: Request):
     """Вход по логину и паролю; ставит cookie сессии."""
     ip = _client_ip(request)
     uname = security.normalize_username(body.username)
-    keys = (f"login:{ip}", f"login:{ip}:{uname}")
-    wait = security.throttle_check(*keys)
+    # Ключ по логину без IP: перебор пароля одного аккаунта с разных адресов.
+    # Попытка бронируется ДО хэша (`throttle_reserve`): параллельные запросы
+    # иначе проходили проверку разом (второй раунд ревью 30.10).
+    keys = (f"login:{ip}", f"login:{ip}:{uname}", f"login:user:{uname}")
+    wait, _stamp = security.throttle_reserve(*keys)
     if wait:
         raise HTTPException(429, f"Слишком много неудачных попыток. Подождите {wait} с.")
     if not security.verify_user(body.username, body.password):
-        security.throttle_fail(*keys)
         raise HTTPException(401, "Неверный логин или пароль.")
     security.throttle_clear(*keys)
     token = security.create_session(body.username)
@@ -845,19 +847,26 @@ def _pwd_keys(user: str, request: Request) -> tuple[str, str]:
     return (f"pwd:{user}", f"pwd:{_client_ip(request)}")
 
 
-def _pwd_throttle(keys: tuple[str, str]) -> None:
-    wait = security.throttle_check(*keys)
+def _pwd_throttle(keys: tuple[str, str]) -> float:
+    """Забронировать попытку ДО проверки пароля (`throttle_reserve`) и вернуть
+    метку брони — её отдают в `_pwd_outcome`. Раньше лимит проверялся до
+    медленного хэша, а неудача записывалась после: параллельные запросы
+    проходили все разом."""
+    wait, stamp = security.throttle_reserve(*keys)
     if wait:
         raise HTTPException(429, f"Слишком много неудачных попыток. Подождите {wait} с.")
+    return stamp
 
 
-def _pwd_outcome(keys: tuple[str, str], res: dict) -> None:
-    """Учесть исход проверки пароля; неудача — 400 с текстом ошибки."""
+def _pwd_outcome(keys: tuple[str, str], stamp: float, res: dict) -> None:
+    """Учесть исход проверки пароля; неудача — 400 с текстом ошибки.
+    Неверный пароль остаётся в счёте (бронь не снимается), ошибка не про
+    пароль (кривой номер, запрет удаления) бронь возвращает."""
     if res.get("ok"):
         security.throttle_clear(*keys)
         return
-    if res.get("bad_password"):
-        security.throttle_fail(*keys)
+    if not res.get("bad_password"):
+        security.throttle_release(stamp, *keys)
     raise HTTPException(400, res.get("error"))
 
 
@@ -866,8 +875,8 @@ def profile_change_phone(body: PhoneChange, request: Request,
                          user: str = Depends(current_user)):
     """Change the recovery phone; requires the CURRENT password."""
     keys = _pwd_keys(user, request)
-    _pwd_throttle(keys)
-    _pwd_outcome(keys, security.set_phone(user, body.password, body.phone))
+    stamp = _pwd_throttle(keys)
+    _pwd_outcome(keys, stamp, security.set_phone(user, body.password, body.phone))
     return {"ok": True, "phone_masked": security.masked_phone(user)}
 
 
@@ -886,8 +895,8 @@ def profile_telegram_link(body: TelegramLink, request: Request,
         raise HTTPException(400, "Telegram-бот на сервере не настроен "
                                  "(VTX_TELEGRAM_BOT_TOKEN).")
     keys = _pwd_keys(user, request)
-    _pwd_throttle(keys)
-    _pwd_outcome(keys, {"ok": True} if security.verify_user(user, body.password)
+    stamp = _pwd_throttle(keys)
+    _pwd_outcome(keys, stamp, {"ok": True} if security.verify_user(user, body.password)
                  else {"ok": False, "error": "Текущий пароль неверный.",
                        "bad_password": True})
     code = telegram.new_link_code(user)
@@ -899,8 +908,8 @@ def profile_telegram_link(body: TelegramLink, request: Request,
 def profile_telegram_unlink(body: TelegramLink, request: Request,
                             user: str = Depends(current_user)):
     keys = _pwd_keys(user, request)
-    _pwd_throttle(keys)
-    _pwd_outcome(keys, security.clear_telegram(user, body.password))
+    stamp = _pwd_throttle(keys)
+    _pwd_outcome(keys, stamp, security.clear_telegram(user, body.password))
     return {"ok": True}
 
 
@@ -926,7 +935,8 @@ def profile_change_password(body: PasswordChange, request: Request,
                                    phone=body.phone or None,
                                    code=body.code or None)
     if not res.get("ok"):
-        security.throttle_fail(*keys)
+        # Попытка уже учтена бронью: здесь неудачей считается любая ошибка
+        # (неверный пароль, неверный код из SMS) — как и до брони.
         raise HTTPException(400, res.get("error"))
     security.throttle_clear(*keys)
     security.destroy_user_sessions(user)
@@ -951,28 +961,47 @@ def profile_delete(body: AccountDelete, request: Request,
     не под логином в users/, а в общем хранилище, ключом по команде (= логин
     владельца) — без этого логин освобождался вместе с чужими протоколами
     (P0-2). Сбой удаления задач — 500, аккаунт остаётся."""
+    from .automation.recorder import browser
     from .automation.scheduler import scheduler
     keys = _pwd_keys(user, request)
-    _pwd_throttle(keys)
+    stamp = _pwd_throttle(keys)
+    # Что забыл ИМЕННО этот запрос (второй раунд ревью 30.10): неудачный
+    # запрос (неверный пароль, вторая вкладка), пересёкшийся с удачным,
+    # раньше звал forget_done(restore=True) и возвращал карточки удаляемой
+    # команды — прерванная запись потом создавала задачу под освободившимся
+    # логином. Теперь возвращается только то, что забрал этот запрос.
+    forgotten: list = []
 
     def purge(login: str) -> None:
-        scheduler.forget_team(login)
+        # ⚠️ Порядок: forget_team ДО delete_owner — иначе поток записи
+        # успевает создать задачу между ними.
+        forgotten.append((login, scheduler.forget_team(login)))
+        browser.login_close(login)      # окно «Войти в Яндекс» этой команды
         store.delete_owner(login)
 
-    restore = True
+    ok = False
     try:
         res = security.delete_account(user, body.password, before_release=purge)
-        restore = not res.get("ok")
+        ok = bool(res.get("ok"))
     except Exception:  # noqa: BLE001
         log.error("Данные аккаунта %s не удалены — аккаунт оставлен", user,
                   exc_info=True)
+        security.throttle_release(stamp, *keys)
         raise HTTPException(500, "Не удалось удалить данные аккаунта. Аккаунт НЕ "
                                  "удалён — повторите позже.")
     finally:
         # Аккаунт остался — его карточки встреч возвращаются (идущая запись
         # уже остановлена, но сохраняется и обрабатывается как обычно).
-        scheduler.forget_done(user, restore=restore)
-    _pwd_outcome(keys, res)
+        for login, token in forgotten:
+            scheduler.forget_done(login, token, restore=not ok)
+    if ok:
+        # Окно входа, открытое параллельным запросом во время очистки, и коды
+        # привязки Telegram: перерегистрация логина за 10 минут + «/start
+        # <код>» привязывала чат прежнего владельца к новому аккаунту, а
+        # /recover сбрасывал его пароль.
+        browser.login_close(user)
+        telegram.drop_link_codes(user)
+    _pwd_outcome(keys, stamp, res)
     security.destroy_session(request.cookies.get(security.SESSION_COOKIE))
     resp = JSONResponse({"ok": True, "detail": "Аккаунт удалён."})
     resp.delete_cookie(security.SESSION_COOKIE)
@@ -1090,7 +1119,19 @@ async def create_job(
                        deliver_weeek_task=deliver_weeek_task,
                        context_hint=context_hint, model=model_sel,
                        user_notes=user_notes, preset=preset, owner=user)
+    # Сессия проверена один раз, в _auth_gate, а загрузка идёт минутами: за
+    # это время аккаунт могли удалить (второй раунд ревью 30.10). Проверка —
+    # ПОСЛЕ создания задачи: удаление, начавшееся раньше, уже видно по
+    # `deletion_in_progress` (его delete_owner мог пройти до create), а
+    # закончившееся — по отсутствию логина.
+    if not await run_in_threadpool(_account_alive, user):
+        store.discard(job.id)
+        raise HTTPException(401, "Аккаунт удалён.")
     return JSONResponse({"job_id": job.id, **job.to_public()}, status_code=201)
+
+
+def _account_alive(user: str) -> bool:
+    return security.user_exists(user) and not security.deletion_in_progress(user)
 
 
 @app.get("/api/jobs")
