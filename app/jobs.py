@@ -1776,18 +1776,22 @@ def media_sidecars(path: str) -> list[Path]:
     без .mp4 (wav для разметки, скриншот и HTML неудачного входа). Раньше
     каждое место удаления держало свой неполный перечень, и файл живой
     расшифровки переживал запись: повторный заход по тому же пути подхватывал
-    чужие сегменты."""
+    чужие сегменты.
+
+    HTML чата (`<запись>.chat.html`, `.chat.frameN.html`) сюда НЕ входит:
+    02.11 бот вышел только по второму «стоп», а дамп чата, по которому это
+    разбирается, удалился вместе с записью, как только она уехала в облако.
+    Его убирает общая уборка записей (`sweep_recordings`, 2 суток)."""
     src = Path(path)
     out = [Path(f"{src}{suf}") for suf in
            (".ffmpeg.log", ".live.json", ".live.json.tmp", ".live.wav", ".tail.wav")]
     out += [src.with_suffix(suf) for suf in
-            (".16k.wav", ".join-failed.png", ".join-failed.html", ".chat.html")]
+            (".16k.wav", ".join-failed.png", ".join-failed.html")]
     try:
         # Имя записи — из названия встречи: «[CRM] …» без экранирования стало
         # бы классом символов glob — свой HTML не находился, чужой находился.
         base = glob.escape(src.with_suffix("").name)
         out += sorted(src.parent.glob(base + ".join-failed.frame*.html"))
-        out += sorted(src.parent.glob(base + ".chat.frame*.html"))
     except OSError:
         pass
     return out

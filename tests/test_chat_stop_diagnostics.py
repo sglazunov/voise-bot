@@ -75,14 +75,27 @@ def test_html_чата_не_пишется_без_стоп_слова(_armed, tm
     assert not hasattr(_Bot.made[-1], "dumped")
 
 
-def test_дамп_чата_в_списке_побочных_файлов(tmp_path):
+def test_дамп_чата_переживает_удаление_записи(tmp_path):
+    """02.11: дамп чата удалялся вместе с записью, как только она уезжала в
+    облако, — разбирать «бот вышел только по второму стоп» было не по чему.
+    Теперь его убирает только общая уборка через двое суток."""
     rec = tmp_path / "30.10.2026, 11-00. - Планёрка.mp4"
-    for name in ("30.10.2026, 11-00. - Планёрка.chat.html",
-                 "30.10.2026, 11-00. - Планёрка.chat.frame1.html"):
+    rec.write_bytes(b"x")
+    dumps = ("30.10.2026, 11-00. - Планёрка.chat.html",
+             "30.10.2026, 11-00. - Планёрка.chat.frame1.html")
+    for name in dumps:
         (tmp_path / name).write_text("x")
     names = {p.name for p in jobs.media_sidecars(str(rec))}
-    assert "30.10.2026, 11-00. - Планёрка.chat.html" in names
-    assert "30.10.2026, 11-00. - Планёрка.chat.frame1.html" in names
+    assert not names & set(dumps)
+    jobs.drop_sidecars(str(rec), with_media=True)
+    assert sorted(p.name for p in tmp_path.iterdir()) == sorted(dumps)
+
+
+def test_уборка_относит_дамп_чата_к_записи():
+    from pathlib import PurePosixPath
+    from app.automation.scheduler import Scheduler
+    for name in ("X.chat.html", "X.chat.frame2.html"):
+        assert Scheduler._recording_base(PurePosixPath("/r") / name) == "/r/X.mp4"
 
 
 # --- Адверсариальное ревью 30.10 (§4, §7) ------------------------------------
@@ -90,18 +103,15 @@ def test_побочные_файлы_записи_с_квадратными_ск
     """«[CRM] …» — в glob это класс символов: HTML фреймов (с превью чужих
     чатов) не находился и не удалялся."""
     rec = tmp_path / "30.10.2026, 11-00. - [CRM] Планёрка.mp4"
-    for name in ("30.10.2026, 11-00. - [CRM] Планёрка.chat.frame1.html",
-                 "30.10.2026, 11-00. - [CRM] Планёрка.join-failed.frame2.html"):
-        (tmp_path / name).write_text("x")
+    (tmp_path / "30.10.2026, 11-00. - [CRM] Планёрка.join-failed.frame2.html").write_text("x")
     # Чужая запись, которую класс символов «[CRM]» как раз и поймал бы.
-    (tmp_path / "30.10.2026, 11-00. - C Планёрка.chat.frame1.html").write_text("x")
+    (tmp_path / "30.10.2026, 11-00. - C Планёрка.join-failed.frame2.html").write_text("x")
     names = {p.name for p in jobs.media_sidecars(str(rec))}
-    assert "30.10.2026, 11-00. - [CRM] Планёрка.chat.frame1.html" in names
     assert "30.10.2026, 11-00. - [CRM] Планёрка.join-failed.frame2.html" in names
-    assert "30.10.2026, 11-00. - C Планёрка.chat.frame1.html" not in names
+    assert "30.10.2026, 11-00. - C Планёрка.join-failed.frame2.html" not in names
     jobs.drop_sidecars(str(rec))
     assert sorted(p.name for p in tmp_path.iterdir()) == [
-        "30.10.2026, 11-00. - C Планёрка.chat.frame1.html"]
+        "30.10.2026, 11-00. - C Планёрка.join-failed.frame2.html"]
 
 
 def test_html_чата_сохраняется_до_выхода_из_звонка(_armed, tmp_path):

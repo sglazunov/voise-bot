@@ -438,7 +438,7 @@ class Scheduler:
     _SIDECAR_RE = re.compile(
         r"^(?P<stem>.+?)(?P<mp4>\.mp4)?"
         r"(?:\.ffmpeg\.log|\.live\.json(?:\.tmp)?|\.live\.wav|\.tail\.wav|\.16k\.wav"
-        r"|\.join-failed(?:\.frame\d+)?\.(?:png|html))$")
+        r"|\.join-failed(?:\.frame\d+)?\.(?:png|html)|\.chat(?:\.frame\d+)?\.html)$")
 
     def sweep_recordings(self, days: float | None = None, now: float | None = None) -> dict:
         """Удалить записи встреч старше `days` суток (config.RECORDING_RETENTION_DAYS).

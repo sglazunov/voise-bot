@@ -1889,7 +1889,8 @@ class TelemostBot:
         fired = False
         for fkey, scope, lines, _, time_after, flines in plan:
             if self._frame_chat_stop(fkey, scope, lines, word, time_after,
-                                     since_min, cur_min, flines=flines):
+                                     since_min, cur_min, flines=flines,
+                                     pinned=pinned):
                 fired = True
         self._chat_reads = getattr(self, "_chat_reads", 0) + 1
         return fired
@@ -2031,9 +2032,30 @@ class TelemostBot:
                 out.update(range(j1, j2))
         return out
 
+    def _note_untimed(self, fkey: str, lines: list[str], events, time_after: bool) -> None:
+        """Под разделом дня у «стоп» не нашлось времени — записать в журнал
+        карточки соседние строки, один раз на фрейм. 02.11 причину пришлось
+        угадывать: вёрстку чата видно только на сервере, а журнал карточки
+        приходит скриншотом."""
+        untimed = [i for i, _, t in events if t is None]
+        if not untimed:
+            return
+        noted = getattr(self, "_chat_untimed_noted", None)
+        if noted is None:
+            noted = self._chat_untimed_noted = set()
+        if fkey in noted:
+            return
+        noted.add(fkey)
+        i = untimed[0]
+        near = [lines[j].strip()[:40] for j in (i - 1, i + 1) if 0 <= j < len(lines)]
+        side = "после текста" if time_after else "перед текстом"
+        self._on_log("Чат: у команды под разделом дня время сообщения не нашёл "
+                     f"(ищу {side}; строки рядом: «{'» / «'.join(near)}»).")
+
     def _frame_chat_stop(self, fkey: str, scope: str, lines: list[str],
                          word: str, time_after: bool, since_min: int,
-                         cur_min: int, flines: list[str] | None = None) -> bool:
+                         cur_min: int, flines: list[str] | None = None,
+                         pinned: bool = False) -> bool:
         """Новая команда в одном фрейме. `lines` — область счёта (`scope`),
         `flines` — весь текст фрейма (область «today» — его хвост).
 
@@ -2047,7 +2069,12 @@ class TelemostBot:
           ДОПИСАНА НИЖЕ прежнего окна того же фрейма (`_appended`), и прошлое
           чтение было в той же области: смена области (заголовок дня
           появился или ушёл) — это другое окно, сравнивать не с чем;
-        - область «all» с видимой датой (не сегодня) — команды нет вовсе."""
+        - область «all» с видимой датой (не сегодня) — команды нет вовсе;
+        - день был пуст при входе (02.11): список доказанно у самого низа
+          (`pinned`), а последний разделитель — прошлая дата. Значит, за
+          сегодня в чате ничего не было, и всё, что потом встанет под
+          разделом текущего дня, написано при боте: «стоп» там — команда и
+          без читаемого времени, и со временем в чужом поясе."""
         if flines is None:
             flines = lines
         off = len(flines) - len(lines)
@@ -2075,12 +2102,32 @@ class TelemostBot:
                 # одни «стоп», и раздел появляется вместе с командой).
                 self._on_log("Чат: появился раздел текущего дня — "
                              f"команду «{word}» жду под ним.")
+        empty_day = getattr(self, "_chat_empty_day", None)
+        if empty_day is None:
+            empty_day = self._chat_empty_day = set()
         if scope == "all" and self._day_headers(lines, time_after, word):
             # Адверсариальное ревью 30.10: в окне есть дата, и это не сегодня —
             # значит, всё видимое не новее этой прошлой даты (строки над ней
             # ещё старше). Командой тут быть нечему.
+            # …а раз окно у самого низа, сегодняшних сообщений в чате пока нет
+            # вовсе — доказательство для правила «день был пуст». Строка
+            # «Сегодня» в окне, даже не признанная разделителем, его отменяет:
+            # ошибка разбора вёрстки не должна делать утро комнаты «пустым».
+            markers = self._today_markers((getattr(self, "_clock", None) or time.time)())
+            if pinned and not any(ln.strip().lower().rstrip(".") in markers
+                                  for ln in flines):
+                empty_day.add(fkey)
             return False
+        if scope == "today" and fkey in empty_day and events:
+            # 02.11: первое «стоп» пришло вместе с разделом «Сегодня», время
+            # не прочиталось, строка совпала с историей — бот вышел только по
+            # второму. Раздел дня появился после доказанно пустого дня: всё
+            # под ним — сообщения этой встречи.
+            self._on_log(f"Чат: «{word}» под разделом текущего дня, а при входе "
+                         "бота сегодняшних сообщений не было — останавливаю запись.")
+            return True
         if scope == "today":
+            self._note_untimed(fkey, lines, events, time_after)
             # Под разделом дня время, если оно есть, решает всё: утреннее
             # «стоп 10:20», подгруженное прокруткой, — история той же комнаты;
             # «стоп 11:18» сегодня после входа — команда, даже если 23.10 было
