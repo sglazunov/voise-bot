@@ -1465,7 +1465,8 @@ class JobStore:
                     if speaker_id.is_video(job.audio_path):
                         segments = speaker_id.identify_speakers(
                             job.audio_path, segments,
-                            should_stop=lambda: bool(ctrl.get("cancel")))
+                            should_stop=lambda: bool(ctrl.get("cancel")),
+                            known=list(job.video_participants or []))
                         named = {s.speaker for s in segments if s.speaker}
                         if named:
                             n_speakers = len(named)

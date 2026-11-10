@@ -83,15 +83,64 @@ def readiness() -> dict:
 
 
 # ---- frame sampling --------------------------------------------------------
-def _sample_frames(path: str, every_sec: float, max_frames: int):
+def _pick_by_time(frames, step: float, max_frames: int):
+    """Из потока (время, кадр) по порядку — первый кадр не раньше 0, step,
+    2·step… Время выборки — время САМОГО кадра: при дыре в потоке подпись не
+    уезжает на её длину. Кадры без времени пропускаются."""
+    next_t = 0.0
+    count = 0
+    for t, frame in frames:
+        if t is None or t + 1e-6 < next_t:
+            continue
+        yield t, frame
+        count += 1
+        if count >= max_frames:
+            return
+        while next_t <= t + 1e-6:
+            next_t += step
+
+
+def _sample_frames(path: str, every_sec: float, max_frames: int, exact: bool = False):
     """Yield (timestamp_sec, rgb ndarray HxWx3, PIL.Image) sampled ~every_sec.
 
-    Unlike screen_ocr we do NOT restrict to keyframes: who-is-speaking changes
-    faster than slides, so we want a real frame near each sampled instant."""
+    `exact=True` — для разметки «кто говорит»: поток декодируется ПОДРЯД, и
+    берётся кадр ровно в нужный момент. ⚠️ Перемотка (`seek(backward=True)` +
+    первый кадр) отдаёт КЛЮЧЕВОЙ кадр до цели, а рекордер пишет 10 кадров/с с
+    ключевым раз в 250 кадров — 25 секунд. Так и было до 10.11: все выборки
+    внутри 25 секунд видели один кадр, и реплика доставалась тому, кто говорил
+    на ключевом кадре (метки боевого протокола совпали с такой симуляцией в
+    479 фрагментах из 484). Перемотка оставлена редким проходам (участники,
+    имена для Whisper) — им точная секунда не нужна, а декодировать ради
+    восьми кадров весь час дорого."""
     import av
     import numpy as np
 
     container = av.open(path)
+    if exact:
+        try:
+            stream = container.streams.video[0]
+        except (IndexError, KeyError):
+            container.close()
+            return
+        duration = float(container.duration or 0) / 1_000_000.0
+        if stream.duration and stream.time_base:
+            duration = float(stream.duration * stream.time_base)
+        step = every_sec
+        if duration and max_frames > 0:
+            step = max(every_sec, duration / max_frames)
+        try:
+            stream.thread_type = "AUTO"     # декодер в несколько потоков
+        except Exception:
+            pass
+        try:
+            frames = ((f.time, f) for f in container.decode(stream))
+            for t, frame in _pick_by_time(frames, step, max_frames):
+                yield float(t), frame.to_ndarray(format="rgb24"), frame.to_image()
+        except Exception:
+            pass                            # битый хвост — размечаем, что успели
+        finally:
+            container.close()
+        return
     try:
         stream = container.streams.video[0]
     except (IndexError, KeyError):
@@ -228,25 +277,33 @@ def _active_bbox(arr) -> Optional[Tuple[int, int, int, int]]:
     достаточно крупного: плитка человека занимает заметную площадь, а строка
     меню тонкая.
     """
+    cands = _active_candidates(arr)
+    if not cands:
+        return None
+    return max(cands, key=lambda b: (b[1] - b[0]) * (b[3] - b[2]))
+
+
+def _active_candidates(arr) -> List[Tuple[int, int, int, int]]:
+    """Все рамки-кандидаты в той области, где ищется говорящий (см.
+    `_active_bbox`): в верхней полосе, если там есть хоть одна, иначе
+    достаточно крупные по всему кадру. Больше одной — рамка горит у
+    нескольких сразу (говорят одновременно или у кого-то шумит микрофон)."""
     H, W = arr.shape[:2]
     mask = _green_mask(arr)
     if mask.sum() < 200:  # basically no green — no active highlight
-        return None
+        return []
     strip_bottom = H * _TOP_STRIP
     min_area = H * W * _MIN_TILE_AREA
-    top_best, top_area = None, 0
-    any_best, any_area = None, 0
+    top, big = [], []
     for bbox in _green_components(mask):
         if not _is_border_rect(mask, bbox, H, W):
             continue
         area = (bbox[1] - bbox[0]) * (bbox[3] - bbox[2])
-        if bbox[0] < strip_bottom and area > top_area:
-            top_best, top_area = bbox, area
-        if area > any_area:
-            any_best, any_area = bbox, area
-    if top_best is not None:
-        return top_best
-    return any_best if any_area >= min_area else None
+        if bbox[0] < strip_bottom:
+            top.append(bbox)
+        if area >= min_area:
+            big.append(bbox)
+    return top or big
 
 
 def _clean_line(line: str) -> str:
@@ -451,8 +508,34 @@ def _merge_short_names(names: List[str]) -> List[str]:
     return [n for n in names if n in out]
 
 
+def _against_known(canon: dict, reads: dict, known: List[str]) -> dict:
+    """Сверка прочитанных подписей с участниками звонка.
+
+    Похожая на участника — сводится к его написанию («Мельников Алексеи» →
+    «Мельников Алексей»). Не похожая ни на кого и прочитанная OCR лишь
+    однажды — мусор: дальше это «имя» держалось бы, пока плитка горит (OCR
+    повторяется только при смене плитки), и в боевом протоколе «Geno» так
+    получил 24 фрагмента. Прочитанная многократно остаётся: это может быть
+    человек, которого не поймал `scan_participants` (подключился ненадолго).
+    """
+    known_keys = {names.key(k) for k in known if names.key(k)}
+    total: dict = {}
+    for raw, rep in canon.items():
+        total[rep] = total.get(rep, 0) + reads.get(raw, 0)
+    out: dict = {}
+    for raw, rep in canon.items():
+        fixed = names.canonical(rep, known)
+        if names.key(fixed) in known_keys:
+            out[raw] = fixed
+        elif total.get(rep, 0) >= 2:
+            out[raw] = rep
+        else:
+            out[raw] = None
+    return out
+
+
 def identify_speakers(video_path: str, segments: List[Segment],
-                      should_stop=None) -> List[Segment]:
+                      should_stop=None, known: Optional[List[str]] = None) -> List[Segment]:
     """Detect the active speaker per moment from the video and label each
     transcript segment in place with the speaker's name. Returns `segments`.
 
@@ -461,26 +544,39 @@ def identify_speakers(video_path: str, segments: List[Segment],
 
     `should_stop` проверяется между кадрами: проход по часовому видео идёт
     десятки минут, и без него кнопка «Стоп» не действовала — отмена ловилась
-    только между фрагментами распознавания, а этот этап идёт уже после него."""
+    только между фрагментами распознавания, а этот этап идёт уже после него.
+
+    Рамка у нескольких сразу — момент без имени: какую плитку ни взять,
+    это угадывание (03.11 код брал найденную первой — всегда одного и того
+    же человека). `known` — участники звонка (`scan_participants`): подпись
+    сводится к их написанию, а прочитанная лишь однажды и ни на кого не
+    похожая («Geno», «Beano» в боевом протоколе) отбрасывается."""
     # 1) Sample frames → per-frame (time, name-or-None). Only OCR when the
     #    active tile moves (speaker likely changed), to keep it fast.
     timeline: List[Tuple[float, Optional[str]]] = []
+    reads: dict = {}                 # имя → сколько раз прочитано OCR заново
     prev_center: Optional[Tuple[float, float]] = None
     prev_name: Optional[str] = None
-    for t, arr, img in _sample_frames(video_path, _SAMPLE_SEC, _MAX_FRAMES):
+    for t, arr, img in _sample_frames(video_path, _SAMPLE_SEC, _MAX_FRAMES, exact=True):
         if should_stop and should_stop():
             break                    # размечаем тем, что успели собрать
-        bbox = _active_bbox(arr)
-        if bbox is None:
+        cands = _active_candidates(arr)
+        if len(cands) != 1:
             timeline.append((t, None))
             prev_center, prev_name = None, None
             continue
+        bbox = cands[0]
         r0, r1, c0, c1 = bbox
         center = ((r0 + r1) / 2.0, (c0 + c1) / 2.0)
         same_tile = (prev_center is not None and prev_name
                      and abs(center[0] - prev_center[0]) < 0.04 * arr.shape[0]
                      and abs(center[1] - prev_center[1]) < 0.04 * arr.shape[1])
-        name = prev_name if same_tile else _read_name(img, bbox)
+        if same_tile:
+            name = prev_name
+        else:
+            name = _read_name(img, bbox)
+            if name:
+                reads[name] = reads.get(name, 0) + 1
         timeline.append((t, name or None))
         prev_center, prev_name = center, (name or None)
 
@@ -490,6 +586,8 @@ def identify_speakers(video_path: str, segments: List[Segment],
 
     # 2) Canonicalise spellings and compress into (start, end, name) intervals.
     canon = _canonicalise(detected)
+    if known:
+        canon = _against_known(canon, reads, known)
     intervals: List[Tuple[float, float, str]] = []
     for i, (t, name) in enumerate(timeline):
         cname = canon.get(name) if name else None
