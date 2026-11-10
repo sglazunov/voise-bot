@@ -79,8 +79,15 @@ case "$1" in
           [ -n "${COUNT_SQL_ERROR:-}" ] && sql_error 'relation "jobs" does not exist'
           if [ -f "$STATE/built" ] && [ -n "${BUSY_AFTER_BUILD:-}" ]; then echo 1
           else echo "${BUSY_JOBS:-0}"; fi ;;
+        *REINDEX*)
+          [ -z "${REINDEX_FAIL:-}" ] || sql_error 'could not create unique index "users_pkey"'
+          # Как настоящий Postgres (dbcommands.c): у базы с musl версия
+          # пустая, и REFRESH из пустой в заполненную отказывает. Так упала
+          # боевая раскатка 10.11 — заглушка этого не умела.
+          case "$sql" in *"REFRESH COLLATION VERSION"*)
+            [ "${COLL:-ok}" = reindex ] && sql_error 'invalid collation version change' ;;
+          esac ;;
         *datcollversion*) echo "${COLL:-ok}" ;;
-        *REINDEX*) [ -z "${REINDEX_FAIL:-}" ] || sql_error 'could not create unique index "users_pkey"' ;;
       esac
       exit 0
     fi
@@ -390,8 +397,20 @@ class TestСменаОбразаБазы:
         r = run_update(COLL="reindex")
         assert r.rc == 0, r.out
         calls = r.calls
-        assert "REINDEX DATABASE" in calls and "REFRESH COLLATION VERSION" in calls
+        assert "REINDEX DATABASE" in calls
         assert calls.index("REINDEX DATABASE") < calls.index("compose up -d app")
+
+    def test_версия_сортировки_записывается_без_refresh(self, run_update):
+        """10.11 на бою: REINDEX прошёл, а `ALTER DATABASE … REFRESH
+        COLLATION VERSION` ответил «invalid collation version change» —
+        Postgres не переводит версию из пустой в заполненную. Раскатка
+        остановилась, а повтор упал бы так же: версия так и оставалась
+        пустой. Версия пишется прямо в pg_database."""
+        r = run_update(COLL="reindex")
+        assert r.rc == 0, r.out
+        assert "REFRESH COLLATION VERSION" not in r.calls
+        assert "set datcollversion = pg_database_collation_actual_version" in r.calls
+        assert "Индексы перестроены" in r.out
 
     def test_без_смены__reindex_нет(self, run_update):
         r = run_update(COLL="ok")

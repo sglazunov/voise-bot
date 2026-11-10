@@ -3422,8 +3422,15 @@ before_release=purge)`): проверки (пароль, участники, о�
   на glibc неверны (поиск по ключу может не найти строку). `update.sh` теперь
   поднимает db раньше app (`up -d --wait db`), видит musl-том по пустому
   `datcollversion` при непустой `pg_database_collation_actual_version` и
-  делает `REINDEX DATABASE` + `ALTER DATABASE … REFRESH COLLATION VERSION`
-  до запуска приложения. ⚠️ Ручной `docker compose up -d --build` этого НЕ
+  делает `REINDEX DATABASE` + запись версии до запуска приложения.
+  ⚠️ **Версия пишется `update pg_database set datcollversion = …`, НЕ
+  `ALTER DATABASE … REFRESH COLLATION VERSION`**: Postgres не переводит её
+  из пустой в заполненную («invalid collation version change»). На этом
+  упала первая боевая раскатка 10.11 — REINDEX прошёл, приложение не
+  перезапустилось, а повтор упал бы так же. Шим psql в тестах теперь
+  отвечает этой ошибкой; сам SQL проверен на живом postgres:17 (обнулённая
+  версия → старый путь rc=3, новый проходит, проверка отвечает `ok`).
+  ⚠️ Ручной `docker compose up -d --build` этого НЕ
   делает — первое обновление после смены образа только скриптом. В CI сервис
   Postgres тоже переведён на `pgvector/pgvector:pg16`.
 - **Тесты:** `tests/test_update_sh.py` (25: `bash -n`, шимы `docker`/`git`/

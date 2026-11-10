@@ -216,6 +216,12 @@ check_db_login() {
 # может не найти строку, уникальность — пропустить дубль. Признак: база не
 # записала версию правил сортировки (на musl её нет), а glibc её отдаёт.
 # Лечение — REINDEX и запись текущей версии; на нашей базе это секунды.
+# ⚠️ Версию пишем прямо в pg_database, а НЕ `ALTER DATABASE … REFRESH
+# COLLATION VERSION`: Postgres отказывается переводить её из пустой в
+# заполненную («invalid collation version change») — ровно наш случай. Так
+# остановилась боевая раскатка 10.11 (REINDEX к тому моменту уже прошёл).
+# Владелец базы в образе postgres — суперпользователь, правка каталога ему
+# доступна.
 reindex_if_collation_changed() {
   local state
   if [ "$(db_mode)" = external ]; then
@@ -235,7 +241,8 @@ reindex_if_collation_changed() {
   echo "==> База создана на musl (alpine), теперь glibc — перестраиваю индексы…"
   if ! printf '%s\n' 'select current_database() as db \gset' \
       'REINDEX DATABASE :"db";' \
-      'ALTER DATABASE :"db" REFRESH COLLATION VERSION;' | db_sql; then
+      'update pg_database set datcollversion = pg_database_collation_actual_version(oid) where datname = current_database();' \
+      | db_sql; then
     echo "!!  REINDEX не прошёл — приложение НЕ перезапускаю (работает старое)."
     echo "    Повторите: bash scripts/update.sh, при повторе — смотрите logs db."
     exit 1
